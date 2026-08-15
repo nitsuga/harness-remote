@@ -3000,6 +3000,9 @@ function App() {
     if (isSessionMutationLocked()) return
     const lease = acquireMutation("model")
     if (!lease) return
+    // A manual choice wins over a catalog request that was already in flight. The request's
+    // response may still be useful for a later refresh, but it must not restore its old selection.
+    loadModelsRequestRef.current += 1
     setSelectedModelKey(nextKey)
     writeStoredModel(config.backend, selectedSession?.id, nextKey)
     releaseMutation(lease)
@@ -3009,6 +3012,9 @@ function App() {
     if (isSessionMutationLocked()) return
     const lease = acquireMutation("agent")
     if (!lease) return
+    // Do not let an older agent catalog completion apply its saved/default choice after an explicit
+    // user selection.
+    loadAgentsRequestRef.current += 1
     setSelectedAgentID(nextAgentID)
     localStorage.setItem(AGENT_STORAGE_KEY, nextAgentID)
     releaseMutation(lease)
@@ -3707,6 +3713,9 @@ function App() {
       if (selectedID === sessionID) {
         // Remove the row and invalidate navigation before any refresh can reintroduce it.
         replaceMutationContext(null)
+        // Context replacement resets transient session state, including the tombstone set. Keep
+        // this deletion tombstoned for the eventual-consistency refresh below (and the next poll).
+        removedSessionIDsRef.current.add(sessionID)
         setSessions((current) => current.filter((item) => item.id !== sessionID))
         setSelectedID(null)
         setMessages([])
@@ -5131,8 +5140,9 @@ function App() {
             onLeaseChanged={() => bumpMutationLock((value) => value + 1)}
           />
           <SessionComposer
-             selected={Boolean(selectedSession) && sessionActionPending !== "fork"}
-             mutationLocked={mutationLocked}
+            selected={Boolean(selectedSession) && sessionActionPending !== "fork"}
+            attachmentContextKey={`${activeProfileID}|${configKey(config)}|${selectedID ?? ""}`}
+            mutationLocked={mutationLocked}
             value={composer}
             attachments={attachments}
             supportsAttachments={capabilities.attachments}

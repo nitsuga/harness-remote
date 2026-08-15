@@ -1,4 +1,4 @@
-import type { RefObject } from "react"
+import { useRef, type RefObject } from "react"
 import { ATTACHMENT_MAX_COUNT, fileToAttachment, type AttachmentPart } from "../attachments"
 import { CloseIcon, PaperclipIcon, SendIcon, StopCircleIcon } from "../Icons"
 import type { Translator } from "../i18n"
@@ -7,6 +7,7 @@ import type { Translator } from "../i18n"
  * presentation, while session state and network operations stay with the coordinator. */
 export function SessionComposer({
   selected,
+  attachmentContextKey,
   value,
   attachments,
   supportsAttachments,
@@ -25,6 +26,8 @@ export function SessionComposer({
   onAbort
 }: {
   selected: boolean
+  /** Changes whenever the composer belongs to a different session/profile/config. */
+  attachmentContextKey: string
   value: string
   attachments: AttachmentPart[]
   supportsAttachments: boolean
@@ -42,6 +45,18 @@ export function SessionComposer({
   onSend: () => void
   onAbort: () => void
 }) {
+  // File decoding is asynchronous. In particular, a large image can finish after the user has
+  // navigated away, at which point appending it would stage it in the replacement session.
+  const attachmentRequestState = useRef({ contextKey: attachmentContextKey, generation: 0 })
+  // Do this during render, rather than in an effect: a completed decode must not slip between the
+  // replacement render and the effect that records the new context.
+  if (attachmentRequestState.current.contextKey !== attachmentContextKey) {
+    attachmentRequestState.current = {
+      contextKey: attachmentContextKey,
+      generation: attachmentRequestState.current.generation + 1
+    }
+  }
+
   return (
     <div className="composer" ref={composerRef}>
       {attachments.length > 0 && <div className="composer-chips">
@@ -77,8 +92,10 @@ export function SessionComposer({
             const chosen = Array.from(event.target.files ?? []).slice(0, ATTACHMENT_MAX_COUNT - attachments.length)
             event.target.value = ""
             if (!chosen.length) return
+            const requestGeneration = attachmentRequestState.current.generation
             try {
               const prepared = await Promise.all(chosen.map((file) => fileToAttachment(file)))
+              if (requestGeneration !== attachmentRequestState.current.generation) return
               onAttachmentsChange((current) => [...current, ...prepared])
             } catch (err) {
               onAttachmentError((err as Error).message)
