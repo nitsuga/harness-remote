@@ -2292,7 +2292,6 @@ function App() {
       awaitingAssistantBaselineRef.current = ""
       latestMessageTimesRef.current.clear()
       lastEventBySessionRef.current.clear()
-      removedSessionIDsRef.current.clear()
       loadAgentsRequestRef.current += 1
       loadModelsRequestRef.current += 1
       refreshRequestRef.current += 1
@@ -2673,7 +2672,7 @@ function App() {
         if (openingSessionRef.current !== sessionID || !isCurrentOpen()) throw first
         await loadSelected(sessionID, directory, true)
       }
-      await Promise.all([loadAgents(), loadModels(sessionID, directory)])
+      await Promise.all([loadAgents(sessionID, directory), loadModels(sessionID, directory)])
     } catch (err) {
       const message = (err as Error).message
       if (isCurrentOpen()) {
@@ -2687,7 +2686,11 @@ function App() {
   function applyConfig(nextConfig: ServerConfig, profileID = activeProfileID, sourceProfiles = profiles) {
     replaceMutationContext(null, profileID, nextConfig)
     const serverChanged = configKey(nextConfig) !== configKey(config)
-    if (serverChanged) {
+    const profileChanged = profileID !== activeProfileID
+    if (serverChanged || profileChanged) {
+      // Session navigation must not erase delete tombstones. A profile/config change starts a new
+      // namespace, so only that boundary clears them.
+      removedSessionIDsRef.current.clear()
       loadSelectedRequestRef.current += 1
       loadModelsRequestRef.current += 1
       autoSelectAttemptedRef.current = false
@@ -2906,16 +2909,16 @@ function App() {
     }
   }
 
-  async function loadAgents() {
+  async function loadAgents(sessionID = selectedSession?.id, directory = selectedSession?.directory ?? selectedNewSessionDirectory) {
     if (!isValidServerConfig(config) || !capabilities.agents) {
       setAgentOptions([])
       return
     }
     const requestID = ++loadAgentsRequestRef.current
     const generation = mutationCoordinator.getContextGeneration()
-    const context = { profileID: activeProfileID, configKey: configKey(config), sessionID: selectedID }
+    const context = { profileID: activeProfileID, configKey: configKey(config), sessionID: sessionID ?? selectedID }
     try {
-      const list = await api.listAgents(config, selectedSession?.directory ?? selectedNewSessionDirectory)
+      const list = await api.listAgents(config, directory)
        if (requestID !== loadAgentsRequestRef.current || !mutationCoordinator.isContextGenerationCurrent(generation) || !mutationCoordinator.isContextCurrent(context)) return
       setAgentOptions(list)
       setAgentLoadError(null)
@@ -3459,7 +3462,7 @@ function App() {
       setLoadingSessionID(created.id)
       try {
         await loadSelected(created.id, created.directory)
-        await Promise.all([loadAgents(), loadModels(created.id, created.directory)])
+        await Promise.all([loadAgents(created.id, created.directory), loadModels(created.id, created.directory)])
         await refreshSessions(false, createdView)
       } catch (err) {
         if (mutationCoordinator.isContextCurrent({ profileID: activeProfileID, configKey: configKey(config), sessionID: created.id })) {
@@ -3713,8 +3716,8 @@ function App() {
       if (selectedID === sessionID) {
         // Remove the row and invalidate navigation before any refresh can reintroduce it.
         replaceMutationContext(null)
-        // Context replacement resets transient session state, including the tombstone set. Keep
-        // this deletion tombstoned for the eventual-consistency refresh below (and the next poll).
+        // The tombstone intentionally survives this session-only context replacement so an
+        // eventual-consistency refresh (and navigation) cannot resurrect the deleted row.
         removedSessionIDsRef.current.add(sessionID)
         setSessions((current) => current.filter((item) => item.id !== sessionID))
         setSelectedID(null)
@@ -5201,7 +5204,7 @@ function App() {
 
             {activeDetailSheet === "ai" && (
               <div className="sheet-content">
-                <button type="button" className="btn-secondary" onClick={() => Promise.all([loadAgents(), loadModels()]).catch(() => undefined)}>
+                <button type="button" className="btn-secondary" disabled={mutationLocked} onClick={() => { if (mutationLocked) return; void Promise.all([loadAgents(selectedSession?.id, selectedSession?.directory), loadModels(selectedSession?.id, selectedSession?.directory)]).catch(() => undefined) }}>
                   <RefreshIcon size={16} />
                   {t('detail.refreshAi')}
                 </button>
@@ -5255,7 +5258,7 @@ function App() {
                               key={optionKey}
                               className={active ? "model-option active" : "model-option"}
                               onClick={() => changeModel(optionKey)}
-                              disabled={isWorking}
+                              disabled={isWorking || mutationLocked}
                               role="option"
                               aria-selected={active}
                             >
@@ -5725,7 +5728,7 @@ http://YOUR_PC_IP:4096/global/health</pre>
               <section className="inspector-section">
                 <div className="inspector-section-title">
                   <span>{t('detail.aiTitle')}</span>
-                  <button type="button" className="btn-icon btn-ghost compact" onClick={() => void Promise.all([loadAgents(), loadModels()]).catch(() => undefined)} aria-label={t('detail.refreshAi')}>
+                   <button type="button" className="btn-icon btn-ghost compact" disabled={mutationLocked} onClick={() => { if (mutationLocked) return; void Promise.all([loadAgents(selectedSession?.id, selectedSession?.directory), loadModels(selectedSession?.id, selectedSession?.directory)]).catch(() => undefined) }} aria-label={t('detail.refreshAi')}>
                     <RefreshIcon size={14} />
                   </button>
                 </div>

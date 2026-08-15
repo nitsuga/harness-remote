@@ -309,7 +309,7 @@ assert.ok(
   "the marker must read as a sentence, not a one-word tag that needs a tooltip touch cannot show"
 )
 assert.equal(app.includes("disabled={!selectedSession || selectedSession.external}"), false, "external sessions must remain writable")
-assert.ok(composerView.includes('onClick={showStopAction ? onAbort : onSend}'), 'the action button should send a queued follow-up instead of only stopping')
+assert.ok(composerView.includes('onClick={showStopAction ? onAbort : sendNow}'), 'the action button should send a queued follow-up instead of only stopping')
 
 // A run bubble merges action groups that a message boundary split apart. Consecutive replies with
 // nothing groupable in them must stay separate, or two answers to two queued prompts render as one.
@@ -361,7 +361,7 @@ assert.ok(app.includes('autoComplete="username"') && app.includes('autoComplete=
 assert.ok(composerView.includes('enterKeyHint={softKeyboard ? "enter" : "send"}'), "the composer's action key should say send on a fine pointer and new line on a soft keyboard")
 assert.ok(composerView.includes('if (event.ctrlKey || event.metaKey)'), 'a soft keyboard must send with Ctrl/Cmd+Enter and newline with plain Enter')
 assert.ok(composerView.includes('if (!event.shiftKey)'), 'a fine pointer must keep Enter sends / Shift+Enter new line')
-assert.match(composerView, /if \(!mutationLocked\) onSend\(\)/, 'keyboard send must stay blocked while the mutation lease is retained')
+assert.match(composerView, /if \(!mutationLocked && pendingPreparation === 0\) sendNow\(\)/, 'keyboard send must stay blocked while the mutation lease or attachment preparation is active')
 
 // A session card showed a full absolute path over three lines, a third of its height.
 assert.ok(sessionList.includes('function shortDirectory'), 'the card should shorten the directory it shows')
@@ -659,6 +659,12 @@ assert.match(app, /const replaceMutationContext[\s\S]*?latestMessageTimesRef\.cu
 assert.match(app, /const refreshRequestID = \+\+refreshRequestRef\.current/, 'refreshes need a monotonic request identity')
 assert.match(app, /refreshRequestID === refreshRequestRef\.current/, 'stale refresh responses must be ignored')
 assert.match(app, /const requestID = \+\+loadAgentsRequestRef\.current/, 'agent loads need a request identity')
+assert.match(app, /disabled=\{mutationLocked\}[\s\S]*?t\('detail\.refreshAi'\)/, 'mobile AI refresh must honor the mutation lock')
+assert.match(app, /onChange=\{\(event\) => changeAgent\(event\.target\.value\)\}[\s\S]*?disabled=\{isWorking \|\| mutationLocked\}/, 'mobile agent selection must honor the mutation lock')
+assert.match(app, /onClick=\{\(\) => changeModel\(optionKey\)\}[\s\S]*?disabled=\{isWorking \|\| mutationLocked\}/, 'mobile model selection must honor the mutation lock')
+assert.match(composerView, /const invalidateAttachmentPreparation[\s\S]*?generation \+= 1[\s\S]*?const sendNow/, 'attachment preparation must be invalidated synchronously before send')
+assert.match(composerView, /pendingPreparation > 0/, 'send must wait for attachment preparation to settle')
+assert.match(app, /if \(serverChanged \|\| profileChanged\)[\s\S]*?removedSessionIDsRef\.current\.clear\(\)/, 'session tombstones must survive session-only navigation')
 assert.match(app, /disabled=\{action\.disabled\}/, 'message context actions must honor disabled state')
 assert.match(app, /disabled=\{!selectedSession \|\| config\.backend !== "opencode2" \|\| busySending \|\| sessionActionPending === "fork" \|\| mutationLocked\}/, 'help skill buttons must honor the coordinator lock')
 assert.match(app, /onRefresh=\{\(\) => void refreshSessionsWithIndicator\(\)\.catch/, 'refresh remains wired while mutations are active')

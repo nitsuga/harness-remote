@@ -1,4 +1,4 @@
-import { useRef, type RefObject } from "react"
+import { useRef, useState, type RefObject } from "react"
 import { ATTACHMENT_MAX_COUNT, fileToAttachment, type AttachmentPart } from "../attachments"
 import { CloseIcon, PaperclipIcon, SendIcon, StopCircleIcon } from "../Icons"
 import type { Translator } from "../i18n"
@@ -56,6 +56,16 @@ export function SessionComposer({
       generation: attachmentRequestState.current.generation + 1
     }
   }
+  const [pendingPreparation, setPendingPreparation] = useState(0)
+  const invalidateAttachmentPreparation = () => {
+    attachmentRequestState.current.generation += 1
+  }
+  const sendNow = () => {
+    // Invalidate before calling into the coordinator. This closes the synchronous gap where a
+    // decode can finish after send clears the staged attachments.
+    invalidateAttachmentPreparation()
+    onSend()
+  }
 
   return (
     <div className="composer" ref={composerRef}>
@@ -79,10 +89,10 @@ export function SessionComposer({
         onKeyDown={(event) => {
           if (event.key !== "Enter") return
           if (softKeyboard) {
-            if (event.ctrlKey || event.metaKey) { event.preventDefault(); if (!mutationLocked) onSend() }
+            if (event.ctrlKey || event.metaKey) { event.preventDefault(); if (!mutationLocked && pendingPreparation === 0) sendNow() }
             return
           }
-          if (!event.shiftKey) { event.preventDefault(); if (!mutationLocked) onSend() }
+          if (!event.shiftKey) { event.preventDefault(); if (!mutationLocked && pendingPreparation === 0) sendNow() }
         }}
         disabled={!selected}
       />
@@ -93,19 +103,22 @@ export function SessionComposer({
             event.target.value = ""
             if (!chosen.length) return
             const requestGeneration = attachmentRequestState.current.generation
+            setPendingPreparation((count) => count + 1)
             try {
               const prepared = await Promise.all(chosen.map((file) => fileToAttachment(file)))
               if (requestGeneration !== attachmentRequestState.current.generation) return
               onAttachmentsChange((current) => [...current, ...prepared])
             } catch (err) {
-              onAttachmentError((err as Error).message)
+              if (requestGeneration === attachmentRequestState.current.generation) onAttachmentError((err as Error).message)
+            } finally {
+              setPendingPreparation((count) => Math.max(0, count - 1))
             }
           }} />
           <button className="btn-ghost btn-icon" title={t('detail.attachImage')} aria-label={t('detail.attachImage')} onClick={() => attachmentInputRef.current?.click()} disabled={!selected || mutationLocked || attachments.length >= ATTACHMENT_MAX_COUNT}>
             <PaperclipIcon size={18} />
           </button>
         </>}
-        <div className="composer-actions"><button onClick={showStopAction ? onAbort : onSend} disabled={!selected || mutationLocked} className={showStopAction ? "btn-danger composer-send" : "btn-primary composer-send"}>{showStopAction ? <StopCircleIcon size={18} /> : <SendIcon size={18} />}</button></div>
+        <div className="composer-actions"><button onClick={showStopAction ? onAbort : sendNow} disabled={!selected || mutationLocked || (!showStopAction && pendingPreparation > 0)} className={showStopAction ? "btn-danger composer-send" : "btn-primary composer-send"}>{showStopAction ? <StopCircleIcon size={18} /> : <SendIcon size={18} />}</button></div>
       </div>
     </div>
   )
