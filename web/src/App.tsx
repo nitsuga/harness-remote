@@ -2204,6 +2204,10 @@ function App() {
 
   const [sessions, setSessions] = useState<SessionView[]>([])
   const [selectedID, setSelectedID] = useState<string | null>(null)
+  // Async session actions must never complete into a different server/profile or session. This is
+  // updated during render so an in-flight fork can compare against the user's latest context.
+  const activeContextRef = useRef({ profileID: activeProfileID, configKey: configKey(config), sessionID: selectedID })
+  activeContextRef.current = { profileID: activeProfileID, configKey: configKey(config), sessionID: selectedID }
   const showInspector = isDesktop && inspectorOpen && hasRoomForInspector && mainView === "detail" && Boolean(selectedID)
   // The persisted widths are the user's preference, changed only by dragging the divider. What is
   // actually laid out is that preference clamped to what this window can spare at this moment —
@@ -2388,10 +2392,10 @@ function App() {
     const hasRedo = config.backend === "opencode" || config.backend === "opencode2" ? !!revertMessageID : redoAction ? redoAction.enabled : true
     const supportsUndo = config.backend === "opencode" || config.backend === "opencode2" || !!undoAction || supported.has("undo")
     const supportsRedo = config.backend === "opencode" || config.backend === "opencode2" || !!redoAction || supported.has("redo")
-    if (supportsUndo && hasUndo) actions.push({ id: "undo", label: t('detail.undo'), onSelect: () => void runNativeHistoryCommand("undo") })
-    if (supportsRedo && hasRedo) actions.push({ id: "redo", label: t('detail.redo'), onSelect: () => void runNativeHistoryCommand("redo") })
+    if (supportsUndo && hasUndo) actions.push({ id: "undo", label: t('detail.undo'), disabled: sessionActionPending !== null, onSelect: () => void runNativeHistoryCommand("undo") })
+    if (supportsRedo && hasRedo) actions.push({ id: "redo", label: t('detail.redo'), disabled: sessionActionPending !== null, onSelect: () => void runNativeHistoryCommand("redo") })
     return actions
-  }, [commands, config.backend, extensionActions, messages, selectedSession?.revertMessageID, t])
+  }, [commands, config.backend, extensionActions, messages, selectedSession?.revertMessageID, sessionActionPending, t])
   /** Session-level actions for the header ⋯ menu. Unlike the message context menu, availability
    *  follows the harness/extension's own enabled state rather than the transcript contents: an
    *  Undo that empties the conversation leaves Redo enabled but with no bubble left to host a menu,
@@ -2865,7 +2869,7 @@ function App() {
   }
 
   async function runNativeHistoryCommand(command: "undo" | "redo") {
-    if (!selectedSession || busySending) return
+    if (!selectedSession || busySending || sessionActionPending !== null) return
     if (command === "undo" && !window.confirm(t('detail.undoConfirm'))) return
 
     setBusySending(true)
@@ -2930,11 +2934,25 @@ function App() {
     if (config.backend !== "opencode2" || !selectedSession || sessionActionPending || isWorking || busySending
       || !messages.some((message) => message.info.role === "user")) return
     const original = selectedSession
+    const forkContext = {
+      profileID: activeProfileID,
+      configKey: configKey(config),
+      sessionID: original.id
+    }
+    const isCurrentForkContext = () => {
+      const current = activeContextRef.current
+      return current.profileID === forkContext.profileID
+        && current.configKey === forkContext.configKey
+        && current.sessionID === forkContext.sessionID
+    }
     setSessionActionPending("fork")
     setRuntimeError(null)
     setActionNotice(null)
     try {
       const forked = await api.forkSession(config, original.id, original.directory)
+      // The user may have switched profile or session while the server created the child. Do not
+      // insert it into the new context or steal navigation from the session they chose meanwhile.
+      if (!isCurrentForkContext()) return
       const forkedView = toSessionView(forked)
       setSessions((current) => current.some((session) => session.id === forkedView.id)
         ? current
@@ -2942,7 +2960,7 @@ function App() {
       // Keep the original session and navigate through the shared session-opening path.
       await openSession(forkedView.id, forkedView.directory)
     } catch (err) {
-      setRuntimeError((err as Error).message)
+      if (isCurrentForkContext()) setRuntimeError((err as Error).message)
     } finally {
       setSessionActionPending(null)
     }
@@ -3888,9 +3906,11 @@ function App() {
         void abortSession()
         return
       case "session.undo":
+        if (sessionActionPending !== null) return
         void runNativeHistoryCommand("undo")
         return
       case "session.redo":
+        if (sessionActionPending !== null) return
         void runNativeHistoryCommand("redo")
         return
       case "focus.composer":
@@ -3992,8 +4012,8 @@ function App() {
         menuItem("focus.composer", t('command.focusComposer'), { disabled: !selectedSession }),
         menuItem("session.stop", t('command.stopAgent'), { disabled: !selectedSession || !isWorking }),
         { kind: "separator", id: "session-sep-1" },
-        menuItem("session.undo", t('detail.undo'), { disabled: !sessionHeaderActions.some((action) => action.id === "undo") }),
-        menuItem("session.redo", t('detail.redo'), { disabled: !sessionHeaderActions.some((action) => action.id === "redo") }),
+        menuItem("session.undo", t('detail.undo'), { disabled: !sessionHeaderActions.some((action) => action.id === "undo" && !action.disabled) }),
+        menuItem("session.redo", t('detail.redo'), { disabled: !sessionHeaderActions.some((action) => action.id === "redo" && !action.disabled) }),
         { kind: "separator", id: "session-sep-2" },
         menuItem("session.rename", t('session.renameTitle'), { disabled: !selectedSession || !capabilities.sessionRename }),
         menuItem("session.delete", t('sessions.delete'), { disabled: !selectedSession || !capabilities.sessionDelete })
@@ -4051,8 +4071,8 @@ function App() {
     { id: "session.rename", group: t('command.groupSession'), label: t('session.renameTitle'), icon: <PencilIcon size={16} />, disabled: !selectedSession || !capabilities.sessionRename },
     { id: "session.delete", group: t('command.groupSession'), label: t('sessions.delete'), icon: <TrashIcon size={16} />, disabled: !selectedSession || !capabilities.sessionDelete },
     { id: "session.stop", group: t('command.groupSession'), label: t('command.stopAgent'), icon: <StopCircleIcon size={16} />, disabled: !selectedSession || !isWorking },
-    { id: "session.undo", group: t('command.groupSession'), label: t('detail.undo'), disabled: !sessionHeaderActions.some((action) => action.id === "undo") },
-    { id: "session.redo", group: t('command.groupSession'), label: t('detail.redo'), disabled: !sessionHeaderActions.some((action) => action.id === "redo") },
+    { id: "session.undo", group: t('command.groupSession'), label: t('detail.undo'), disabled: !sessionHeaderActions.some((action) => action.id === "undo" && !action.disabled) },
+    { id: "session.redo", group: t('command.groupSession'), label: t('detail.redo'), disabled: !sessionHeaderActions.some((action) => action.id === "redo" && !action.disabled) },
     { id: "server.add", group: t('command.groupServer'), label: t('command.addServer'), icon: <ServerIcon size={16} /> },
     { id: "server.settings", group: t('command.groupServer'), label: t('command.openSettings'), hint: displayShortcut("server.settings"), icon: <SettingsIcon size={16} /> },
     { id: "view.palette", group: t('command.groupView'), label: t('command.commandPalette'), hint: displayShortcut("view.palette"), icon: <CommandIcon size={16} /> },

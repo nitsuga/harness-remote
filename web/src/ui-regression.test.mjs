@@ -247,6 +247,8 @@ assert.ok(app.includes("setActionNotice(t('detail.compactQueued'))"), 'compact m
 assert.ok(app.includes('const forked = await api.forkSession(config, original.id, original.directory)'), 'fork must invoke the API once for the current session')
 assert.ok(app.includes('setSessions((current) => current.some((session) => session.id === forkedView.id)'), 'fork must insert the returned child while preserving the original')
 assert.ok(app.includes('await openSession(forkedView.id, forkedView.directory)'), 'fork must navigate through the shared session-opening path')
+assert.match(app, /const forkContext = \{[\s\S]*?profileID: activeProfileID[\s\S]*?configKey: configKey\(config\)[\s\S]*?sessionID: original\.id/, 'fork must capture the active profile, server, and session identity before awaiting')
+assert.match(app, /if \(!isCurrentForkContext\(\)\) return/, 'a stale fork completion must be discarded before inserting or navigating')
 assert.ok(
   /const hasUserMessage = messages\.some\(\(message\) => message\.info\.role === "user"\)[\s\S]*?id: "compact"[\s\S]*?disabled: sessionActionPending !== null \|\| !hasUserMessage \|\| isWorking \|\| busySending[\s\S]*?id: "fork"[\s\S]*?disabled: sessionActionPending !== null \|\| !hasUserMessage \|\| isWorking \|\| busySending/.test(app),
   'compact and fork must be disabled for sessions with no visible user message'
@@ -534,6 +536,13 @@ assert.ok(app.includes('setExtensionActions(result.actions)'), 'action execution
 assert.ok(app.includes("if (result.applied === false)"), 'only an authoritative no-op result should show no-op feedback')
 assert.ok(app.includes('result.applied !== false'), 'unknown results should still refresh the active ACP context without being called no-ops')
 assert.ok(app.includes("command === \"undo\" ? 'detail.nothingToUndo' : 'detail.nothingToRedo'"), 'the no-op message should describe the attempted action')
+assert.match(app, /if \(!selectedSession \|\| busySending \|\| sessionActionPending !== null\) return/, 'native undo and redo must defensively no-op while a session action is pending')
+assert.match(app, /id: "undo", label: t\('detail\.undo'\), disabled: sessionActionPending !== null/, 'message undo must be disabled while a session action is pending')
+assert.match(app, /id: "redo", label: t\('detail\.redo'\), disabled: sessionActionPending !== null/, 'message redo must be disabled while a session action is pending')
+assert.match(app, /case "session\.undo":\s*if \(sessionActionPending !== null\) return/, 'the menubar/native undo dispatcher must reject pending session actions')
+assert.match(app, /case "session\.redo":\s*if \(sessionActionPending !== null\) return/, 'the menubar/native redo dispatcher must reject pending session actions')
+assert.match(app, /action\.id === "undo" && !action\.disabled/, 'menubar and palette undo entries must use the action disabled state')
+assert.match(app, /action\.id === "redo" && !action\.disabled/, 'menubar and palette redo entries must use the action disabled state')
 assert.ok(app.includes('{actionNotice && <div className=\"notice info fade-in\">'), 'no-op action feedback should render as visible information rather than an error')
 
 // Session actions in the header (issue #104): Undo can strip the transcript to nothing, leaving
@@ -554,6 +563,7 @@ assert.match(
 assert.match(app, /session-actions-menu/, 'the header actions menu should have its own styles')
 assert.match(styles, /\.session-actions-menu\s*\{[\s\S]*?position:\s*absolute/, 'the header actions menu must overlay the conversation rather than push its layout')
 assert.match(styles, /\.session-actions-menu\s*\{[\s\S]*?z-index:\s*var\(--z-menu\)/, 'the header actions menu must stack above the message list')
+assert.match(styles, /\.session-actions-menu button:hover:not\(:disabled\)/, 'disabled session actions must not receive hover styling')
 assert.match(app, /mobile-session-appbar[\s\S]*?mobile-back-button[\s\S]*?SessionActionsMenu/, 'mobile detail should use one contextual row for back, identity, and session actions')
 assert.match(app, /isDesktop && selectedSession && sessionHeaderActions\.length > 0/, 'on desktop the header actions menu should remain beside the session heading')
 assert.match(styles, /\.mobile-appbar \{[\s\S]*?display:\s*flex/, 'the mobile contextual app bar should keep its controls on one row')

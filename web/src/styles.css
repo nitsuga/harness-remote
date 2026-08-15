@@ -2700,7 +2700,7 @@ a:focus-visible,
 
 @media (hover: hover) {
   .message-context-menu button:hover,
-  .session-actions-menu button:hover,
+  .session-actions-menu button:hover:not(:disabled),
   .menu-item:hover:not(:disabled),
   .server-option:hover {
     background: var(--surface-strong);
