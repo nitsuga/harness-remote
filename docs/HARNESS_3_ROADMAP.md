@@ -2,7 +2,7 @@
 
 > **Status:** product direction, not a promise that every item below will ship exactly as written.
 >
-> Execution is tracked in [roadmap issue #133](https://github.com/giuliastro/harness-remote/issues/133). Issues and PRs are canonical for implementation scope; this document is canonical for product direction and sequencing rationale.
+> Execution is tracked via issues and PRs in this fork, `nitsuga/harness-remote`. Issues and PRs are canonical for implementation scope; this document is canonical for product direction and sequencing rationale.
 
 ## 1. Vision
 
@@ -131,16 +131,16 @@ The daemon now provides stable machine identity, multiple agent-host representat
 
 ## 6. Current implementation status
 
-As of August 13, 2026:
+As of August 15, 2026:
 
 - ✅ **#147 — One-command startup** is complete.
 - ✅ **#143 — Universal Daemon** is complete as an implementation milestone. Its architecture and mechanics are well covered by tests, but a real ACP-backed harness still needs to be run end to end before heterogeneous daemon compatibility is described as validated.
-- 🟡 **#145 — Create work** has most backend foundations complete: project discovery, normalized tasks, isolated worktrees, agent launch, persisted task/run linkage, restart reconciliation, safe cleanup, result inspection and explicit finish semantics. The major remaining closure gap is the task-first client UX.
+- ✅ **#145 — Create work** is complete, delivered as **PR #20 in this fork**. The upstream issue #145 post was erroneous; it was relocated to this fork and implemented, pushed and merged as PR #20. This covers project discovery, normalized tasks, isolated worktrees, agent launch, persisted task/run linkage, restart reconciliation, safe cleanup, result inspection, explicit finish semantics and the task-first client workflow end to end.
 - ✅ **#163 — Finish-work result and safe finalization primitives** is complete through #164.
 - ⏳ Full review/tests/PR lifecycle remains ahead.
 - ⏳ **#146 — Multi-machine Fleet** remains the next major differentiating product milestone after the task workflow is exposed cleanly to users and fleet demand is validated.
 
-The important distinction is that task/worktree/finish support now exists as **backend/API capability**, but the product should not claim a complete task-first workflow until the client exposes it end to end.
+That distinction is now resolved: task/worktree/finish support exists as **backend/API capability** and the client exposes the task-first workflow end to end via PR #20. The full review/tests/PR lifecycle remains ahead.
 
 ## 7. Execution sequencing
 
@@ -148,7 +148,7 @@ The roadmap has two dependency tracks, but **not an assumption of parallel maint
 
 ### Primary track — Product / Adoption
 
-#### Completed foundation — #147 + #143
+#### Completed foundation — #147 + #143 + #145
 
 One-command startup and the Universal Daemon established the adoption/runtime base:
 
@@ -161,15 +161,13 @@ One-command startup and the Universal Daemon established the adoption/runtime ba
 
 The architecture/mechanics are implemented, but real heterogeneous multi-host validation still requires at least one reachable ACP-backed harness environment. Test doubles are evidence for the architecture, not proof of real harness compatibility.
 
-#### Current — finish #145 as a product workflow
-
-The backend loop already supports:
+#145 — Create work — was posted as upstream issue #145 in error. It was relocated to this fork and implemented, pushed and merged as **PR #20**. The backend loop is now exposed cleanly in the client:
 
 ```text
 project → task → isolated worktree → agent → run → result → finish
 ```
 
-The immediate product gap is exposing that loop cleanly in the client:
+The client workflow covers:
 
 - choose a known project;
 - enter a task;
@@ -180,7 +178,7 @@ The immediate product gap is exposing that loop cleanly in the client:
 
 Several tasks should eventually be usable concurrently in separate worktrees. Explicit agent selection is enough initially. `Auto` routing remains later.
 
-#### Finish-work expansion — review / tests / PR
+#### Current — Finish-work expansion — review / tests / PR
 
 The first backend finish primitives are complete, but the competitive loop is not:
 
@@ -328,7 +326,7 @@ PRIMARY
   ↓
 #143  Universal Daemon
   ↓
-#145  Expose task launch + worktree + result/finish as an end-to-end client workflow
+#145  Task-first client workflow — complete (this fork, PR #20)
   ↓
        Diff / tests / review / PR / CI lifecycle
   ↓
