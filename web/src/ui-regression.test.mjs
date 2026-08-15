@@ -11,6 +11,9 @@ const panels = readFileSync(new URL('./components/panels.tsx', import.meta.url),
 const sessionList = readFileSync(new URL('./components/session-list.tsx', import.meta.url), 'utf8')
 const composerView = readFileSync(new URL('./components/session-composer.tsx', import.meta.url), 'utf8')
 
+assert.match(styles, /button\s*\{[\s\S]*?cursor:\s*pointer;/, 'enabled buttons must advertise that they can be pressed')
+assert.match(styles, /button:disabled\s*\{[\s\S]*?cursor:\s*not-allowed;/, 'disabled buttons must retain the blocked cursor')
+
 assert.ok(api.includes('const body = await response.text()'), 'failed HTTP responses must consume their body only once')
 // The bridge reports failures as {"error": "..."}; without unwrapping that the app printed the raw
 // JSON, so a readable reason like "thread ... already has an active writer" reached the user as a
@@ -167,17 +170,20 @@ assert.match(composerView, /pendingPreparation > 0 \|\| attachments\.length >= A
 assert.match(composerView, /prepared\.slice\(0, Math\.max\(0, ATTACHMENT_MAX_COUNT - current\.length\)\)/, 'concurrent attachment completions must clamp to the global capacity in the functional update')
 assert.match(composerView, /current\.contextKey === preparationContext && current\.generation === preparationGeneration[\s\S]*?Math\.max\(0, current\.count - 1\)/, 'stale attachment cleanup must not decrement the destination context counter')
 assert.match(composerView, /mountedRef[\s\S]*?generation \+= 1/, 'attachment preparation must be invalidated when the composer unmounts')
+assert.match(composerView, /useEffect\(\(\) => \{[\s\S]*?mountedRef\.current = true[\s\S]*?return \(\) => \{/, 'attachment preparation must become live again during Strict Mode effect setup')
 assert.match(composerView, /!mountedRef\.current[\s\S]*?onAttachmentsChange/, 'an unmounted composer must never append a prepared attachment')
 assert.match(app, /const deleteContext = \{[\s\S]*?sessionID: sessionID[\s\S]*?const currentDeleteContext = mutationCoordinator\.getContext\(\)[\s\S]*?sameNamespace/, 'delete must capture its target context and explicitly compare the completion namespace')
-assert.match(app, /if \(sameNamespace\) \{[\s\S]*?tombstones\.add\(sessionID\)[\s\S]*?setSessions\(\(current\) => current\.filter/, 'a successful delete must tombstone and remove its row even after same-namespace navigation')
-assert.match(app, /replaceMutationContext\(null\)[\s\S]*?tombstones\.add\(sessionID\)/, 'deleting the selected session must restore its tombstone after context replacement')
+assert.match(app, /await api\.deleteSession\([\s\S]*?const tombstoneKey = deleteContext\.profileID[\s\S]*?tombstones\.add\(sessionID\)/, 'a successful delete must capture its tombstone before gating current-namespace UI updates')
+assert.match(app, /if \(sameNamespace\) \{[\s\S]*?setSessions\(\(current\) => current\.filter/, 'only current-namespace delete completion may remove the visible row')
 assert.match(app, /removedSessionIDsRef = useRef\(new Map<string, Set<string>>\(\)\)/, 'session tombstones must be stored per namespace')
 assert.match(app, /removedSessionIDsRef\.current\.get\(refreshContext\.profileID \+ "\\u0000" \+ refreshContext\.configKey\)/, 'session refreshes must read tombstones from the active profile/config namespace')
-assert.match(app, /removedSessionIDsRef\.current\.set\(deleteContext\.profileID \+ "\\u0000" \+ deleteContext\.configKey, tombstones\)/, 'deletes must write tombstones to their profile/config namespace')
+assert.match(app, /removedSessionIDsRef\.current\.set\(tombstoneKey, tombstones\)/, 'deletes must write tombstones to their captured profile/config namespace')
 assert.match(app, /sameNamespace && currentDeleteContext\?\.sessionID === sessionID/, 'a stale delete lease must still clear the currently selected target in its namespace')
 assert.ok(!app.includes('removedSessionIDsRef.current.clear()'), 'switching namespaces must not erase prior tombstones')
 assert.ok(!sessionList.includes('role="button"'), 'session cards must not nest buttons inside a role=button container')
 assert.ok(sessionList.includes('className="session-card-open"'), 'session cards need a dedicated keyboard-accessible open control')
+assert.equal(/\.session-card\s*\{[^}]*cursor:\s*pointer/.test(styles), false, 'the article must not promise that non-action card content opens the session')
+assert.match(styles, /\.session-card-open\s*\{[\s\S]*?cursor:\s*pointer/, 'the primary session control must retain a pointer and keyboard affordance')
 assert.match(styles, /\.composer-chips[\s\S]*?overflow-x: auto/, 'attachment chips must remain reachable on narrow screens')
 assert.match(app, /aria-busy=\{pendingAction !== null\}/, 'pending session actions must expose busy state')
 assert.match(icons, /export const StopCircleIcon/, 'StopCircleIcon should exist in the shared SVG icon set')
@@ -327,6 +333,10 @@ assert.ok(
 )
 assert.equal(app.includes("disabled={!selectedSession || selectedSession.external}"), false, "external sessions must remain writable")
 assert.ok(composerView.includes('onClick={showStopAction ? onAbort : sendNow}'), 'the action button should send a queued follow-up instead of only stopping')
+assert.match(composerView, /disabled=\{!selected \|\| \(!showStopAction && mutationLocked\)/, 'Stop must remain enabled while an active prompt is being cancelled')
+assert.match(app, /const canAbortSession = Boolean\(selectedSession && isWorking[\s\S]*?activeWorkingLease\.kind === "skill"/, 'Stop must be allowed only as an out-of-band action for active prompt, command, or skill work')
+assert.match(app, /const activeLease = mutationCoordinator\.getActiveLease\(\)[\s\S]*?const lease = activeLease \? null : acquireMutation\("abort"\)/, 'abort must not steal the active prompt lease or release it as if it owned it')
+assert.match(app, /session\.stop[\s\S]*?disabled: !canAbortSession/, 'native menu and palette Stop entries must use the abort-specific availability guard')
 
 // A run bubble merges action groups that a message boundary split apart. Consecutive replies with
 // nothing groupable in them must stay separate, or two answers to two queued prompts render as one.

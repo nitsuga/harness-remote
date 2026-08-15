@@ -49,11 +49,16 @@ export function SessionComposer({
   // navigated away, at which point appending it would stage it in the replacement session.
   const attachmentRequestState = useRef({ contextKey: attachmentContextKey, generation: 0 })
   const mountedRef = useRef(true)
-  useEffect(() => () => {
-    // A decode can resolve after this composer has been replaced. Invalidate it before the
-    // replacement is allowed to stage anything in the shared parent state.
-    mountedRef.current = false
-    attachmentRequestState.current.generation += 1
+  useEffect(() => {
+    // Strict Mode simulates an unmount/remount. Mark the new effect instance live again so a
+    // decode started by the remounted composer is not discarded forever.
+    mountedRef.current = true
+    return () => {
+      // A decode can resolve after this composer has been replaced. Invalidate it before the
+      // replacement is allowed to stage anything in the shared parent state.
+      mountedRef.current = false
+      attachmentRequestState.current.generation += 1
+    }
   }, [])
   // Do this during render, rather than in an effect: a completed decode must not slip between the
   // replacement render and the effect that records the new context.
@@ -148,7 +153,7 @@ export function SessionComposer({
             <PaperclipIcon size={18} />
           </button>
         </>}
-        <div className="composer-actions"><button onClick={showStopAction ? onAbort : sendNow} disabled={!selected || mutationLocked || (!showStopAction && pendingPreparation > 0)} className={showStopAction ? "btn-danger composer-send" : "btn-primary composer-send"}>{showStopAction ? <StopCircleIcon size={18} /> : <SendIcon size={18} />}</button></div>
+        <div className="composer-actions"><button onClick={showStopAction ? onAbort : sendNow} disabled={!selected || (!showStopAction && mutationLocked) || (!showStopAction && pendingPreparation > 0)} className={showStopAction ? "btn-danger composer-send" : "btn-primary composer-send"}>{showStopAction ? <StopCircleIcon size={18} /> : <SendIcon size={18} />}</button></div>
       </div>
     </div>
   )

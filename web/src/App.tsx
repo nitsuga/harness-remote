@@ -2617,6 +2617,12 @@ function App() {
           : ""
   const isWaitingForOpenCodeReply = awaitingAssistantReply || busySending || isSessionRunning
   const showStopAction = isWorking && !composer.trim() && attachments.length === 0
+  // Stop is the one deliberate out-of-band action allowed to overlap a working turn. It may
+  // interrupt prompt/command/skill work, but never competes with an unrelated structural mutation.
+  const activeWorkingLease = mutationCoordinator.getActiveLease()
+  const canAbortSession = Boolean(selectedSession && isWorking && (!activeWorkingLease
+    || (activeWorkingLease.context.sessionID === selectedSession.id
+      && (activeWorkingLease.kind === "prompt" || activeWorkingLease.kind === "command" || activeWorkingLease.kind === "skill"))))
   const showTypingBubble = Boolean(selectedSession) && isWaitingForOpenCodeReply
   const activeSessions = sessions.filter((session) => isSessionWorking(session.status)).length
   const changedSessions = sessions.filter(
@@ -3729,28 +3735,29 @@ function App() {
     const lease = acquireMutation("delete", sessionID)
     if (!lease) return
     try {
-      await api.deleteSession(config, sessionID, deleteDirectory)
-      // Lease currency includes the session, so it is intentionally too strict for this part:
+       await api.deleteSession(config, sessionID, deleteDirectory)
+       // The server may continue returning a recently deleted row for a short time. Persist the
+       // tombstone in the captured namespace regardless of where navigation ended up; only the
+       // visible list and selection below are allowed to depend on the current namespace.
+       const tombstoneKey = deleteContext.profileID + "\u0000" + deleteContext.configKey
+       const tombstones = removedSessionIDsRef.current.get(tombstoneKey) ?? new Set<string>()
+       tombstones.add(sessionID)
+       removedSessionIDsRef.current.set(tombstoneKey, tombstones)
+       // Lease currency includes the session, so it is intentionally too strict for this part:
       // moving to another session does not make persistence of this deletion unsafe. Profile/config
       // changes do, because their session list is a different namespace.
       const currentDeleteContext = mutationCoordinator.getContext()
       const sameNamespace = currentDeleteContext?.profileID === deleteContext.profileID
         && currentDeleteContext.configKey === deleteContext.configKey
-      if (sameNamespace) {
-        const tombstones = removedSessionIDsRef.current.get(deleteContext.profileID + "\u0000" + deleteContext.configKey) ?? new Set<string>()
-        tombstones.add(sessionID)
-        removedSessionIDsRef.current.set(deleteContext.profileID + "\u0000" + deleteContext.configKey, tombstones)
-        setSessions((current) => current.filter((item) => item.id !== sessionID))
+       if (sameNamespace) {
+         setSessions((current) => current.filter((item) => item.id !== sessionID))
       }
       if (sameNamespace && currentDeleteContext?.sessionID === sessionID) {
         // Remove the row and invalidate navigation before any refresh can reintroduce it.
         replaceMutationContext(null)
         // The tombstone intentionally survives this session-only context replacement so an
         // eventual-consistency refresh (and navigation) cannot resurrect the deleted row.
-        const tombstones = removedSessionIDsRef.current.get(deleteContext.profileID + "\u0000" + deleteContext.configKey) ?? new Set<string>()
-        tombstones.add(sessionID)
-        removedSessionIDsRef.current.set(deleteContext.profileID + "\u0000" + deleteContext.configKey, tombstones)
-        setSelectedID(null)
+         setSelectedID(null)
         setMessages([])
         loadedMessagesRef.current = []
         setOptimisticUserMessages([])
@@ -3810,20 +3817,37 @@ function App() {
   }
 
   async function abortSession() {
-    if (!selectedSession || isSessionMutationLocked()) return
-    const lease = acquireMutation("abort")
-    if (!lease) return
+    const target = selectedSession
+    const activeLease = mutationCoordinator.getActiveLease()
+    const canAbort = Boolean(target && isWorking && (!activeLease
+      || (activeLease.context.sessionID === target.id
+        && (activeLease.kind === "prompt" || activeLease.kind === "command" || activeLease.kind === "skill"))))
+    if (!target || !canAbort) return
+    // A prompt/command/skill owns the coordinator lease while it waits for the backend. Do not
+    // steal or release that lease: abort is an out-of-band request and the original owner still
+    // needs to finish its cleanup safely.
+    const lease = activeLease ? null : acquireMutation("abort")
+    if (!activeLease && !lease) return
+    const abortContext = activeLease?.context ?? mutationCoordinator.getContext()
+    if (!abortContext || abortContext.sessionID !== target.id) {
+      if (lease) releaseMutation(lease)
+      return
+    }
+    const abortLeaseIsCurrent = () => activeLease
+      ? isLeaseContextCurrent(activeLease)
+      : lease !== null && isLeaseContextCurrent(lease)
     try {
-      await api.abort(config, selectedSession.id, selectedSession.directory)
-      if (!isLeaseContextCurrent(lease)) return
+      await api.abort(config, target.id, target.directory)
+      if (!abortLeaseIsCurrent()) return
       completionShouldPlayRef.current = false
       setAwaitingAssistantReply(false)
       await refreshSessions()
-      await loadSelected(selectedSession.id, selectedSession.directory)
+      if (!abortLeaseIsCurrent()) return
+      await loadSelected(target.id, target.directory)
     } catch (err) {
-      if (isLeaseContextCurrent(lease)) setRuntimeError((err as Error).message)
+      if (abortLeaseIsCurrent()) setRuntimeError((err as Error).message)
     } finally {
-      releaseMutation(lease)
+      if (lease) releaseMutation(lease)
     }
   }
 
@@ -4375,7 +4399,7 @@ function App() {
       label: t('menubar.session'),
       entries: [
         menuItem("focus.composer", t('command.focusComposer'), { disabled: !selectedSession }),
-         menuItem("session.stop", t('command.stopAgent'), { disabled: !selectedSession || !isWorking || mutationLocked }),
+         menuItem("session.stop", t('command.stopAgent'), { disabled: !canAbortSession }),
         { kind: "separator", id: "session-sep-1" },
         menuItem("session.undo", t('detail.undo'), { disabled: !sessionHeaderActions.some((action) => action.id === "undo" && !action.disabled) }),
         menuItem("session.redo", t('detail.redo'), { disabled: !sessionHeaderActions.some((action) => action.id === "redo" && !action.disabled) }),
@@ -4435,7 +4459,7 @@ function App() {
       { id: "session.refresh", group: t('command.groupSession'), label: t('command.refreshSessions'), hint: displayShortcut("session.refresh"), icon: <RefreshIcon size={16} />, disabled: !hasConfiguredServer },
      { id: "session.rename", group: t('command.groupSession'), label: t('session.renameTitle'), icon: <PencilIcon size={16} />, disabled: !selectedSession || !capabilities.sessionRename || mutationLocked },
      { id: "session.delete", group: t('command.groupSession'), label: t('sessions.delete'), icon: <TrashIcon size={16} />, disabled: !selectedSession || !capabilities.sessionDelete || mutationLocked },
-     { id: "session.stop", group: t('command.groupSession'), label: t('command.stopAgent'), icon: <StopCircleIcon size={16} />, disabled: !selectedSession || !isWorking || mutationLocked },
+      { id: "session.stop", group: t('command.groupSession'), label: t('command.stopAgent'), icon: <StopCircleIcon size={16} />, disabled: !canAbortSession },
      { id: "session.undo", group: t('command.groupSession'), label: t('detail.undo'), disabled: mutationLocked || !sessionHeaderActions.some((action) => action.id === "undo" && !action.disabled) },
      { id: "session.redo", group: t('command.groupSession'), label: t('detail.redo'), disabled: mutationLocked || !sessionHeaderActions.some((action) => action.id === "redo" && !action.disabled) },
     { id: "server.add", group: t('command.groupServer'), label: t('command.addServer'), icon: <ServerIcon size={16} /> },

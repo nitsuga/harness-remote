@@ -39,7 +39,7 @@ assert.match(app, /loadAgents\(sessionID, directory\), loadModels\(sessionID, di
 assert.match(app, /loadAgents\(created\.id, created\.directory\), loadModels\(created\.id, created\.directory\)/, 'creating a session must load both catalogs for the created destination')
 assert.ok(app.includes('const removedSessionIDsRef = useRef(new Map<string, Set<string>>())'), 'tombstones should be retained in namespace-scoped storage')
 assert.ok(app.includes('removedSessionIDsRef.current.get(refreshContext.profileID + "\\u0000" + refreshContext.configKey)'), 'session refreshes should filter tombstones for the active profile/server namespace')
-assert.ok(app.includes('removedSessionIDsRef.current.set(deleteContext.profileID + "\\u0000" + deleteContext.configKey, tombstones)'), 'deletes should persist tombstones in their profile/server namespace')
+assert.ok(app.includes('removedSessionIDsRef.current.set(tombstoneKey, tombstones)'), 'deletes should persist tombstones in their captured profile/server namespace')
 assert.ok(!app.includes('removedSessionIDsRef.current.clear()'), 'profile/server transitions must not globally clear tombstones')
 assert.ok(app.includes('modelSearchText'), 'model picker should support searching models')
 assert.ok(app.includes('id="model-search"'), 'model picker should render a searchable model input')

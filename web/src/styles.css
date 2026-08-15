@@ -336,7 +336,7 @@ button {
   font-weight: 550;
   color: var(--text);
   background: var(--surface);
-  cursor: default;
+  cursor: pointer;
   white-space: nowrap;
   transition: background var(--motion-fast) var(--ease), border-color var(--motion-fast) var(--ease),
     color var(--motion-fast) var(--ease), box-shadow var(--motion-fast) var(--ease);
@@ -1424,14 +1424,8 @@ a:focus-visible,
   border-radius: var(--radius-lg);
   background: var(--surface);
   padding: var(--space-3) var(--space-4);
-  cursor: pointer;
   transition: border-color var(--motion-fast) var(--ease), background var(--motion-fast) var(--ease),
     box-shadow var(--motion-fast) var(--ease);
-}
-
-.session-card:focus-visible {
-  outline: 2px solid var(--primary);
-  outline-offset: 2px;
 }
 
 .session-card.active {
@@ -2735,22 +2729,6 @@ a:focus-visible,
   .menu-item:hover:not(:disabled),
   .server-option:hover {
     background: var(--surface-strong);
-  }
-
-  .session-card:hover {
-    border-color: var(--border-strong);
-    box-shadow: var(--shadow-sm);
-  }
-
-  .sidebar-sessions .session-card:hover {
-    background: var(--surface-subtle);
-    border-color: transparent;
-    box-shadow: none;
-  }
-
-  .sidebar-sessions .session-card.active:hover {
-    background: var(--primary-soft);
-    border-color: var(--primary-border);
   }
 
   .sidebar-sessions .inline-actions button:hover:not(:disabled),
