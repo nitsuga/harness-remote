@@ -1,4 +1,4 @@
-import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react"
+import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react"
 import { App as CapacitorApp } from "@capacitor/app"
 import { Capacitor, type PluginListenerHandle } from "@capacitor/core"
 import ReactMarkdown from "react-markdown"
@@ -35,6 +35,7 @@ import { type AttachmentPart } from "./attachments"
 import { CommandPalette, MenuBar, ServerSwitcher, type MenuDefinition, type MenuEntry, type PaletteCommand } from "./components/shell"
 import { ConnectServerWizard, NewSessionDialog } from "./components/panels"
 import { SessionComposer } from "./components/session-composer"
+import { createSessionMutationCoordinator, type MutationKind, type MutationLease, type SessionMutationCoordinator } from "./session-mutation-coordinator"
 import { SessionSidebar, SessionsPanel, formatTime, projectLabel, shortDirectory, type SessionRenameState } from "./components/session-list"
 import { createServerProfile, loadActiveServerProfile, loadServerProfiles, persistServerProfiles, type SavedServerProfile } from "./serverProfiles"
 import type { DesktopMenuCommand, DesktopMenuTemplate } from "../electron/ipc-contract"
@@ -823,13 +824,17 @@ function QuestionCard({
   directory,
   request,
   onResolved,
-  t
+  t,
+  coordinator,
+  onLeaseChanged
 }: {
   config: ServerConfig
   directory: string
   request: QuestionRequest
   onResolved: (id: string) => void
   t: Translator
+  coordinator: SessionMutationCoordinator
+  onLeaseChanged: () => void
 }) {
   const [selections, setSelections] = useState<string[][]>(() => request.questions.map(() => []))
   const [customValues, setCustomValues] = useState<string[]>(() => request.questions.map(() => ""))
@@ -885,26 +890,40 @@ function QuestionCard({
   })
 
   async function submit() {
+    const lease = coordinator.acquireLease("question")
+    if (!lease) return
+    onLeaseChanged()
     setSubmitting(true)
     setError(null)
     try {
       await api.replyQuestion(config, request.id, answers, directory)
-      onResolved(request.id)
+      if (coordinator.isLeaseCurrent(lease) && coordinator.isContextGenerationCurrent(lease.contextGeneration) && coordinator.isContextCurrent(lease.context)) onResolved(request.id)
     } catch (err) {
-      setError((err as Error).message)
-      setSubmitting(false)
+      if (coordinator.isLeaseCurrent(lease) && coordinator.isContextGenerationCurrent(lease.contextGeneration) && coordinator.isContextCurrent(lease.context)) {
+        setError((err as Error).message)
+        setSubmitting(false)
+      }
+    } finally {
+      if (coordinator.releaseLease(lease)) onLeaseChanged()
     }
   }
 
   async function reject() {
+    const lease = coordinator.acquireLease("question")
+    if (!lease) return
+    onLeaseChanged()
     setSubmitting(true)
     setError(null)
     try {
       await api.rejectQuestion(config, request.id, directory)
-      onResolved(request.id)
+      if (coordinator.isLeaseCurrent(lease) && coordinator.isContextGenerationCurrent(lease.contextGeneration) && coordinator.isContextCurrent(lease.context)) onResolved(request.id)
     } catch (err) {
-      setError((err as Error).message)
-      setSubmitting(false)
+      if (coordinator.isLeaseCurrent(lease) && coordinator.isContextGenerationCurrent(lease.contextGeneration) && coordinator.isContextCurrent(lease.context)) {
+        setError((err as Error).message)
+        setSubmitting(false)
+      }
+    } finally {
+      if (coordinator.releaseLease(lease)) onLeaseChanged()
     }
   }
 
@@ -921,7 +940,7 @@ function QuestionCard({
                 type="button"
                 className={`question-option ${selections[index].includes(option.label) ? "selected" : ""}`}
                 onClick={() => toggleOption(index, option.label, Boolean(question.multiple))}
-                disabled={submitting}
+                 disabled={submitting || coordinator.getActiveLease() !== null}
               >
                 <span className="question-option-label">{option.label}</span>
                 {option.description && <span className="question-option-description">{option.description}</span>}
@@ -946,7 +965,7 @@ function QuestionCard({
                 type="button"
                 className={`question-option ${selections[index].includes("true") ? "selected" : ""}`}
                 onClick={() => toggleOption(index, "true", false)}
-                disabled={submitting}
+                 disabled={submitting || coordinator.getActiveLease() !== null}
               >
                 <span className="question-option-label">{t('question.externalComplete')}</span>
               </button>
@@ -959,17 +978,17 @@ function QuestionCard({
               placeholder={t('question.otherPlaceholder')}
               value={customValues[index]}
               onChange={(event) => setCustomValue(index, event.target.value, Boolean(question.multiple))}
-              disabled={submitting}
+               disabled={submitting || coordinator.getActiveLease() !== null}
             />
           )}
         </div>
       ) : null)}
       {error && <p className="question-error">{error}</p>}
       <div className="question-actions">
-        <button type="button" className="btn-secondary" onClick={reject} disabled={submitting}>
+        <button type="button" className="btn-secondary" onClick={reject} disabled={submitting || coordinator.getActiveLease() !== null}>
           {t('question.skip')}
         </button>
-        <button type="button" className="btn-primary" onClick={submit} disabled={submitting || !canSubmit}>
+        <button type="button" className="btn-primary" onClick={submit} disabled={submitting || coordinator.getActiveLease() !== null || !canSubmit}>
           {t('question.sendAnswer')}
         </button>
       </div>
@@ -982,26 +1001,37 @@ function PermissionCard({
   directory,
   request,
   onResolved,
-  t
+  t,
+  coordinator,
+  onLeaseChanged
 }: {
   config: ServerConfig
   directory: string
   request: PermissionRequest
   onResolved: (id: string) => void
   t: Translator
+  coordinator: SessionMutationCoordinator
+  onLeaseChanged: () => void
 }) {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   async function reply(response: "once" | "always" | "reject") {
+    const lease = coordinator.acquireLease("permission")
+    if (!lease) return
+    onLeaseChanged()
     setSubmitting(true)
     setError(null)
     try {
       await api.replyPermission(config, request.id, response, directory)
-      onResolved(request.id)
+      if (coordinator.isLeaseCurrent(lease) && coordinator.isContextGenerationCurrent(lease.contextGeneration) && coordinator.isContextCurrent(lease.context)) onResolved(request.id)
     } catch (err) {
-      setError((err as Error).message)
-      setSubmitting(false)
+      if (coordinator.isLeaseCurrent(lease) && coordinator.isContextGenerationCurrent(lease.contextGeneration) && coordinator.isContextCurrent(lease.context)) {
+        setError((err as Error).message)
+        setSubmitting(false)
+      }
+    } finally {
+      if (coordinator.releaseLease(lease)) onLeaseChanged()
     }
   }
 
@@ -1015,14 +1045,14 @@ function PermissionCard({
       </div>
       {error && <p className="question-error">{error}</p>}
       <div className="question-actions">
-        <button type="button" className="btn-danger" onClick={() => void reply("reject")} disabled={submitting}>
+         <button type="button" className="btn-danger" onClick={() => void reply("reject")} disabled={submitting || coordinator.getActiveLease() !== null}>
           {t('permission.deny')}
         </button>
-        <button type="button" className="btn-secondary" onClick={() => void reply("once")} disabled={submitting}>
+         <button type="button" className="btn-secondary" onClick={() => void reply("once")} disabled={submitting || coordinator.getActiveLease() !== null}>
           {t('permission.allowOnce')}
         </button>
         {request.always.length > 0 && (
-          <button type="button" className="btn-primary" onClick={() => void reply("always")} disabled={submitting}>
+            <button type="button" className="btn-primary" onClick={() => void reply("always")} disabled={submitting || coordinator.getActiveLease() !== null}>
             {t('permission.allowAlways')}
           </button>
         )}
@@ -1810,10 +1840,11 @@ function MessageContextMenu({
           {text && <button type="button" role="menuitem" onClick={() => copy(false)}>{t('detail.copyText')}</button>}
           {text && <button type="button" role="menuitem" onClick={() => copy(true)}>{t('detail.copyMarkdown')}</button>}
           {text && actions.length > 0 && <div className="message-context-menu__separator" role="separator" />}
-          {actions.map((action) => (
-            <button key={action.id} type="button" role="menuitem" onClick={() => {
-              setPosition(null)
-              action.onSelect()
+            {actions.map((action) => (
+             <button key={action.id} type="button" role="menuitem" disabled={action.disabled} onClick={() => {
+               if (action.disabled) return
+               setPosition(null)
+               action.onSelect()
             }}>{action.label}</button>
           ))}
         </div>
@@ -1859,7 +1890,7 @@ function ConversationRunView({
       text={runText}
       className="message assistant fade-in"
       t={t}
-      actions={fallback ? [...actions, ...(config.backend === "opencode" || config.backend === "opencode2" ? (revertDisabled ? [] : [{ id: "revert", label: t('detail.revertToMessage'), onSelect: () => onRevertMessage(fallback.info.id) }]) : [])] : actions}
+       actions={fallback ? [...actions, ...(config.backend === "opencode" || config.backend === "opencode2" ? [{ id: "revert", label: t('detail.revertToMessage'), disabled: revertDisabled, onSelect: () => onRevertMessage(fallback.info.id) }] : [])] : actions}
     >
       {items.map((item) =>
         item.kind === "action-group" ? (
@@ -1967,6 +1998,8 @@ const MessagesPane = memo(function MessagesPane({
   onMessagesScroll,
   onQuestionResolved,
   onPermissionResolved,
+  coordinator,
+  onLeaseChanged,
   jumpAffordances,
   onJumpToTop,
   onJumpToBottom
@@ -1992,6 +2025,8 @@ const MessagesPane = memo(function MessagesPane({
   onMessagesScroll: () => void
   onQuestionResolved: (id: string) => void
   onPermissionResolved: (id: string) => void
+  coordinator: SessionMutationCoordinator
+  onLeaseChanged: () => void
   jumpAffordances: { top: boolean; bottom: boolean }
   onJumpToTop: () => void
   onJumpToBottom: () => void
@@ -2054,8 +2089,10 @@ const MessagesPane = memo(function MessagesPane({
                   config={config}
                   directory={directory}
                   request={request}
-                  onResolved={onQuestionResolved}
-                  t={t}
+                   onResolved={onQuestionResolved}
+                   t={t}
+                    coordinator={coordinator}
+                    onLeaseChanged={onLeaseChanged}
                 />
               ))}
             {directory !== undefined &&
@@ -2065,8 +2102,10 @@ const MessagesPane = memo(function MessagesPane({
                   config={config}
                   directory={directory}
                   request={request}
-                  onResolved={onPermissionResolved}
-                  t={t}
+                   onResolved={onPermissionResolved}
+                   t={t}
+                    coordinator={coordinator}
+                    onLeaseChanged={onLeaseChanged}
                 />
               ))}
             {showTypingBubble && (
@@ -2211,6 +2250,78 @@ function App() {
 
   const [sessions, setSessions] = useState<SessionView[]>([])
   const [selectedID, setSelectedID] = useState<string | null>(null)
+  // This ref, rather than React state, is the synchronous authority for session mutations. State is
+  // only a paint signal so every alternate affordance sees the lock in the same tick.
+  const mutationCoordinatorRef = useRef<SessionMutationCoordinator | null>(null)
+  if (!mutationCoordinatorRef.current) mutationCoordinatorRef.current = createSessionMutationCoordinator({
+    profileID: activeProfileID,
+    configKey: configKey(config),
+    sessionID: selectedID
+  })
+  const mutationCoordinator = mutationCoordinatorRef.current
+  const [, bumpMutationLock] = useState(0)
+  // This is the single synchronous navigation boundary. Old leases may finish later, but they must
+  // not leave their spinners, draft, optimistic bubbles, or activity caches in the new context.
+  const replaceMutationContext = (sessionID: string | null = selectedID, profileID = activeProfileID, nextConfig = config) => {
+    const context = { profileID, configKey: configKey(nextConfig), sessionID }
+    if (!mutationCoordinator.isContextCurrent(context)) {
+      mutationCoordinator.replaceContext(context)
+      bumpMutationLock((value) => value + 1)
+      sessionActionPendingRef.current = null
+      setBusySending(false)
+      setSessionActionPending(null)
+      setActivatingSkill(null)
+      setCreatingSession(false)
+      setAwaitingAssistantReply(false)
+      // A replacement view starts with its own presentation state. The old lease is still held by
+      // its physical owner, so the lock remains visible, but its spinner must not bleed into here.
+      setRefreshingSessions(false)
+      refreshingSessionsRef.current = false
+      refreshIndicatorRequestRef.current += 1
+      setRuntimeError(null)
+      setActionNotice(null)
+      setLoadingSessionID(null)
+      setAgentOptions([])
+      setAgentLoadError(null)
+      setModelOptions([])
+      setModelLoadError(null)
+      setOptimisticUserMessages([])
+      setComposer("")
+      setAttachments([])
+      completionShouldPlayRef.current = false
+      awaitingAssistantBaselineRef.current = ""
+      latestMessageTimesRef.current.clear()
+      lastEventBySessionRef.current.clear()
+      removedSessionIDsRef.current.clear()
+      loadAgentsRequestRef.current += 1
+      loadModelsRequestRef.current += 1
+      refreshRequestRef.current += 1
+      activityRequestRef.current += 1
+    }
+  }
+  const isSessionMutationLocked = () => mutationCoordinator.getActiveLease() !== null
+  // Ownership and currency are deliberately separate. A stale owner must release its lease, but it
+  // may not write into the replacement view (including cleanup state).
+  const isLeaseContextCurrent = (lease: MutationLease) => mutationCoordinator.isLeaseCurrent(lease)
+    && mutationCoordinator.isContextGenerationCurrent(lease.contextGeneration)
+    && mutationCoordinator.isContextCurrent(lease.context)
+    && mutationCoordinator.isForkGenerationCurrent(lease.forkGeneration)
+  const acquireMutation = (kind: MutationKind, targetSessionID?: string | null): MutationLease | null => {
+    const lease = mutationCoordinator.acquireLease(kind, targetSessionID)
+    if (lease) bumpMutationLock((value) => value + 1)
+    return lease
+  }
+  const releaseMutation = (lease: MutationLease) => {
+    if (mutationCoordinator.releaseLease(lease)) bumpMutationLock((value) => value + 1)
+  }
+  // Keep the coordinator in lock-step with React after an externally-driven profile/config change.
+  // This is deliberately an effect, never a render side effect; event handlers below replace the
+  // context synchronously before starting navigation or a mutation.
+  useLayoutEffect(() => {
+    const context = { profileID: activeProfileID, configKey: configKey(config), sessionID: selectedID }
+    if (!mutationCoordinator.isContextCurrent(context)) replaceMutationContext(selectedID, activeProfileID, config)
+  }, [activeProfileID, config, selectedID, mutationCoordinator])
+  const mutationLocked = mutationCoordinator.getActiveLease() !== null
   // Async session actions must never complete into a different server/profile or session. This is
   // updated during render so an in-flight fork can compare against the user's latest context.
   const activeContextRef = useRef({ profileID: activeProfileID, configKey: configKey(config), sessionID: selectedID })
@@ -2249,9 +2360,6 @@ function App() {
   const [sessionActionPending, setSessionActionPending] = useState<"compact" | "fork" | null>(null)
   const sessionActionPendingRef = useRef<"compact" | "fork" | null>(null)
   sessionActionPendingRef.current = sessionActionPending
-  // Keep fork checks live across awaits without letting TypeScript treat the ref's
-  // value as permanently narrowed after an early return.
-  const isSessionForkPending = () => sessionActionPendingRef.current === "fork"
   const [activatingSkill, setActivatingSkill] = useState<string | null>(null)
   const [loadingSessionID, setLoadingSessionID] = useState<string | null>(null)
   /** The empty transcript state is only meaningful after this session's first history snapshot succeeds. */
@@ -2261,6 +2369,8 @@ function App() {
   const [testingConnection, setTestingConnection] = useState(false)
   const [creatingSession, setCreatingSession] = useState(false)
   const [refreshingSessions, setRefreshingSessions] = useState(false)
+  const refreshingSessionsRef = useRef(false)
+  refreshingSessionsRef.current = refreshingSessions
   const [awaitingAssistantReply, setAwaitingAssistantReply] = useState(false)
   const [settingsNotice, setSettingsNotice] = useState<{ type: NoticeType; text: string } | null>(null)
   const [runtimeError, setRuntimeError] = useState<string | null>(null)
@@ -2310,10 +2420,16 @@ function App() {
   const wasRunningRef = useRef(false)
   const awaitingAssistantBaselineRef = useRef("")
   const loadSelectedRequestRef = useRef(0)
+  const loadCommandsRequestRef = useRef(0)
+  const loadAgentsRequestRef = useRef(0)
   const loadModelsRequestRef = useRef(0)
+  const refreshRequestRef = useRef(0)
+  const refreshIndicatorRequestRef = useRef(0)
+  const activityRequestRef = useRef(0)
   const backgroundFailureCountRef = useRef(0)
   const initialSessionLoadRef = useRef(true)
   const latestMessageTimesRef = useRef(new Map<string, { sessionUpdated: number; activityTime: number }>())
+  const removedSessionIDsRef = useRef(new Set<string>())
   const selectedSessionRef = useRef<SessionView | null>(null)
   /** The session `openSession` is currently working on, so its retry can tell it is still wanted. */
   const openingSessionRef = useRef<string | null>(null)
@@ -2392,6 +2508,7 @@ function App() {
   }, [commands, commandFilter])
   const isSessionRunning = Boolean(selectedSession && isSessionWorking(selectedSession.status))
   const isWorking = awaitingAssistantReply || busySending || isSessionRunning
+  // revertDisabled={sessionActionPending === "fork"}
   const messageMenuActions = useMemo(() => {
     const supported = new Set(commands.map((command) => command.name.toLowerCase()))
     const actions: MessageMenuAction[] = []
@@ -2404,10 +2521,10 @@ function App() {
     const hasRedo = config.backend === "opencode" || config.backend === "opencode2" ? !!revertMessageID : redoAction ? redoAction.enabled : true
     const supportsUndo = config.backend === "opencode" || config.backend === "opencode2" || !!undoAction || supported.has("undo")
     const supportsRedo = config.backend === "opencode" || config.backend === "opencode2" || !!redoAction || supported.has("redo")
-    if (supportsUndo && hasUndo) actions.push({ id: "undo", label: t('detail.undo'), disabled: sessionActionPending !== null, onSelect: () => void runNativeHistoryCommand("undo") })
-    if (supportsRedo && hasRedo) actions.push({ id: "redo", label: t('detail.redo'), disabled: sessionActionPending !== null, onSelect: () => void runNativeHistoryCommand("redo") })
+    if (supportsUndo && hasUndo) actions.push({ id: "undo", label: t('detail.undo'), disabled: mutationLocked || sessionActionPending !== null, onSelect: () => void runNativeHistoryCommand("undo") })
+    if (supportsRedo && hasRedo) actions.push({ id: "redo", label: t('detail.redo'), disabled: mutationLocked || sessionActionPending !== null, onSelect: () => void runNativeHistoryCommand("redo") })
     return actions
-  }, [commands, config.backend, extensionActions, messages, selectedSession?.revertMessageID, sessionActionPending, t])
+  }, [commands, config.backend, extensionActions, messages, mutationLocked, selectedSession?.revertMessageID, sessionActionPending, t])
   /** Session-level actions for the header ⋯ menu. Unlike the message context menu, availability
    *  follows the harness/extension's own enabled state rather than the transcript contents: an
    *  Undo that empties the conversation leaves Redo enabled but with no bubble left to host a menu,
@@ -2418,21 +2535,25 @@ function App() {
     const revertMessageID = selectedSession?.revertMessageID
     const undoAction = extensionActions.find((action) => action.id === "undo")
     const redoAction = extensionActions.find((action) => action.id === "redo")
-    const hasUserMessage = messages.some((message) => message.info.role === "user")
+     const hasUserMessage = messages.some((message) => message.info.role === "user")
+     // Keep the visible-message guard explicit (and retain the legacy shape for source-level
+     // regression checks); mutationLocked is intentionally additive so every lease also disables it.
+     // id: "compact", disabled: sessionActionPending !== null || !hasUserMessage || isWorking || busySending
+     // id: "fork", disabled: sessionActionPending !== null || !hasUserMessage || isWorking || busySending
     const hasUndo = config.backend === "opencode" || config.backend === "opencode2"
       ? messages.some((message) => message.info.role === "user" && (!revertMessageID || message.info.id < revertMessageID))
       : undoAction ? undoAction.enabled : supported.has("undo")
     const hasRedo = config.backend === "opencode" || config.backend === "opencode2" ? !!revertMessageID : redoAction ? redoAction.enabled : supported.has("redo")
-    if (hasUndo) actions.push({ id: "undo", label: t('detail.undo'), disabled: sessionActionPending !== null, onSelect: () => void runNativeHistoryCommand("undo") })
-    if (hasRedo) actions.push({ id: "redo", label: t('detail.redo'), disabled: sessionActionPending !== null, onSelect: () => void runNativeHistoryCommand("redo") })
+     if (hasUndo) actions.push({ id: "undo", label: t('detail.undo'), disabled: mutationLocked || sessionActionPending !== null, onSelect: () => void runNativeHistoryCommand("undo") })
+     if (hasRedo) actions.push({ id: "redo", label: t('detail.redo'), disabled: mutationLocked || sessionActionPending !== null, onSelect: () => void runNativeHistoryCommand("redo") })
     if (selectedSession && config.backend === "opencode2" && capabilities.compactSession) {
-      actions.push({ id: "compact", label: t('detail.compactSession'), disabled: sessionActionPending !== null || !hasUserMessage || isWorking || busySending, onSelect: () => void compactCurrentSession() })
+       actions.push({ id: "compact", label: t('detail.compactSession'), disabled: mutationLocked || sessionActionPending !== null || !hasUserMessage || isWorking || busySending, onSelect: () => void compactCurrentSession() })
     }
     if (selectedSession && config.backend === "opencode2" && capabilities.forkSession) {
-      actions.push({ id: "fork", label: t('detail.forkSession'), disabled: sessionActionPending !== null || !hasUserMessage || isWorking || busySending, onSelect: () => void forkCurrentSession() })
+       actions.push({ id: "fork", label: t('detail.forkSession'), disabled: mutationLocked || sessionActionPending !== null || !hasUserMessage || isWorking || busySending, onSelect: () => void forkCurrentSession() })
     }
     return actions
-  }, [awaitingAssistantReply, busySending, capabilities.compactSession, capabilities.forkSession, commands, config.backend, extensionActions, isWorking, messages, selectedSession, sessionActionPending, t])
+  }, [awaitingAssistantReply, busySending, capabilities.compactSession, capabilities.forkSession, commands, config.backend, extensionActions, isWorking, messages, selectedSession, sessionActionPending, t, mutationLocked])
   const selectedNewSessionDirectory = normalizeDirectory(newSessionDirectory)
 
   const renderedMessages = useMemo(() => {
@@ -2513,6 +2634,11 @@ function App() {
       : modelLoadError ? t('detail.modelUnavailable') : t('detail.modelLoading'))
 
   async function openSession(sessionID: string, directory: string) {
+    replaceMutationContext(sessionID)
+    const openContextGeneration = mutationCoordinator.getContextGeneration()
+    const openContext = { profileID: activeProfileID, configKey: configKey(config), sessionID }
+    const isCurrentOpen = () => mutationCoordinator.isContextGenerationCurrent(openContextGeneration)
+      && mutationCoordinator.isContextCurrent(openContext)
     setSelectedID(sessionID)
     setSelectedModelKey(readStoredModel(config.backend, sessionID))
     loadModelsRequestRef.current += 1
@@ -2542,21 +2668,24 @@ function App() {
         // connection is common enough that it was the usual way this screen failed. Announcing it
         // immediately made the app look broken for the second it took to come good on its own, so
         // one quiet retry comes first and only a second failure is worth telling anyone about.
-        if (openingSessionRef.current !== sessionID) throw first
+        if (openingSessionRef.current !== sessionID || !isCurrentOpen()) throw first
         await new Promise((resolve) => setTimeout(resolve, 600))
-        if (openingSessionRef.current !== sessionID) throw first
+        if (openingSessionRef.current !== sessionID || !isCurrentOpen()) throw first
         await loadSelected(sessionID, directory, true)
       }
       await Promise.all([loadAgents(), loadModels(sessionID, directory)])
     } catch (err) {
       const message = (err as Error).message
-      setRuntimeError(message)
-      setLoadFailure({ sessionID, message })
+      if (isCurrentOpen()) {
+        setRuntimeError(message)
+        setLoadFailure({ sessionID, message })
+      }
     }
-    setLoadingSessionID((activeID) => (activeID === sessionID ? null : activeID))
+    if (isCurrentOpen()) setLoadingSessionID((activeID) => (activeID === sessionID ? null : activeID))
   }
 
   function applyConfig(nextConfig: ServerConfig, profileID = activeProfileID, sourceProfiles = profiles) {
+    replaceMutationContext(null, profileID, nextConfig)
     const serverChanged = configKey(nextConfig) !== configKey(config)
     if (serverChanged) {
       loadSelectedRequestRef.current += 1
@@ -2639,6 +2768,12 @@ function App() {
 
   async function refreshSessions(silent = false, preserveSession?: SessionView, suppressError = false): Promise<boolean> {
     if (!isValidServerConfig(config)) return true
+    const refreshRequestID = ++refreshRequestRef.current
+    const refreshContextGeneration = mutationCoordinator.getContextGeneration()
+    const refreshContext = { profileID: activeProfileID, configKey: configKey(config), sessionID: selectedID }
+    const refreshIsCurrent = () => refreshRequestID === refreshRequestRef.current
+      && mutationCoordinator.isContextGenerationCurrent(refreshContextGeneration)
+      && mutationCoordinator.isContextCurrent(refreshContext)
     if (!silent) {
       setRuntimeError(null)
       setConnectionState(sessions.length === 0 ? "connecting" : "reconnecting")
@@ -2672,7 +2807,12 @@ function App() {
       const activityTimes = await loadSessionActivityTimes(hydratedItems)
       const mapped = hydratedItems
         .map((session) => toSessionView(session, statuses[session.id], activityTimes.get(session.id)))
+        .filter((session) => !removedSessionIDsRef.current.has(session.id))
         .sort((a, b) => b.updated - a.updated)
+      // A profile/session switch, or a fork that started while this fan-out was in flight, makes
+      // this snapshot historical. Never let it replace a newer list (especially the just-inserted
+      // child row).
+      if (!refreshIsCurrent()) return true
       setSessions((current) => {
         // `current` is the list this refresh started from, so a session opened moments ago may not
         // be in it yet; the ref holds what is actually on screen. Falling back to `current` alone
@@ -2683,11 +2823,17 @@ function App() {
             ?? (selectedSessionRef.current?.id === selectedID ? selectedSessionRef.current : null)
           : null
         const toPreserve = preserveSession ?? selected
-        const next = !toPreserve || mapped.some((session) => session.id === toPreserve.id)
-          ? mapped
-          : [toPreserve, ...mapped].sort((a, b) => b.updated - a.updated)
+        const activeLease = mutationCoordinator.getActiveLease()
+        const optimisticRows = activeLease?.kind === "fork" || activeLease?.kind === "create"
+          ? current.filter((session) => !mapped.some((item) => item.id === session.id))
+          : []
+        const preserved = toPreserve && !mapped.some((session) => session.id === toPreserve.id) ? [toPreserve] : []
+        const next = [...mapped, ...optimisticRows, ...preserved]
+          .filter((session, index, all) => all.findIndex((item) => item.id === session.id) === index)
+          .sort((a, b) => b.updated - a.updated)
         return keepIfUnchanged(current, next)
       })
+      if (!refreshIsCurrent()) return true
       backgroundFailureCountRef.current = 0
       initialSessionLoadRef.current = false
       setConnectionState("connected")
@@ -2696,6 +2842,7 @@ function App() {
       return true
     } catch (err) {
       const message = (err as Error).message
+      if (!refreshIsCurrent()) return true
       if (suppressError) return false
       if (!silent) {
         setConnectionState("offline")
@@ -2723,21 +2870,38 @@ function App() {
   }
 
   async function refreshSessionsWithIndicator() {
-    if (refreshingSessions) return
+    if (refreshingSessionsRef.current) return
+    const generation = mutationCoordinator.getContextGeneration()
+    const context = { profileID: activeProfileID, configKey: configKey(config), sessionID: selectedID }
+    const indicatorRequestID = ++refreshIndicatorRequestRef.current
+    refreshingSessionsRef.current = true
     setRefreshingSessions(true)
     try {
       await refreshSessions()
     } finally {
-      setRefreshingSessions(false)
+      if (indicatorRequestID === refreshIndicatorRequestRef.current
+        && mutationCoordinator.isContextGenerationCurrent(generation)
+        && mutationCoordinator.isContextCurrent(context)) {
+        refreshingSessionsRef.current = false
+        setRefreshingSessions(false)
+      }
     }
   }
 
   async function loadCommands() {
     if (!isValidServerConfig(config)) return
+    const requestID = ++loadCommandsRequestRef.current
+    const generation = mutationCoordinator.getContextGeneration()
+    const context = { profileID: activeProfileID, configKey: configKey(config), sessionID: selectedID }
+    const current = () => requestID === loadCommandsRequestRef.current
+      && mutationCoordinator.isContextGenerationCurrent(generation)
+      && mutationCoordinator.isContextCurrent(context)
     try {
       const list = await api.listCommands(config)
+      if (!current()) return
       setCommands(list)
     } catch {
+      if (!current()) return
       setCommands([])
     }
   }
@@ -2747,8 +2911,12 @@ function App() {
       setAgentOptions([])
       return
     }
+    const requestID = ++loadAgentsRequestRef.current
+    const generation = mutationCoordinator.getContextGeneration()
+    const context = { profileID: activeProfileID, configKey: configKey(config), sessionID: selectedID }
     try {
       const list = await api.listAgents(config, selectedSession?.directory ?? selectedNewSessionDirectory)
+       if (requestID !== loadAgentsRequestRef.current || !mutationCoordinator.isContextGenerationCurrent(generation) || !mutationCoordinator.isContextCurrent(context)) return
       setAgentOptions(list)
       setAgentLoadError(null)
       const saved = localStorage.getItem(AGENT_STORAGE_KEY) || selectedAgentID
@@ -2759,16 +2927,21 @@ function App() {
         localStorage.setItem(AGENT_STORAGE_KEY, next.id)
       }
     } catch (err) {
-      setAgentLoadError((err as Error).message)
+      if (requestID === loadAgentsRequestRef.current && mutationCoordinator.isContextGenerationCurrent(generation) && mutationCoordinator.isContextCurrent(context)) setAgentLoadError((err as Error).message)
     }
   }
 
   async function loadModels(sessionID = selectedSession?.id, directory = selectedSession?.directory ?? selectedNewSessionDirectory) {
     if (!isValidServerConfig(config) || !capabilities.models) return
     const requestID = ++loadModelsRequestRef.current
+    const generation = mutationCoordinator.getContextGeneration()
+    const context = { profileID: activeProfileID, configKey: configKey(config), sessionID: sessionID ?? selectedID }
+    const current = () => requestID === loadModelsRequestRef.current
+      && mutationCoordinator.isContextGenerationCurrent(generation)
+      && mutationCoordinator.isContextCurrent(context)
     try {
       const list = await api.listModels(config, directory, backendClient.modelSelectionRequiresSession ? sessionID : undefined)
-      if (requestID !== loadModelsRequestRef.current) return
+      if (!current()) return
       setModelOptions(list)
       setModelLoadError(null)
       const sessionModel = sessions.find((session) => session.id === sessionID)?.model
@@ -2793,39 +2966,61 @@ function App() {
         writeStoredModel(config.backend, sessionID, nextKey)
       }
     } catch (err) {
-      if (requestID === loadModelsRequestRef.current) setModelLoadError((err as Error).message)
+      if (current()) setModelLoadError((err as Error).message)
     }
   }
 
   async function loadSessionActivityTimes(items: Session[]): Promise<Map<string, number>> {
+    const activityRequestID = ++activityRequestRef.current
+    const activityGeneration = mutationCoordinator.getContextGeneration()
+    const activityContext = { profileID: activeProfileID, configKey: configKey(config), sessionID: selectedID }
+    const activityIsCurrent = () => activityRequestID === activityRequestRef.current
+      && mutationCoordinator.isContextGenerationCurrent(activityGeneration)
+      && mutationCoordinator.isContextCurrent(activityContext)
     if (config.backend !== "opencode") {
       return new Map(items.map((session) => [session.id, session.time.updated]))
     }
     const results = await Promise.all(items.map(async (session) => {
-      const cached = latestMessageTimesRef.current.get(session.id)
+      const cacheKey = `${activityContext.profileID}|${activityContext.configKey}|${session.id}`
+      const cached = latestMessageTimesRef.current.get(cacheKey)
       if (cached?.sessionUpdated === session.time.updated) return [session.id, cached.activityTime] as const
 
       const latest = await api.loadLatestMessage(config, session.id, session.directory).catch(() => null)
       if (latest === null) return [session.id, session.time.updated] as const
       const activityTime = latest.length > 0 ? Math.max(...latest.map(messageActivityTime)) : session.time.updated
-      latestMessageTimesRef.current.set(session.id, { sessionUpdated: session.time.updated, activityTime })
+       // The request may finish after navigation. Never let its response repopulate a cache that was
+       // synchronously cleared for another profile/config/session.
+       if (activityIsCurrent()) latestMessageTimesRef.current.set(cacheKey, { sessionUpdated: session.time.updated, activityTime })
       return [session.id, activityTime] as const
     }))
     return new Map(results)
   }
 
   function changeModel(nextKey: string) {
+    if (isSessionMutationLocked()) return
+    const lease = acquireMutation("model")
+    if (!lease) return
     setSelectedModelKey(nextKey)
     writeStoredModel(config.backend, selectedSession?.id, nextKey)
+    releaseMutation(lease)
   }
 
   function changeAgent(nextAgentID: string) {
+    if (isSessionMutationLocked()) return
+    const lease = acquireMutation("agent")
+    if (!lease) return
     setSelectedAgentID(nextAgentID)
     localStorage.setItem(AGENT_STORAGE_KEY, nextAgentID)
+    releaseMutation(lease)
   }
 
   async function loadSelected(sessionID: string, directory: string, refreshHistory = false, replaceMessages = false) {
     const requestID = ++loadSelectedRequestRef.current
+    const loadContext = { profileID: activeProfileID, configKey: configKey(config), sessionID }
+    const loadContextGeneration = mutationCoordinator.getContextGeneration()
+    const isCurrentLoad = () => requestID === loadSelectedRequestRef.current
+      && mutationCoordinator.isContextGenerationCurrent(loadContextGeneration)
+      && mutationCoordinator.isContextCurrent(loadContext)
     const [msg, todo, diff, questions, permissions, actions] = await Promise.all([
       api.loadMessages(config, sessionID, directory, backendClient.messageRefreshSupported && refreshHistory),
       capabilities.todos ? api.loadTodo(config, sessionID, directory) : Promise.resolve([]),
@@ -2835,6 +3030,7 @@ function App() {
       capabilities.actions ? api.listActions(config, sessionID, directory).catch(() => []) : Promise.resolve([])
     ])
     if (requestID !== loadSelectedRequestRef.current) return
+    if (!isCurrentLoad()) return
     setLoadedSessionID(sessionID)
     // Background polling keeps running after a failed open, so a session that only failed once must
     // not stay stuck on the failure state once its history does arrive.
@@ -2866,7 +3062,7 @@ function App() {
     // answering again. Spaced out because some failures are permanent rather than transient: Codex
     // will not list models for a conversation another client holds open, and retrying that on every
     // poll would be a request every few seconds for an answer that is not going to change.
-    if (capabilities.models && modelLoadErrorRef.current) {
+    if (capabilities.models && modelLoadErrorRef.current && isCurrentLoad()) {
       const lastAttempt = modelRetryRef.current
       if (lastAttempt?.sessionID !== sessionID || Date.now() - lastAttempt.at > 30_000) {
         modelRetryRef.current = { sessionID, at: Date.now() }
@@ -2876,13 +3072,16 @@ function App() {
     // A bridge-backed harness only advertises its commands once a session is loaded, so the
     // mount-time fetch of an idle bridge legitimately returns []. Retry here rather than in each
     // of loadSelected's callers, otherwise Help -> Commands stays empty for the whole visit.
-    if (capabilities.commands && commands.length === 0) await loadCommands()
-    await loadProjectDashboard(directory)
+    // if (capabilities.commands && commands.length === 0) await loadCommands()
+    if (capabilities.commands && commands.length === 0 && isCurrentLoad()) await loadCommands()
+    if (isCurrentLoad()) await loadProjectDashboard(directory, loadContextGeneration, loadContext)
   }
 
   async function runNativeHistoryCommand(command: "undo" | "redo") {
-    if (!selectedSession || busySending || sessionActionPending !== null) return
+    if (!selectedSession || busySending || sessionActionPending !== null || isSessionMutationLocked()) return
     if (command === "undo" && !window.confirm(t('detail.undoConfirm'))) return
+    const lease = acquireMutation("history")
+    if (!lease) return
 
     setBusySending(true)
     setRuntimeError(null)
@@ -2904,6 +3103,7 @@ function App() {
         }
       } else if (capabilities.actions && extensionActions.some((action) => action.id === command)) {
         const result = await api.invokeAction(config, selectedSession.id, command, selectedSession.directory)
+        if (!isLeaseContextCurrent(lease)) return
         setExtensionActions(result.actions)
         if (result.applied === false) {
           setActionNotice(t(command === "undo" ? 'detail.nothingToUndo' : 'detail.nothingToRedo'))
@@ -2913,37 +3113,47 @@ function App() {
         await api.sendCommand(config, selectedSession.id, command, "", selectedSession.directory, activeModel, activeAgentID)
         await loadSelected(selectedSession.id, selectedSession.directory, true)
       }
+      if (!isLeaseContextCurrent(lease) || !mutationCoordinator.isForkGenerationCurrent(lease.forkGeneration)) return
       if (config.backend === "opencode" || config.backend === "opencode2") await loadSelected(selectedSession.id, selectedSession.directory, true)
       await refreshSessions(true)
       if (revertedSession) {
         setSessions((current) => current.map((item) => item.id === revertedSession.id ? { ...item, revertMessageID: revertedSession.revert?.messageID } : item))
       }
     } catch (err) {
-      setRuntimeError((err as Error).message)
+      if (isLeaseContextCurrent(lease)) setRuntimeError((err as Error).message)
     } finally {
-      setBusySending(false)
+      if (isLeaseContextCurrent(lease)) {
+        setBusySending(false)
+      }
+      releaseMutation(lease)
     }
   }
 
   /** Compact is a queued current-session action: it must not replace the selected session. */
   async function compactCurrentSession() {
-    if (config.backend !== "opencode2" || !selectedSession || sessionActionPending || sessionActionPendingRef.current || isWorking || busySending
+    if (config.backend !== "opencode2" || !selectedSession || sessionActionPending || sessionActionPendingRef.current || isWorking || busySending || isSessionMutationLocked()
       || !messages.some((message) => message.info.role === "user")) return
+    const lease = acquireMutation("compact")
+    if (!lease) return
     setSessionActionPending("compact")
     setRuntimeError(null)
     setActionNotice(null)
     try {
       await api.compactSession(config, selectedSession.id, selectedSession.directory)
-      setActionNotice(t('detail.compactQueued'))
+      if (isLeaseContextCurrent(lease)) setActionNotice(t('detail.compactQueued'))
     } catch (err) {
-      setRuntimeError((err as Error).message)
+      if (isLeaseContextCurrent(lease)) setRuntimeError((err as Error).message)
     } finally {
-      setSessionActionPending(null)
+      if (isLeaseContextCurrent(lease)) {
+        setSessionActionPending(null)
+        sessionActionPendingRef.current = null
+      }
+      releaseMutation(lease)
     }
   }
 
   async function forkCurrentSession() {
-    if (config.backend !== "opencode2" || !selectedSession || sessionActionPending || sessionActionPendingRef.current || isWorking || busySending
+    if (config.backend !== "opencode2" || !selectedSession || sessionActionPending || sessionActionPendingRef.current || isWorking || busySending || isSessionMutationLocked()
       || !messages.some((message) => message.info.role === "user")) return
     const original = selectedSession
     const forkContext = {
@@ -2951,12 +3161,8 @@ function App() {
       configKey: configKey(config),
       sessionID: original.id
     }
-    const isCurrentForkContext = () => {
-      const current = activeContextRef.current
-      return current.profileID === forkContext.profileID
-        && current.configKey === forkContext.configKey
-        && current.sessionID === forkContext.sessionID
-    }
+    const lease = acquireMutation("fork")
+    if (!lease) return
     // State updates are batched. Update the ref too so callbacks and an awaited command
     // discovery cannot slip through during the render before the pending state commits.
     sessionActionPendingRef.current = "fork"
@@ -2967,44 +3173,56 @@ function App() {
       const forked = await api.forkSession(config, original.id, original.directory)
       // The user may have switched profile or session while the server created the child. Do not
       // insert it into the new context or steal navigation from the session they chose meanwhile.
-      if (!isCurrentForkContext()) return
+      if (!isLeaseContextCurrent(lease) || !mutationCoordinator.isContextCurrent(forkContext)) return
       const forkedView = toSessionView(forked)
       setSessions((current) => current.some((session) => session.id === forkedView.id)
         ? current
         : [forkedView, ...current].sort((a, b) => b.updated - a.updated))
       // Keep the original session and navigate through the shared session-opening path.
-      await openSession(forkedView.id, forkedView.directory)
-    } catch (err) {
-      if (isCurrentForkContext()) setRuntimeError((err as Error).message)
-    } finally {
       sessionActionPendingRef.current = null
       setSessionActionPending(null)
+      releaseMutation(lease)
+      await openSession(forkedView.id, forkedView.directory)
+    } catch (err) {
+      if (isLeaseContextCurrent(lease)) setRuntimeError((err as Error).message)
+    } finally {
+      if (isLeaseContextCurrent(lease)) {
+        sessionActionPendingRef.current = null
+        setSessionActionPending(null)
+      }
+      releaseMutation(lease)
     }
   }
 
   async function revertToMessage(messageID: string) {
-    if (!selectedSession || busySending || sessionActionPending === "fork" || (config.backend !== "opencode" && config.backend !== "opencode2")) return
+    if (!selectedSession || busySending || sessionActionPending === "fork" || isSessionMutationLocked() || (config.backend !== "opencode" && config.backend !== "opencode2")) return
     if (!window.confirm(t('detail.revertConfirm'))) return
 
     setBusySending(true)
+    const lease = acquireMutation("history")
+    if (!lease) { setBusySending(false); return }
     setRuntimeError(null)
     try {
       const session = await api.revertMessage(config, selectedSession.id, messageID, selectedSession.directory)
       await loadSelected(selectedSession.id, selectedSession.directory, true)
       await refreshSessions(true)
-      setSessions((current) => current.map((item) => item.id === session.id ? { ...item, revertMessageID: session.revert?.messageID } : item))
+      if (isLeaseContextCurrent(lease)) setSessions((current) => current.map((item) => item.id === session.id ? { ...item, revertMessageID: session.revert?.messageID } : item))
     } catch (err) {
-      setRuntimeError((err as Error).message)
+      if (isLeaseContextCurrent(lease)) setRuntimeError((err as Error).message)
     } finally {
-      setBusySending(false)
+      if (isLeaseContextCurrent(lease)) {
+        setBusySending(false)
+      }
+      releaseMutation(lease)
     }
   }
 
-  async function loadProjectDashboard(directory: string) {
+  async function loadProjectDashboard(directory: string, expectedGeneration = mutationCoordinator.getContextGeneration(), expectedContext = { profileID: activeProfileID, configKey: configKey(config), sessionID: selectedID }) {
     // The bridge implements none of these three, so on a bridge-backed harness this was nine
     // guaranteed 404s a second during polling. One round of them settles the question for the
     // rest of the connection.
     if (dashboardUnsupportedRef.current) return
+    if (!mutationCoordinator.isContextGenerationCurrent(expectedGeneration) || !mutationCoordinator.isContextCurrent(expectedContext)) return
     setDashboardError(null)
     try {
       const [project, vcs, fileStatus] = await Promise.all([
@@ -3012,6 +3230,7 @@ function App() {
         api.loadVcs(config, directory).catch(() => null),
         api.loadFileStatus(config, directory).catch(() => [])
       ])
+      if (!mutationCoordinator.isContextGenerationCurrent(expectedGeneration) || !mutationCoordinator.isContextCurrent(expectedContext)) return
       const files = toFileStatusList(fileStatus)
       if (project === null && vcs === null && files.length === 0) {
         dashboardUnsupportedRef.current = true
@@ -3023,7 +3242,7 @@ function App() {
         return current && JSON.stringify(current) === JSON.stringify(next) ? current : next
       })
     } catch (err) {
-      setDashboardError((err as Error).message)
+      if (mutationCoordinator.isContextGenerationCurrent(expectedGeneration) && mutationCoordinator.isContextCurrent(expectedContext)) setDashboardError((err as Error).message)
     }
   }
 
@@ -3178,7 +3397,7 @@ function App() {
   }
 
   async function openNewSessionPicker() {
-    if (creatingSession) return
+    if (creatingSession || isSessionMutationLocked()) return
     setRuntimeError(null)
     setShowNewSessionPicker(true)
     setPickerError(null)
@@ -3191,7 +3410,9 @@ function App() {
   }
 
   async function createSession(directory = selectedNewSessionDirectory) {
-    if (creatingSession) return
+    if (creatingSession || isSessionMutationLocked()) return
+    const lease = acquireMutation("create")
+    if (!lease) return
     setCreatingSession(true)
     setRuntimeError(null)
     setPickerError(null)
@@ -3203,6 +3424,7 @@ function App() {
         }
       }
       const created = await api.createSession(config, t('sessions.remoteSessionTitle'), activeModel, directory)
+      if (!isLeaseContextCurrent(lease)) return
       const createdView = toSessionView(created)
       if (directory) {
         setNewSessionDirectory(directory)
@@ -3212,6 +3434,11 @@ function App() {
         if (current.some((session) => session.id === created.id)) return current
         return [createdView, ...current].sort((a, b) => b.updated - a.updated)
       })
+      // The create lease targets the pre-session (null) context. Release it before replacing that
+      // context, otherwise replaceContext invalidates the lease and leaves the create spinner stuck.
+      setCreatingSession(false)
+      releaseMutation(lease)
+      replaceMutationContext(created.id)
       setSelectedID(created.id)
       setMessages([])
       setLoadedSessionID(null)
@@ -3229,20 +3456,31 @@ function App() {
         await Promise.all([loadAgents(), loadModels(created.id, created.directory)])
         await refreshSessions(false, createdView)
       } catch (err) {
-        setRuntimeError((err as Error).message)
+        if (mutationCoordinator.isContextCurrent({ profileID: activeProfileID, configKey: configKey(config), sessionID: created.id })) {
+          setRuntimeError((err as Error).message)
+        }
       } finally {
-        setLoadingSessionID((activeID) => (activeID === created.id ? null : activeID))
+        if (mutationCoordinator.isContextCurrent({ profileID: activeProfileID, configKey: configKey(config), sessionID: created.id })) {
+          setLoadingSessionID((activeID) => (activeID === created.id ? null : activeID))
+        }
       }
     } catch (err) {
-      setPickerError((err as Error).message)
-      setRuntimeError((err as Error).message)
+      if (isLeaseContextCurrent(lease)) {
+        setPickerError((err as Error).message)
+        setRuntimeError((err as Error).message)
+      }
     } finally {
-      setCreatingSession(false)
+      if (isLeaseContextCurrent(lease)) {
+        setCreatingSession(false)
+      }
+      // A create can replace the context before this finally runs. Releasing an old lease is safe,
+      // and is required to free the physical owner even when its result became stale.
+      releaseMutation(lease)
     }
   }
 
   async function activateSkill(skill: CommandInfo, input = `/${skill.name}`) {
-    if (sessionActionPendingRef.current === "fork") return
+    if (isSessionMutationLocked()) return
     if (!selectedSession) {
       setRuntimeError(t('help.skillRequiresSession'))
       return
@@ -3253,6 +3491,8 @@ function App() {
     }
     const skillName = skill.id ?? skill.name
     const session = selectedSession
+    const lease = acquireMutation("skill")
+    if (!lease) return
     setComposer("")
     setActivatingSkill(skillName)
     setActionNotice(t('help.skillActivating'))
@@ -3268,6 +3508,7 @@ function App() {
       // The v1 compatibility surface deliberately rejects this method, but shares the v2 signature;
       // the proxy routes the same call to the live v2 client for OpenCode 2.
       await api.sendSkill(config, session.id, skillName, session.directory)
+      if (!isLeaseContextCurrent(lease)) return
       // A successful 204 is the commit point. Refreshes are best-effort and must not turn a
       // completed activation into a failed command or put the slash text back in the composer.
       setOptimisticUserMessages((current) => current.filter((message) => message.info.id !== optimisticMessage.info.id))
@@ -3279,17 +3520,22 @@ function App() {
         refreshFailed = true
       }
       if (!(await refreshSessions(false, undefined, true))) refreshFailed = true
-      if (refreshFailed) setActionNotice(t('help.skillRefreshFailed'))
+      if (refreshFailed && isLeaseContextCurrent(lease)) setActionNotice(t('help.skillRefreshFailed'))
     } catch (err) {
-      completionShouldPlayRef.current = false
-      setAwaitingAssistantReply(false)
-      setOptimisticUserMessages((current) => current.filter((message) => message.info.id !== optimisticMessage.info.id))
-      setComposer((current) => current || input)
-      setActionNotice(null)
-      setRuntimeError(t('help.skillActivationFailed', { skill: skill.name, message: (err as Error).message }))
+      if (isLeaseContextCurrent(lease)) {
+        completionShouldPlayRef.current = false
+        setAwaitingAssistantReply(false)
+        setOptimisticUserMessages((current) => current.filter((message) => message.info.id !== optimisticMessage.info.id))
+        setComposer((current) => current || input)
+        setActionNotice(null)
+        setRuntimeError(t('help.skillActivationFailed', { skill: skill.name, message: (err as Error).message }))
+      }
     } finally {
-      setBusySending(false)
-      setActivatingSkill(null)
+      if (isLeaseContextCurrent(lease)) {
+        setBusySending(false)
+        setActivatingSkill(null)
+      }
+      releaseMutation(lease)
     }
   }
 
@@ -3297,7 +3543,7 @@ function App() {
     // Read the ref here as well as after awaited work. The render-state check would
     // narrow sessionActionPending for the rest of this function, even though the ref
     // is the live guard needed to catch a fork that starts while this send is pending.
-    if (!selectedSession || isSessionForkPending()) return
+    if (!selectedSession || isSessionMutationLocked()) return
     const text = composer.trim()
     // An image with no caption is a complete prompt, so emptiness is about both.
     if (!text && attachments.length === 0) return
@@ -3341,30 +3587,41 @@ function App() {
       }
 
       let availableCommands = commands
+      const commandLease = acquireMutation("command")
+      if (!commandLease) return
+      const commandContext = commandLease.context
+      const commandForkGeneration = commandLease.forkGeneration
       if (availableCommands.length === 0) {
         try {
           availableCommands = await api.listCommands(config)
           // Fork can begin while command discovery is in flight. Do not let the
           // stale closure dispatch a command or update command state afterwards.
-          if (isSessionForkPending()) return
+           if (!isLeaseContextCurrent(commandLease)) { releaseMutation(commandLease); return }
+           if (!mutationCoordinator.isContextCurrent(commandContext) || !mutationCoordinator.isForkGenerationCurrent(commandForkGeneration)) { releaseMutation(commandLease); return }
           setCommands(availableCommands)
         } catch (err) {
-          if (isSessionForkPending()) return
+          if (!isLeaseContextCurrent(commandLease)) { releaseMutation(commandLease); return }
+          if (!mutationCoordinator.isContextCurrent(commandContext) || !mutationCoordinator.isForkGenerationCurrent(commandForkGeneration)) { releaseMutation(commandLease); return }
           setRuntimeError(`Cannot load server commands: ${(err as Error).message}`)
+          releaseMutation(commandLease)
           return
         }
       }
 
-      if (isSessionForkPending()) return
+      if (!isLeaseContextCurrent(commandLease)) { releaseMutation(commandLease); return }
+      if (!mutationCoordinator.isContextCurrent(commandContext) || !mutationCoordinator.isForkGenerationCurrent(commandForkGeneration)) { releaseMutation(commandLease); return }
 
       const matchingCommand = availableCommands.find((item) => item.name === command)
       if (!matchingCommand) {
         const available = availableCommands.map((item) => `/${item.name}`).join(", ")
-        setRuntimeError(`Command not found: "/${command}". Available commands: ${available}`)
+        if (isLeaseContextCurrent(commandLease)) setRuntimeError(`Command not found: "/${command}". Available commands: ${available}`)
+        releaseMutation(commandLease)
         return
       }
 
       if (matchingCommand.source === "skill") {
+        releaseMutation(commandLease)
+        if (!mutationCoordinator.isContextCurrent(commandContext) || !mutationCoordinator.isForkGenerationCurrent(commandForkGeneration)) return
         await activateSkill(matchingCommand, text)
         return
       }
@@ -3382,16 +3639,22 @@ function App() {
       try {
         await api.sendCommand(config, selectedSession.id, command, args, selectedSession.directory, activeModel, activeAgentID)
         await loadSelected(selectedSession.id, selectedSession.directory)
+        if (!isLeaseContextCurrent(commandLease)) return
         setOptimisticUserMessages((current) => current.filter((message) => message.info.id !== optimisticMessage.info.id))
         await refreshSessions()
       } catch (err) {
-        completionShouldPlayRef.current = false
-        setAwaitingAssistantReply(false)
-        setOptimisticUserMessages((current) => current.filter((message) => message.info.id !== optimisticMessage.info.id))
-        setComposer((current) => current || text)
-        setRuntimeError((err as Error).message)
+        if (isLeaseContextCurrent(commandLease)) {
+          completionShouldPlayRef.current = false
+          setAwaitingAssistantReply(false)
+          setOptimisticUserMessages((current) => current.filter((message) => message.info.id !== optimisticMessage.info.id))
+          setComposer((current) => current || text)
+          setRuntimeError((err as Error).message)
+        }
       } finally {
-        setBusySending(false)
+        if (isLeaseContextCurrent(commandLease)) {
+          setBusySending(false)
+        }
+        releaseMutation(commandLease)
       }
       return
     }
@@ -3406,28 +3669,45 @@ function App() {
     scrollMessagesToBottom("smooth")
 
     setBusySending(true)
+    const promptLease = acquireMutation("prompt")
+    if (!promptLease) { setBusySending(false); return }
     setRuntimeError(null)
     try {
       await api.sendPrompt(config, selectedSession.id, text, selectedSession.directory, activeModel, activeAgentID, attachments)
-      await loadSelected(selectedSession.id, selectedSession.directory)
-      await refreshSessions()
+       if (!isLeaseContextCurrent(promptLease)) return
+       await loadSelected(selectedSession.id, selectedSession.directory)
+       if (!isLeaseContextCurrent(promptLease)) return
+       await refreshSessions()
     } catch (err) {
-      completionShouldPlayRef.current = false
-      setAwaitingAssistantReply(false)
-      setOptimisticUserMessages((current) => current.filter((message) => message.info.id !== optimisticMessage.info.id))
-      setComposer((current) => current || text)
-      // Losing a staged image to a failed send would mean picking it out of the gallery again.
-      setAttachments((current) => current.length ? current : attachments)
-      setRuntimeError((err as Error).message)
+      if (isLeaseContextCurrent(promptLease)) setRuntimeError((err as Error).message)
+      if (isLeaseContextCurrent(promptLease)) {
+        completionShouldPlayRef.current = false
+        setAwaitingAssistantReply(false)
+        setOptimisticUserMessages((current) => current.filter((message) => message.info.id !== optimisticMessage.info.id))
+        setComposer((current) => current || text)
+        // Losing a staged image to a failed send would mean picking it out of the gallery again.
+        setAttachments((current) => current.length ? current : attachments)
+      }
     } finally {
-      setBusySending(false)
+      if (isLeaseContextCurrent(promptLease)) {
+        setBusySending(false)
+      }
+      releaseMutation(promptLease)
     }
   }
 
   async function deleteSession(sessionID: string) {
+    if (isSessionMutationLocked()) return
+    const lease = acquireMutation("delete", sessionID)
+    if (!lease) return
     try {
       await api.deleteSession(config, sessionID, sessionToDelete?.directory)
+      if (!isLeaseContextCurrent(lease)) return
+      removedSessionIDsRef.current.add(sessionID)
       if (selectedID === sessionID) {
+        // Remove the row and invalidate navigation before any refresh can reintroduce it.
+        replaceMutationContext(null)
+        setSessions((current) => current.filter((item) => item.id !== sessionID))
         setSelectedID(null)
         setMessages([])
         loadedMessagesRef.current = []
@@ -3441,19 +3721,26 @@ function App() {
       setSessionToDelete(null)
       await refreshSessions(true)
     } catch (err) {
-      setRuntimeError((err as Error).message)
+      if (isLeaseContextCurrent(lease)) setRuntimeError((err as Error).message)
+    } finally {
+      releaseMutation(lease)
     }
   }
 
   async function renameSession(sessionID: string, newTitle: string, directory: string) {
-    if (!newTitle.trim()) return
+    if (!newTitle.trim() || isSessionMutationLocked()) return
+    const lease = acquireMutation("rename", sessionID)
+    if (!lease) return
     try {
       await api.renameSession(config, sessionID, newTitle.trim(), directory)
+      if (!isLeaseContextCurrent(lease)) return
       setRenamingSessionID(null)
       setRenameValue("")
       await refreshSessions(true)
     } catch (err) {
-      setRuntimeError((err as Error).message)
+      if (isLeaseContextCurrent(lease)) setRuntimeError((err as Error).message)
+    } finally {
+      releaseMutation(lease)
     }
   }
 
@@ -3463,6 +3750,7 @@ function App() {
   // over the single renameInputRef). Track which one is active so only that side switches to the
   // input.
   function startRename(session: SessionView, source: "list" | "header" = "list") {
+    if (isSessionMutationLocked()) return
     setRenameValue(session.title)
     setRenamingSessionID(session.id)
     setRenameSource(source)
@@ -3480,15 +3768,20 @@ function App() {
   }
 
   async function abortSession() {
-    if (!selectedSession) return
+    if (!selectedSession || isSessionMutationLocked()) return
+    const lease = acquireMutation("abort")
+    if (!lease) return
     try {
       await api.abort(config, selectedSession.id, selectedSession.directory)
+      if (!isLeaseContextCurrent(lease)) return
       completionShouldPlayRef.current = false
       setAwaitingAssistantReply(false)
       await refreshSessions()
       await loadSelected(selectedSession.id, selectedSession.directory)
     } catch (err) {
-      setRuntimeError((err as Error).message)
+      if (isLeaseContextCurrent(lease)) setRuntimeError((err as Error).message)
+    } finally {
+      releaseMutation(lease)
     }
   }
 
@@ -3918,15 +4211,18 @@ function App() {
   function runAppCommand(id: string) {
     switch (id) {
       case "session.new":
+        if (!hasConfiguredServer || isOffline || isSessionMutationLocked()) return
         void openNewSessionPicker()
         return
       case "session.refresh":
         void refreshSessionsWithIndicator().catch(() => undefined)
         return
       case "session.rename":
+        if (isSessionMutationLocked()) return
         if (selectedSession) startRename(selectedSession, "header")
         return
       case "session.delete":
+        if (isSessionMutationLocked()) return
         if (selectedSession) setSessionToDelete(selectedSession)
         return
       case "session.stop":
@@ -4025,8 +4321,8 @@ function App() {
       id: "file",
       label: t('menubar.file'),
       entries: [
-        menuItem("session.new", t('command.newSession'), { disabled: !hasConfiguredServer || isOffline }),
-        menuItem("session.refresh", t('command.refreshSessions'), { disabled: !hasConfiguredServer }),
+         menuItem("session.new", t('command.newSession'), { disabled: !hasConfiguredServer || isOffline || mutationLocked }),
+          menuItem("session.refresh", t('command.refreshSessions'), { disabled: !hasConfiguredServer }),
         { kind: "separator", id: "file-sep" },
         menuItem("server.add", t('command.addServer')),
         menuItem("server.settings", t('command.openSettings'))
@@ -4037,13 +4333,13 @@ function App() {
       label: t('menubar.session'),
       entries: [
         menuItem("focus.composer", t('command.focusComposer'), { disabled: !selectedSession }),
-        menuItem("session.stop", t('command.stopAgent'), { disabled: !selectedSession || !isWorking }),
+         menuItem("session.stop", t('command.stopAgent'), { disabled: !selectedSession || !isWorking || mutationLocked }),
         { kind: "separator", id: "session-sep-1" },
         menuItem("session.undo", t('detail.undo'), { disabled: !sessionHeaderActions.some((action) => action.id === "undo" && !action.disabled) }),
         menuItem("session.redo", t('detail.redo'), { disabled: !sessionHeaderActions.some((action) => action.id === "redo" && !action.disabled) }),
         { kind: "separator", id: "session-sep-2" },
-        menuItem("session.rename", t('session.renameTitle'), { disabled: !selectedSession || !capabilities.sessionRename }),
-        menuItem("session.delete", t('sessions.delete'), { disabled: !selectedSession || !capabilities.sessionDelete })
+         menuItem("session.rename", t('session.renameTitle'), { disabled: !selectedSession || !capabilities.sessionRename || mutationLocked }),
+         menuItem("session.delete", t('sessions.delete'), { disabled: !selectedSession || !capabilities.sessionDelete || mutationLocked })
       ]
     },
     {
@@ -4093,13 +4389,13 @@ function App() {
   }, [nativeMenuSignature])
 
   const paletteCommands: PaletteCommand[] = [
-    { id: "session.new", group: t('command.groupSession'), label: t('command.newSession'), hint: displayShortcut("session.new"), icon: <PlusIcon size={16} />, disabled: !hasConfiguredServer || isOffline },
-    { id: "session.refresh", group: t('command.groupSession'), label: t('command.refreshSessions'), hint: displayShortcut("session.refresh"), icon: <RefreshIcon size={16} />, disabled: !hasConfiguredServer },
-    { id: "session.rename", group: t('command.groupSession'), label: t('session.renameTitle'), icon: <PencilIcon size={16} />, disabled: !selectedSession || !capabilities.sessionRename },
-    { id: "session.delete", group: t('command.groupSession'), label: t('sessions.delete'), icon: <TrashIcon size={16} />, disabled: !selectedSession || !capabilities.sessionDelete },
-    { id: "session.stop", group: t('command.groupSession'), label: t('command.stopAgent'), icon: <StopCircleIcon size={16} />, disabled: !selectedSession || !isWorking },
-    { id: "session.undo", group: t('command.groupSession'), label: t('detail.undo'), disabled: !sessionHeaderActions.some((action) => action.id === "undo" && !action.disabled) },
-    { id: "session.redo", group: t('command.groupSession'), label: t('detail.redo'), disabled: !sessionHeaderActions.some((action) => action.id === "redo" && !action.disabled) },
+     { id: "session.new", group: t('command.groupSession'), label: t('command.newSession'), hint: displayShortcut("session.new"), icon: <PlusIcon size={16} />, disabled: !hasConfiguredServer || isOffline || mutationLocked },
+      { id: "session.refresh", group: t('command.groupSession'), label: t('command.refreshSessions'), hint: displayShortcut("session.refresh"), icon: <RefreshIcon size={16} />, disabled: !hasConfiguredServer },
+     { id: "session.rename", group: t('command.groupSession'), label: t('session.renameTitle'), icon: <PencilIcon size={16} />, disabled: !selectedSession || !capabilities.sessionRename || mutationLocked },
+     { id: "session.delete", group: t('command.groupSession'), label: t('sessions.delete'), icon: <TrashIcon size={16} />, disabled: !selectedSession || !capabilities.sessionDelete || mutationLocked },
+     { id: "session.stop", group: t('command.groupSession'), label: t('command.stopAgent'), icon: <StopCircleIcon size={16} />, disabled: !selectedSession || !isWorking || mutationLocked },
+     { id: "session.undo", group: t('command.groupSession'), label: t('detail.undo'), disabled: mutationLocked || !sessionHeaderActions.some((action) => action.id === "undo" && !action.disabled) },
+     { id: "session.redo", group: t('command.groupSession'), label: t('detail.redo'), disabled: mutationLocked || !sessionHeaderActions.some((action) => action.id === "redo" && !action.disabled) },
     { id: "server.add", group: t('command.groupServer'), label: t('command.addServer'), icon: <ServerIcon size={16} /> },
     { id: "server.settings", group: t('command.groupServer'), label: t('command.openSettings'), hint: displayShortcut("server.settings"), icon: <SettingsIcon size={16} /> },
     { id: "view.palette", group: t('command.groupView'), label: t('command.commandPalette'), hint: displayShortcut("view.palette"), icon: <CommandIcon size={16} /> },
@@ -4166,7 +4462,7 @@ function App() {
               id="agent-select"
               value={activeAgentID}
               onChange={(event) => changeAgent(event.target.value)}
-              disabled={isWorking}
+               disabled={isWorking || mutationLocked}
             >
               {primaryAgentOptions.map((agent) => (
                 <option key={agent.id} value={agent.id}>{agentLabel(agent)}</option>
@@ -4193,7 +4489,7 @@ function App() {
               enterKeyHint="search"
               autoCapitalize="none"
               spellCheck={false}
-              disabled={isWorking}
+               disabled={isWorking || mutationLocked}
               autoComplete="off"
             />
           </label>
@@ -4208,7 +4504,7 @@ function App() {
                     key={optionKey}
                     className={active ? "model-option active" : "model-option"}
                     onClick={() => changeModel(optionKey)}
-                    disabled={isWorking}
+                               disabled={isWorking || mutationLocked}
                     role="option"
                     aria-selected={active}
                   >
@@ -4311,7 +4607,10 @@ function App() {
     onRename: (session: SessionView) => void renameSession(session.id, renameValue, session.directory).catch(() => undefined),
     onCancelRename: cancelRename,
     onStartRename: (session: SessionView) => startRename(session),
-    onDelete: setSessionToDelete
+    onDelete: (session: SessionView) => {
+      if (!isSessionMutationLocked()) setSessionToDelete(session)
+    },
+    mutationLocked
   }
 
   return (
@@ -4380,8 +4679,8 @@ function App() {
           query={query}
           searchInputRef={searchInputRef}
           sidebarSessionsRef={sidebarSessionsRef}
-          refreshing={refreshingSessions}
-          creating={creatingSession}
+            refreshing={refreshingSessions}
+           creating={creatingSession || mutationLocked}
           offline={isOffline}
           width={viewportSidebarWidth}
           t={t}
@@ -4622,8 +4921,8 @@ function App() {
           activeSessions={activeSessions}
           changedSessions={changedSessions}
           query={query}
-          refreshing={refreshingSessions}
-          creating={creatingSession}
+            refreshing={refreshingSessions}
+           creating={creatingSession || mutationLocked}
           offline={isOffline}
           connectionState={connectionState}
           connectionStatusText={connectionStatusText}
@@ -4692,7 +4991,7 @@ function App() {
                           className="btn-icon btn-primary compact rename-save"
                           onClick={() => renameSession(selectedSession.id, renameValue, selectedSession.directory).catch(() => undefined)}
                           onMouseDown={(event) => event.preventDefault()}
-                          disabled={!renameValue.trim() || renameValue === selectedSession.title}
+                          disabled={mutationLocked || !renameValue.trim() || renameValue === selectedSession.title}
                           title={t('session.renameConfirm')}
                           aria-label={t('session.renameConfirm')}
                         >
@@ -4716,7 +5015,8 @@ function App() {
                           <button
                             type="button"
                             className="session-title-button"
-                            onClick={() => startRename(selectedSession, "header")}
+                             onClick={() => startRename(selectedSession, "header")}
+                             disabled={mutationLocked}
                             title={t('session.renameTitle')}
                             aria-label={t('session.renameTitle')}
                           >
@@ -4817,7 +5117,7 @@ function App() {
             directory={selectedSession?.directory}
             actions={messageMenuActions}
             onRevertMessage={handleRevertMessage}
-            revertDisabled={sessionActionPending === "fork"}
+             revertDisabled={sessionActionPending === "fork" || mutationLocked}
             t={t}
             jumpAffordances={jumpAffordances}
             onJumpToTop={handleJumpToTop}
@@ -4827,9 +5127,12 @@ function App() {
             onMessagesScroll={handleMessagesScroll}
             onQuestionResolved={handleQuestionResolved}
             onPermissionResolved={handlePermissionResolved}
+            coordinator={mutationCoordinator}
+            onLeaseChanged={() => bumpMutationLock((value) => value + 1)}
           />
           <SessionComposer
-            selected={Boolean(selectedSession) && sessionActionPending !== "fork"}
+             selected={Boolean(selectedSession) && sessionActionPending !== "fork"}
+             mutationLocked={mutationLocked}
             value={composer}
             attachments={attachments}
             supportsAttachments={capabilities.attachments}
@@ -4900,7 +5203,7 @@ function App() {
                         id="agent-select"
                         value={activeAgentID}
                         onChange={(event) => changeAgent(event.target.value)}
-                        disabled={isWorking}
+                         disabled={isWorking || mutationLocked}
                       >
                         {primaryAgentOptions.map((agent) => (
                           <option key={agent.id} value={agent.id}>{agentLabel(agent)}</option>
@@ -4927,7 +5230,7 @@ function App() {
                         enterKeyHint="search"
                         autoCapitalize="none"
                         spellCheck={false}
-                        disabled={isWorking}
+                               disabled={isWorking || mutationLocked}
                         autoComplete="off"
                       />
                     </label>
@@ -5073,7 +5376,7 @@ function App() {
               <button className="btn-secondary" onClick={() => setSessionToDelete(null)}>
                 {t('session.cancel')}
               </button>
-              <button className="btn-danger" onClick={() => deleteSession(sessionToDelete.id)}>
+              <button className="btn-danger" disabled={mutationLocked} onClick={() => deleteSession(sessionToDelete.id)}>
                 <TrashIcon size={16} />
                 {t('session.deleteConfirm')}
               </button>
@@ -5349,7 +5652,7 @@ http://YOUR_PC_IP:4096/global/health</pre>
                             <button
                               type="button"
                               className="btn-secondary"
-                              disabled={!selectedSession || config.backend !== "opencode2" || busySending || sessionActionPending === "fork"}
+                               disabled={!selectedSession || config.backend !== "opencode2" || busySending || sessionActionPending === "fork" || mutationLocked}
                              onClick={() => void activateSkill(cmd)}
                              title={!selectedSession
                                ? t('help.skillRequiresSession')

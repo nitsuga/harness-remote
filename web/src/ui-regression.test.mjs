@@ -111,15 +111,21 @@ assert.ok(app.includes('optimisticUserMessages'), 'sent user messages should ren
 assert.ok(app.includes('createOptimisticUserMessage'), 'send flow should create an optimistic user message envelope')
 assert.ok(app.includes('setOptimisticUserMessages((current) => [...current, optimisticMessage])'), 'send flow should append the optimistic user bubble before awaiting OpenCode')
 assert.ok(app.includes('isWaitingForOpenCodeReply = awaitingAssistantReply || busySending || isSessionRunning'), 'send button/waiting state should stay active until OpenCode assistant output arrives')
-assert.match(app, /async function send\(\)\s*\{[\s\S]*?if \(!selectedSession \|\| isSessionForkPending\(\)\) return/, 'composer submission must be blocked while a fork snapshot is pending')
+// Session mutations are arbitrated synchronously now. Do not pin send() to the old fork-only
+// predicate: a prompt or command must also reject the same-tick lease held by any other action.
+assert.match(app, /const isSessionMutationLocked = \(\) => mutationCoordinator\.getActiveLease\(\) !== null/, 'the mutation lock must be backed by the coordinator lease, not React state')
+assert.match(app, /async function send\(\)\s*\{[\s\S]*?if \(!selectedSession \|\| isSessionMutationLocked\(\)\) return/, 'composer submission must synchronously reject an active mutation lease')
+assert.match(app, /async function send\(\)[\s\S]*?const commandLease = acquireMutation\("command"\)[\s\S]*?const promptLease = acquireMutation\("prompt"\)/, 'each send path must take an exclusive coordinator lease')
+assert.match(app, /await api\.sendPrompt\([\s\S]*?if \(!isLeaseContextCurrent\(promptLease\)\) return/, 'prompt results must be discarded when their lease, context, or fork generation is stale')
+assert.match(app, /if \(!isLeaseContextCurrent\(lease\)\) return/, 'session results must reject work from a stale lease, context, or fork generation')
 assert.ok(app.includes('sessionActionPendingRef.current = "fork"'), 'fork must synchronously publish its pending state before React commits the render')
-assert.match(app, /async function activateSkill\([\s\S]*?if \(sessionActionPendingRef\.current === "fork"\) return/, 'direct skill activation must be blocked while a fork snapshot is pending')
-assert.match(app, /await api\.listCommands\(config\)[\s\S]*?if \(sessionActionPendingRef\.current === "fork"\) return[\s\S]*?setCommands\(availableCommands\)/, 'slash command discovery must recheck fork state before mutating command state')
+assert.match(app, /async function activateSkill\([\s\S]*?if \(isSessionMutationLocked\(\)\) return[\s\S]*?const lease = acquireMutation\("skill"\)/, 'direct skill activation must use the synchronous coordinator lease')
+assert.match(app, /await api\.listCommands\(config\)[\s\S]*?if \(!isLeaseContextCurrent\(commandLease\)\)[\s\S]*?setCommands\(availableCommands\)/, 'slash command discovery must recheck its lease, context, and fork currency before mutating command state')
 assert.ok(app.includes('busySending || sessionActionPending === "fork"'), 'Help skill activation buttons must be disabled during a pending fork')
-assert.match(app, /async function revertToMessage\(messageID: string\)\s*\{[\s\S]*?sessionActionPending === "fork"/, 'revert must be blocked while a fork snapshot is pending')
+assert.match(app, /async function revertToMessage\(messageID: string\)\s*\{[\s\S]*?isSessionMutationLocked\(\)/, 'revert must be blocked while another session mutation is pending')
 assert.ok(app.includes('selected={Boolean(selectedSession) && sessionActionPending !== "fork"}'), 'composer controls must be disabled during a pending fork on every layout')
 assert.ok(app.includes('revertDisabled={sessionActionPending === "fork"}'), 'revert affordances must be removed while a fork snapshot is pending')
-assert.ok(app.includes('if (sessionActionPendingRef.current === "fork") return'), 'stale message-menu callbacks must also be blocked during a pending fork')
+assert.match(app, /const handleRevertMessage = useCallback\(\(messageID: string\) => \{[\s\S]*?revertToMessageRef\.current\(messageID\)/, 'stale message-menu callbacks must route through the coordinator-guarded revert handler')
 assert.ok(app.includes('completionShouldPlayRef.current = true'), 'completion sound should be armed when a real assistant reply is expected')
 assert.ok(app.includes('wasAwaitingAssistantReplyRef.current && !awaitingAssistantReply && completionShouldPlayRef.current'), 'completion sound should play only when assistant waiting ends, not when the user bubble renders')
 assert.ok(app.includes('loadSelectedRequestRef'), 'session message refreshes should ignore stale overlapping polling responses')
@@ -207,6 +213,14 @@ assert.ok(api.includes('loadLatestMessage(config: ServerConfig, sessionID: strin
 assert.ok(app.includes('function messageActivityTime'), 'sessions should display latest message activity instead of mutable session row timestamps')
 assert.ok(app.includes('latestMessageTimesRef'), 'latest message activity lookups should be cached between refreshes')
 assert.ok(app.includes('catch(() => null)'), 'failed latest-message lookups should not be cached as session row timestamps')
+assert.match(app, /setRefreshingSessions\(false\)[\s\S]*?refreshIndicatorRequestRef\.current \+= 1/, 'context replacement must synchronously reset a stale refresh indicator')
+assert.match(app, /const isLeaseContextCurrent = \(lease: MutationLease\)[\s\S]*?isContextGenerationCurrent\(lease\.contextGeneration\)[\s\S]*?isContextCurrent\(lease\.context\)/, 'lease ownership and UI currency must be checked separately')
+assert.match(app, /const cacheKey = `\$\{activityContext\.profileID\}\|\$\{activityContext\.configKey\}\|\$\{session\.id\}`/, 'latest-message activity cache must be scoped to profile, config, and session')
+assert.match(app, /if \(activityIsCurrent\(\)\) latestMessageTimesRef\.current\.set/, 'stale activity responses must not repopulate the cache')
+assert.match(app, /disabled: mutationLocked \|\| sessionActionPending !== null/, 'message history menus must include the shared mutation lock')
+assert.match(app, /case "session\.new":[\s\S]*?if \(!hasConfiguredServer \|\| isOffline \|\| isSessionMutationLocked\(\)\) return/, 'native and keyboard New must defensively honor configuration, offline, and shared mutation guards')
+assert.match(app, /function openNewSessionPicker\(\)[\s\S]*?isSessionMutationLocked\(\)/, 'direct New picker opens must honor the shared lock')
+assert.match(app, /function startRename\([\s\S]*?isSessionMutationLocked\(\)/, 'direct rename opens must honor the shared lock')
 
 assert.ok(app.includes('THEME_STORAGE_KEY'), 'theme preference should persist separately from server settings')
 assert.ok(app.includes('type ThemePreference = "system" | "light" | "dark"'), 'theme preference should support system, light, and dark')
@@ -257,20 +271,24 @@ assert.ok(app.includes('const forked = await api.forkSession(config, original.id
 assert.ok(app.includes('setSessions((current) => current.some((session) => session.id === forkedView.id)'), 'fork must insert the returned child while preserving the original')
 assert.ok(app.includes('await openSession(forkedView.id, forkedView.directory)'), 'fork must navigate through the shared session-opening path')
 assert.match(app, /const forkContext = \{[\s\S]*?profileID: activeProfileID[\s\S]*?configKey: configKey\(config\)[\s\S]*?sessionID: original\.id/, 'fork must capture the active profile, server, and session identity before awaiting')
-assert.match(app, /if \(!isCurrentForkContext\(\)\) return/, 'a stale fork completion must be discarded before inserting or navigating')
-assert.ok(
-  /const hasUserMessage = messages\.some\(\(message\) => message\.info\.role === "user"\)[\s\S]*?id: "compact"[\s\S]*?disabled: sessionActionPending !== null \|\| !hasUserMessage \|\| isWorking \|\| busySending[\s\S]*?id: "fork"[\s\S]*?disabled: sessionActionPending !== null \|\| !hasUserMessage \|\| isWorking \|\| busySending/.test(app),
-  'compact and fork must be disabled for sessions with no visible user message'
+assert.match(
+  app,
+  /if \(!isLeaseContextCurrent\(lease\) \|\| !mutationCoordinator\.isContextCurrent\(forkContext\)\) return/,
+  'a stale fork completion must be discarded by lease, context, and fork validation before inserting or navigating'
 )
 assert.ok(
-  /id: "undo", label: t\('detail\.undo'\), disabled: sessionActionPending !== null/.test(app)
-    && /id: "redo", label: t\('detail\.redo'\), disabled: sessionActionPending !== null/.test(app),
-  'undo and redo must be disabled while compact or fork is pending'
+  /const sessionHeaderActions = useMemo\([\s\S]*?id: "compact"[\s\S]*?disabled: mutationLocked \|\| sessionActionPending !== null \|\| !hasUserMessage \|\| isWorking \|\| busySending[\s\S]*?id: "fork"[\s\S]*?disabled: mutationLocked \|\| sessionActionPending !== null \|\| !hasUserMessage \|\| isWorking \|\| busySending[\s\S]*?\}, \[awaitingAssistantReply,/.test(app),
+  'compact and fork must share the coordinator lock and retain the visible-message and active-work guards'
 )
 assert.ok(
-  /function compactCurrentSession\(\)[\s\S]*?config\.backend !== "opencode2"[\s\S]*?isWorking[\s\S]*?busySending/.test(app)
-    && /function forkCurrentSession\(\)[\s\S]*?config\.backend !== "opencode2"[\s\S]*?isWorking[\s\S]*?busySending/.test(app),
-  'compact and fork handlers must retain the backend and active-work guards'
+  /id: "undo", label: t\('detail\.undo'\), disabled: mutationLocked \|\| sessionActionPending !== null/.test(app)
+    && /id: "redo", label: t\('detail\.redo'\), disabled: mutationLocked \|\| sessionActionPending !== null/.test(app),
+  'undo and redo must share the coordinator lock and be disabled while compact or fork is pending'
+)
+assert.ok(
+  /function compactCurrentSession\(\)[\s\S]*?config\.backend !== "opencode2"[\s\S]*?isWorking[\s\S]*?busySending[\s\S]*?isSessionMutationLocked\(\)[\s\S]*?!messages\.some\(\(message\) => message\.info\.role === "user"\)/.test(app)
+    && /function forkCurrentSession\(\)[\s\S]*?config\.backend !== "opencode2"[\s\S]*?isWorking[\s\S]*?busySending[\s\S]*?isSessionMutationLocked\(\)[\s\S]*?!messages\.some\(\(message\) => message\.info\.role === "user"\)/.test(app),
+  'compact and fork handlers must retain the backend, coordinator, visible-message, and active-work guards'
 )
 
 // A follow-up prompt can be queued while the agent is still working.
@@ -340,6 +358,7 @@ assert.ok(app.includes('autoComplete="username"') && app.includes('autoComplete=
 assert.ok(composerView.includes('enterKeyHint={softKeyboard ? "enter" : "send"}'), "the composer's action key should say send on a fine pointer and new line on a soft keyboard")
 assert.ok(composerView.includes('if (event.ctrlKey || event.metaKey)'), 'a soft keyboard must send with Ctrl/Cmd+Enter and newline with plain Enter')
 assert.ok(composerView.includes('if (!event.shiftKey)'), 'a fine pointer must keep Enter sends / Shift+Enter new line')
+assert.match(composerView, /if \(!mutationLocked\) onSend\(\)/, 'keyboard send must stay blocked while the mutation lease is retained')
 
 // A session card showed a full absolute path over three lines, a third of its height.
 assert.ok(sessionList.includes('function shortDirectory'), 'the card should shorten the directory it shows')
@@ -545,9 +564,9 @@ assert.ok(app.includes('setExtensionActions(result.actions)'), 'action execution
 assert.ok(app.includes("if (result.applied === false)"), 'only an authoritative no-op result should show no-op feedback')
 assert.ok(app.includes('result.applied !== false'), 'unknown results should still refresh the active ACP context without being called no-ops')
 assert.ok(app.includes("command === \"undo\" ? 'detail.nothingToUndo' : 'detail.nothingToRedo'"), 'the no-op message should describe the attempted action')
-assert.match(app, /if \(!selectedSession \|\| busySending \|\| sessionActionPending !== null\) return/, 'native undo and redo must defensively no-op while a session action is pending')
-assert.match(app, /id: "undo", label: t\('detail\.undo'\), disabled: sessionActionPending !== null/, 'message undo must be disabled while a session action is pending')
-assert.match(app, /id: "redo", label: t\('detail\.redo'\), disabled: sessionActionPending !== null/, 'message redo must be disabled while a session action is pending')
+assert.match(app, /if \(!selectedSession \|\| busySending \|\| sessionActionPending !== null \|\| isSessionMutationLocked\(\)\) return/, 'native undo and redo must defensively no-op while a coordinator mutation is pending')
+assert.match(app, /id: "undo", label: t\('detail\.undo'\), disabled: mutationLocked \|\| sessionActionPending !== null/, 'message undo must share the coordinator lock and be disabled while a session action is pending')
+assert.match(app, /id: "redo", label: t\('detail\.redo'\), disabled: mutationLocked \|\| sessionActionPending !== null/, 'message redo must share the coordinator lock and be disabled while a session action is pending')
 assert.match(app, /case "session\.undo":\s*if \(sessionActionPending !== null\) return/, 'the menubar/native undo dispatcher must reject pending session actions')
 assert.match(app, /case "session\.redo":\s*if \(sessionActionPending !== null\) return/, 'the menubar/native redo dispatcher must reject pending session actions')
 assert.match(app, /action\.id === "undo" && !action\.disabled/, 'menubar and palette undo entries must use the action disabled state')
@@ -630,5 +649,15 @@ assert.match(
   /for \(const \[command, binding\] of Object\.entries\(KEY_BINDINGS\)\) \{\s*if \(!bindingApplies\(binding\)\) continue/,
   'the keydown handler must skip bindings that do not apply to this build'
 )
+
+// Context changes are a hard synchronous boundary: stale leases and same-ID activity caches must
+// not bleed into the next profile/session, and refresh has its own latest-request ordering.
+assert.match(app, /const replaceMutationContext[\s\S]*?latestMessageTimesRef\.current\.clear\(\)/, 'context replacement must clear activity caches')
+assert.match(app, /const refreshRequestID = \+\+refreshRequestRef\.current/, 'refreshes need a monotonic request identity')
+assert.match(app, /refreshRequestID === refreshRequestRef\.current/, 'stale refresh responses must be ignored')
+assert.match(app, /const requestID = \+\+loadAgentsRequestRef\.current/, 'agent loads need a request identity')
+assert.match(app, /disabled=\{action\.disabled\}/, 'message context actions must honor disabled state')
+assert.match(app, /disabled=\{!selectedSession \|\| config\.backend !== "opencode2" \|\| busySending \|\| sessionActionPending === "fork" \|\| mutationLocked\}/, 'help skill buttons must honor the coordinator lock')
+assert.match(app, /onRefresh=\{\(\) => void refreshSessionsWithIndicator\(\)\.catch/, 'refresh remains wired while mutations are active')
 
 console.log('ui regression tests passed')

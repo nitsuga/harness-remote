@@ -65,7 +65,8 @@ export function SessionCard({
   onRename,
   onCancelRename,
   onStartRename,
-  onDelete
+  onDelete,
+  mutationLocked
 }: {
   session: SessionView
   selectedID: string | null
@@ -80,6 +81,7 @@ export function SessionCard({
   onCancelRename: () => void
   onStartRename: (session: SessionView) => void
   onDelete: (session: SessionView) => void
+  mutationLocked: boolean
 }) {
   const isRenaming = rename.sessionID === session.id && rename.source === "list"
   return (
@@ -122,7 +124,7 @@ export function SessionCard({
                 className="rename-input"
                 autoComplete="off"
               />
-              <button className="btn-primary compact" onClick={(event) => { event.stopPropagation(); onRename(session) }} onMouseDown={(event) => event.preventDefault()} title={t('session.renameConfirm')}>
+               <button className="btn-primary compact" disabled={mutationLocked} onClick={(event) => { event.stopPropagation(); onRename(session) }} onMouseDown={(event) => event.preventDefault()} title={t('session.renameConfirm')}>
                 <SaveIcon size={16} />
               </button>
               <button className="btn-secondary compact" onClick={(event) => { event.stopPropagation(); onCancelRename() }} title={t('session.cancel')}>
@@ -148,10 +150,10 @@ export function SessionCard({
       <div className="inline-actions">
         {capabilities.sessionRename && capabilities.sessionDelete && (
           <>
-            <button className="btn-secondary" onClick={(event) => { event.stopPropagation(); onStartRename(session) }} title={t('session.renameTitle')} aria-label={t('session.renameTitle')}>
+            <button className="btn-secondary" disabled={mutationLocked} onClick={(event) => { event.stopPropagation(); onStartRename(session) }} title={t('session.renameTitle')} aria-label={t('session.renameTitle')}>
               <PencilIcon size={16} />{t('session.renameConfirm')}
             </button>
-            <button className="btn-danger" onClick={(event) => { event.stopPropagation(); onDelete(session) }} title={t('sessions.delete')}>
+            <button className="btn-danger" disabled={mutationLocked} onClick={(event) => { event.stopPropagation(); onDelete(session) }} title={t('sessions.delete')}>
               <TrashIcon size={16} />{t('sessions.delete')}
             </button>
           </>

@@ -22,7 +22,7 @@ assert.ok(app.includes('modelStorageScope(backend: ServerConfig["backend"], sess
 assert.ok(app.includes('writeStoredModel(config.backend, selectedSession?.id, nextKey)'), 'model changes must persist only for the open backend session')
 assert.ok(/const activeModel = activeModelOption[\s\S]*?: undefined/.test(app), 'a prompt must never send a stored model that is absent from the current backend catalog')
 assert.ok(app.includes('loadModelsRequestRef'), 'stale model catalogs from another session or backend must be ignored')
-assert.ok(app.includes('if (requestID !== loadModelsRequestRef.current) return'), 'only the latest model request may update the picker')
+assert.ok(/async function loadModels\([\s\S]*?const current = \(\) =>[\s\S]*?requestID === loadModelsRequestRef\.current/.test(app), 'only the latest model request may update the picker')
 assert.ok(app.includes('agentOptions.filter((agent) => agent.mode === "primary" || agent.mode === "all")'), 'agent picker should expose primary agents such as build and plan')
 assert.ok(app.includes('activeAgent?.id ?? "build"'), 'agent selection should default to build')
 assert.ok(app.includes('id="agent-select"'), 'AI sheet should render an agent selector')

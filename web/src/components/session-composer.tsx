@@ -11,6 +11,7 @@ export function SessionComposer({
   attachments,
   supportsAttachments,
   showStopAction,
+  mutationLocked,
   softKeyboard,
   t,
   composerRef,
@@ -28,6 +29,7 @@ export function SessionComposer({
   attachments: AttachmentPart[]
   supportsAttachments: boolean
   showStopAction: boolean
+  mutationLocked: boolean
   softKeyboard: boolean
   t: Translator
   composerRef: RefObject<HTMLDivElement>
@@ -45,7 +47,7 @@ export function SessionComposer({
       {attachments.length > 0 && <div className="composer-chips">
         {attachments.map((attachment, index) => <span className="composer-chip" key={`${attachment.filename}-${index}`}>
           <strong>{attachment.filename}</strong>
-          <button className="btn-ghost btn-icon" aria-label={t('detail.removeAttachment')} onClick={() => onAttachmentsChange((current) => current.filter((_, position) => position !== index))}>
+          <button className="btn-ghost btn-icon" aria-label={t('detail.removeAttachment')} disabled={mutationLocked} onClick={() => onAttachmentsChange((current) => current.filter((_, position) => position !== index))}>
             <CloseIcon size={12} />
           </button>
         </span>)}
@@ -62,10 +64,10 @@ export function SessionComposer({
         onKeyDown={(event) => {
           if (event.key !== "Enter") return
           if (softKeyboard) {
-            if (event.ctrlKey || event.metaKey) { event.preventDefault(); onSend() }
+            if (event.ctrlKey || event.metaKey) { event.preventDefault(); if (!mutationLocked) onSend() }
             return
           }
-          if (!event.shiftKey) { event.preventDefault(); onSend() }
+          if (!event.shiftKey) { event.preventDefault(); if (!mutationLocked) onSend() }
         }}
         disabled={!selected}
       />
@@ -82,11 +84,11 @@ export function SessionComposer({
               onAttachmentError((err as Error).message)
             }
           }} />
-          <button className="btn-ghost btn-icon" title={t('detail.attachImage')} aria-label={t('detail.attachImage')} onClick={() => attachmentInputRef.current?.click()} disabled={!selected || attachments.length >= ATTACHMENT_MAX_COUNT}>
+          <button className="btn-ghost btn-icon" title={t('detail.attachImage')} aria-label={t('detail.attachImage')} onClick={() => attachmentInputRef.current?.click()} disabled={!selected || mutationLocked || attachments.length >= ATTACHMENT_MAX_COUNT}>
             <PaperclipIcon size={18} />
           </button>
         </>}
-        <div className="composer-actions"><button onClick={showStopAction ? onAbort : onSend} disabled={!selected} className={showStopAction ? "btn-danger composer-send" : "btn-primary composer-send"}>{showStopAction ? <StopCircleIcon size={18} /> : <SendIcon size={18} />}</button></div>
+        <div className="composer-actions"><button onClick={showStopAction ? onAbort : onSend} disabled={!selected || mutationLocked} className={showStopAction ? "btn-danger composer-send" : "btn-primary composer-send"}>{showStopAction ? <StopCircleIcon size={18} /> : <SendIcon size={18} />}</button></div>
       </div>
     </div>
   )
