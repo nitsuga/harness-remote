@@ -1832,6 +1832,7 @@ function ConversationRunView({
   directory,
   actions,
   onRevertMessage,
+  revertDisabled,
   t
 }: {
   items: TimelineItem[]
@@ -1841,6 +1842,7 @@ function ConversationRunView({
   directory: string | undefined
   actions: MessageMenuAction[]
   onRevertMessage: (messageID: string) => void
+  revertDisabled: boolean
   t: Translator
 }) {
   const fallback = [...messagesByID.values()].pop()
@@ -1857,7 +1859,7 @@ function ConversationRunView({
       text={runText}
       className="message assistant fade-in"
       t={t}
-      actions={fallback ? [...actions, ...(config.backend === "opencode" || config.backend === "opencode2" ? [{ id: "revert", label: t('detail.revertToMessage'), onSelect: () => onRevertMessage(fallback.info.id) }] : [])] : actions}
+      actions={fallback ? [...actions, ...(config.backend === "opencode" || config.backend === "opencode2" ? (revertDisabled ? [] : [{ id: "revert", label: t('detail.revertToMessage'), onSelect: () => onRevertMessage(fallback.info.id) }]) : [])] : actions}
     >
       {items.map((item) =>
         item.kind === "action-group" ? (
@@ -1895,6 +1897,7 @@ const MessageArticle = memo(function MessageArticle({
   directory,
   actions,
   onRevertMessage,
+  revertDisabled,
   t
 }: {
   message: MessageEnvelope & { text: string }
@@ -1902,6 +1905,7 @@ const MessageArticle = memo(function MessageArticle({
   directory: string | undefined
   actions: MessageMenuAction[]
   onRevertMessage: (messageID: string) => void
+  revertDisabled: boolean
   t: Translator
 }) {
   return (
@@ -1909,7 +1913,7 @@ const MessageArticle = memo(function MessageArticle({
       text={message.text}
       className={`message ${message.info.role} fade-in`}
       t={t}
-      actions={[...actions, ...(config.backend === "opencode" || config.backend === "opencode2" ? [{ id: "revert", label: t('detail.revertToMessage'), onSelect: () => onRevertMessage(message.info.id) }] : [])]}
+      actions={[...actions, ...(config.backend === "opencode" || config.backend === "opencode2" ? (revertDisabled ? [] : [{ id: "revert", label: t('detail.revertToMessage'), onSelect: () => onRevertMessage(message.info.id) }]) : [])]}
     >
       {buildMessageTimeline(message.parts).map((item) =>
         item.kind === "action-group" ? (
@@ -1956,6 +1960,7 @@ const MessagesPane = memo(function MessagesPane({
   directory,
   actions,
   onRevertMessage,
+  revertDisabled,
   t,
   messagesRef,
   messagesEndRef,
@@ -1980,6 +1985,7 @@ const MessagesPane = memo(function MessagesPane({
   directory: string | undefined
   actions: MessageMenuAction[]
   onRevertMessage: (messageID: string) => void
+  revertDisabled: boolean
   t: Translator
   messagesRef: RefObject<HTMLDivElement>
   messagesEndRef: RefObject<HTMLDivElement>
@@ -2025,7 +2031,7 @@ const MessagesPane = memo(function MessagesPane({
           <>
             {timelineGroups.map((group) =>
               group.kind === "message" ? (
-                <MessageArticle key={group.message.info.id} message={group.message} config={config} directory={directory} actions={actions} onRevertMessage={onRevertMessage} t={t} />
+                <MessageArticle key={group.message.info.id} message={group.message} config={config} directory={directory} actions={actions} onRevertMessage={onRevertMessage} revertDisabled={revertDisabled} t={t} />
               ) : (
                 <ConversationRunView
                   key={group.key}
@@ -2036,6 +2042,7 @@ const MessagesPane = memo(function MessagesPane({
                   directory={directory}
                   actions={actions}
                   onRevertMessage={onRevertMessage}
+                  revertDisabled={revertDisabled}
                   t={t}
                 />
               )
@@ -2240,6 +2247,8 @@ function App() {
   const attachmentInputRef = useRef<HTMLInputElement | null>(null)
   const [busySending, setBusySending] = useState(false)
   const [sessionActionPending, setSessionActionPending] = useState<"compact" | "fork" | null>(null)
+  const sessionActionPendingRef = useRef<"compact" | "fork" | null>(null)
+  sessionActionPendingRef.current = sessionActionPending
   const [activatingSkill, setActivatingSkill] = useState<string | null>(null)
   const [loadingSessionID, setLoadingSessionID] = useState<string | null>(null)
   /** The empty transcript state is only meaningful after this session's first history snapshot succeeds. */
@@ -2967,7 +2976,7 @@ function App() {
   }
 
   async function revertToMessage(messageID: string) {
-    if (!selectedSession || busySending || (config.backend !== "opencode" && config.backend !== "opencode2")) return
+    if (!selectedSession || busySending || sessionActionPending === "fork" || (config.backend !== "opencode" && config.backend !== "opencode2")) return
     if (!window.confirm(t('detail.revertConfirm'))) return
 
     setBusySending(true)
@@ -3118,6 +3127,7 @@ function App() {
   const revertToMessageRef = useRef(revertToMessage)
   revertToMessageRef.current = revertToMessage
   const handleRevertMessage = useCallback((messageID: string) => {
+    if (sessionActionPendingRef.current === "fork") return
     void revertToMessageRef.current(messageID)
   }, [])
 
@@ -3276,7 +3286,7 @@ function App() {
   }
 
   async function send() {
-    if (!selectedSession) return
+    if (!selectedSession || sessionActionPending === "fork") return
     const text = composer.trim()
     // An image with no caption is a complete prompt, so emptiness is about both.
     if (!text && attachments.length === 0) return
@@ -4790,6 +4800,7 @@ function App() {
             directory={selectedSession?.directory}
             actions={messageMenuActions}
             onRevertMessage={handleRevertMessage}
+            revertDisabled={sessionActionPending === "fork"}
             t={t}
             jumpAffordances={jumpAffordances}
             onJumpToTop={handleJumpToTop}
@@ -4801,7 +4812,7 @@ function App() {
             onPermissionResolved={handlePermissionResolved}
           />
           <SessionComposer
-            selected={Boolean(selectedSession)}
+            selected={Boolean(selectedSession) && sessionActionPending !== "fork"}
             value={composer}
             attachments={attachments}
             supportsAttachments={capabilities.attachments}
