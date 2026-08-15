@@ -318,7 +318,7 @@ assert.ok(
 )
 
 // A follow-up prompt can be queued while the agent is still working.
-assert.ok(app.includes('const showStopAction = isWorking && !composer.trim()'), 'stop should be offered only when there is nothing to send')
+assert.ok(app.includes('const showStopAction = canAbortSession'), 'stop should remain offered while a working session has a draft')
 assert.equal(app.includes('disabled={!selectedSession || isWorking}'), false, 'the composer must stay usable while the agent works')
 // External OMP history must replace stale cached ordering even when the corrected payload is shorter.
 // This no longer needs its own escape hatch: every fetched snapshot is now applied, and only same-id
@@ -343,10 +343,17 @@ assert.match(app, /const abortContextGeneration = mutationCoordinator\.getContex
 assert.match(app, /activeLease\.context\.profileID === abortContext\.profileID[\s\S]*?activeLease\.context\.configKey === abortContext\.configKey/, 'abort authorization must match the full active lease context')
 assert.match(app, /const isSessionMutationLocked = \(\) => mutationCoordinator\.getActiveLease\(\) !== null \|\| abortInFlightRef\.current\.size > 0/, 'an abort remains a mutation lock after the original lease releases')
 assert.ok(composerView.includes('canAbortSession'), 'composer Stop presentation must receive the abort availability guard')
-assert.match(app, /setAttachments\(\[\]\)[\s\S]*?api\.sendCommand/, 'slash command dispatch must clear staged attachments')
-assert.match(app, /setAttachments\(\[\]\)[\s\S]*?api\.sendSkill/, 'skill dispatch must clear staged attachments')
+assert.equal(
+  app.slice(app.indexOf('async function activateSkill'), app.indexOf('async function send()')).includes('setAttachments([])'),
+  false,
+  'successful skills must preserve staged attachments because the skill API does not transmit them'
+)
+const commandDispatch = app.slice(app.indexOf('const optimisticMessage = createOptimisticUserMessage(selectedSession.id, text)'), app.indexOf('return\n    }\n\n    setComposer', app.indexOf('const optimisticMessage = createOptimisticUserMessage(selectedSession.id, text)')))
+assert.equal(commandDispatch.includes('setAttachments([])'), false, 'successful slash commands must preserve staged attachments')
+assert.match(commandDispatch, /api\.sendCommand[\s\S]*?let refreshFailed = false[\s\S]*?setActionNotice/, 'command refresh failures must be soft notices after dispatch commits')
 assert.match(app, /activateSkill\(skill: CommandInfo[\s\S]*?stagedAttachments[\s\S]*?setAttachments\(\(current\) => current\.length \? current : stagedAttachments\)/, 'failed skills must restore their staged attachments in the same context')
 assert.match(app, /api\.sendCommand[\s\S]*?setAttachments\(\(current\) => current\.length \? current : attachments\)/, 'failed slash commands must restore their staged attachments')
+assert.match(app, /abortInFlightRef\.current\.delete\(abortKey\)[\s\S]*?bumpMutationLock\(\(value\) => value \+ 1\)/, 'stale abort cleanup must repaint the mutation lock even outside the current context')
 assert.ok(app.includes('readSessionTombstones') && app.includes('persistSessionTombstones'), 'session tombstones must hydrate and persist safely')
 
 // A run bubble merges action groups that a message boundary split apart. Consecutive replies with

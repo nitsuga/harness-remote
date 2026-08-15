@@ -155,7 +155,7 @@ export function SessionComposer({
             <PaperclipIcon size={18} />
           </button>
         </>}
-        <div className="composer-actions"><button onClick={showStopAction ? onAbort : sendNow} disabled={!selected || (!showStopAction && mutationLocked) || (!showStopAction && pendingPreparation > 0) || (showStopAction && !canAbortSession)} className={showStopAction ? "btn-danger composer-send" : "btn-primary composer-send"}>{showStopAction ? <StopCircleIcon size={18} /> : <SendIcon size={18} />}</button></div>
+        <div className="composer-actions"><button onClick={showStopAction ? onAbort : sendNow} aria-label={showStopAction ? t('command.stopAgent') : t('detail.send')} title={showStopAction ? t('command.stopAgent') : t('detail.send')} disabled={!selected || (!showStopAction && mutationLocked) || (!showStopAction && pendingPreparation > 0) || (showStopAction && !canAbortSession)} className={showStopAction ? "btn-danger composer-send" : "btn-primary composer-send"}>{showStopAction ? <StopCircleIcon size={18} /> : <SendIcon size={18} />}</button></div>
       </div>
     </div>
   )

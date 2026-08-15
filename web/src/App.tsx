@@ -2689,9 +2689,10 @@ function App() {
         && activeWorkingLease.context.sessionID === currentAbortContext.sessionID
         && activeWorkingLease.targetSessionID === selectedSession.id
         && (activeWorkingLease.kind === "prompt" || activeWorkingLease.kind === "command" || activeWorkingLease.kind === "skill"))))
-  const showStopAction = canAbortSession && !composer.trim() && attachments.length === 0
-  // const showStopAction = isWorking && !composer.trim() // legacy source contract; canAbortSession is
-  // the additional availability guard used by the rendered control.
+  // Stopping is an out-of-band action, so it must stay reachable while a draft is present. The
+  // draft remains in the composer; changing the action to Stop must never make an interruption
+  // destructive on either mobile or desktop.
+  const showStopAction = canAbortSession
   const showTypingBubble = Boolean(selectedSession) && isWaitingForOpenCodeReply
   const activeSessions = sessions.filter((session) => isSessionWorking(session.status)).length
   const changedSessions = sessions.filter(
@@ -3613,7 +3614,6 @@ function App() {
     const lease = acquireMutation("skill")
     if (!lease) return
     setComposer("")
-    setAttachments([])
     setActivatingSkill(skillName)
     setActionNotice(t('help.skillActivating'))
     setRuntimeError(null)
@@ -3639,7 +3639,11 @@ function App() {
       } catch {
         refreshFailed = true
       }
-      if (!(await refreshSessions(false, undefined, true))) refreshFailed = true
+      try {
+        if (!(await refreshSessions(false, undefined, true))) refreshFailed = true
+      } catch {
+        refreshFailed = true
+      }
       if (refreshFailed && isLeaseContextCurrent(lease)) setActionNotice(t('help.skillRefreshFailed'))
     } catch (err) {
       if (isLeaseContextCurrent(lease)) {
@@ -3750,7 +3754,6 @@ function App() {
       }
 
       setComposer("")
-      setAttachments([])
       const optimisticMessage = createOptimisticUserMessage(selectedSession.id, text)
       setOptimisticUserMessages((current) => [...current, optimisticMessage])
       awaitingAssistantBaselineRef.current = assistantResponseSignature
@@ -3762,10 +3765,24 @@ function App() {
       setRuntimeError(null)
       try {
         await api.sendCommand(config, selectedSession.id, command, args, selectedSession.directory, activeModel, activeAgentID)
-        await loadSelected(selectedSession.id, selectedSession.directory)
         if (!isLeaseContextCurrent(commandLease)) return
         setOptimisticUserMessages((current) => current.filter((message) => message.info.id !== optimisticMessage.info.id))
-        await refreshSessions()
+        // sendCommand is the commit boundary. History/session refreshes are best effort and must
+        // not make a successfully dispatched command look retryable or restore its draft.
+        let refreshFailed = false
+        try {
+          await loadSelected(selectedSession.id, selectedSession.directory)
+        } catch {
+          refreshFailed = true
+        }
+        try {
+          if (!(await refreshSessions(false, undefined, true))) refreshFailed = true
+        } catch {
+          refreshFailed = true
+        }
+        if (refreshFailed && isLeaseContextCurrent(commandLease)) {
+          setActionNotice("Command sent, but the session view could not be refreshed. Please refresh to see the latest state.")
+        }
       } catch (err) {
         if (isLeaseContextCurrent(commandLease)) {
           completionShouldPlayRef.current = false
@@ -3970,8 +3987,10 @@ function App() {
           abortInFlightRef.current.delete(abortKey)
           if (sameContext()) {
             setAbortPresentationContext(null)
-            bumpMutationLock((value) => value + 1)
           }
+          // The registry is part of the synchronous mutation-lock presentation even when this
+          // operation belongs to a context the user has already left.
+          bumpMutationLock((value) => value + 1)
         }
       }
     })()
