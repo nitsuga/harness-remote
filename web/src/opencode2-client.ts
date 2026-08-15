@@ -228,12 +228,13 @@ export const opencode2Api = {
     return statuses
   },
 
-  async loadPath(config: ServerConfig, _directory?: string) {
+  async loadPath(config: ServerConfig, directory?: string) {
     // `/api/location` answers bare (no `data` envelope), so read the body directly.
-    const { body } = await v2Raw(config, "/api/location")
-    const location = body as { directory?: string } | undefined
+    const { body } = await v2Raw(config, withLocation("/api/location", directory))
+    const location = body as { directory?: string; project?: { directory?: string } } | undefined
     const resolved = location?.directory ?? ""
-    return { home: resolved, state: "", config: "", worktree: resolved, directory: resolved } as PathInfo
+    const worktree = location?.project?.directory ?? "/"
+    return { home: resolved, state: "", config: "", worktree, directory: resolved } as PathInfo
   },
 
   async listFiles(config: ServerConfig, path: string, directory?: string) {
