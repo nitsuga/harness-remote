@@ -1679,10 +1679,12 @@ type MessageMenuAction = {
  *  contents. Availability still comes from the harness via the caller. */
 function SessionActionsMenu({
   actions,
-  t
+  t,
+  pendingAction = null
 }: {
   actions: MessageMenuAction[]
   t: Translator
+  pendingAction?: "compact" | "fork" | null
 }) {
   const [open, setOpen] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
@@ -1714,6 +1716,7 @@ function SessionActionsMenu({
         onClick={() => setOpen((value) => !value)}
         aria-expanded={open}
         aria-haspopup="menu"
+        aria-busy={pendingAction !== null}
         aria-label={t('detail.sessionActions')}
         title={t('detail.sessionActions')}
       >
@@ -1733,11 +1736,16 @@ function SessionActionsMenu({
                 action.onSelect()
               }}
             >
-              {action.label}
+              {pendingAction === "compact" && action.id === "compact" ? t('detail.compacting')
+                : pendingAction === "fork" && action.id === "fork" ? t('detail.forking')
+                  : action.label}
             </button>
           ))}
         </div>
       )}
+      {pendingAction && <span className="session-action-pending" role="status" aria-live="polite">
+        {pendingAction === "compact" ? t('detail.compacting') : t('detail.forking')}
+      </span>}
     </div>
   )
 }
@@ -2428,7 +2436,10 @@ function App() {
   const backgroundFailureCountRef = useRef(0)
   const initialSessionLoadRef = useRef(true)
   const latestMessageTimesRef = useRef(new Map<string, { sessionUpdated: number; activityTime: number }>())
-  const removedSessionIDsRef = useRef(new Set<string>())
+  // Deletes are eventual-consistency tombstones. Keep them per profile/config namespace so
+  // leaving a profile and coming back does not resurrect a row, while a different server can
+  // legitimately have a session with the same id.
+  const removedSessionIDsRef = useRef(new Map<string, Set<string>>())
   const selectedSessionRef = useRef<SessionView | null>(null)
   /** The session `openSession` is currently working on, so its retry can tell it is still wanted. */
   const openingSessionRef = useRef<string | null>(null)
@@ -2688,9 +2699,6 @@ function App() {
     const serverChanged = configKey(nextConfig) !== configKey(config)
     const profileChanged = profileID !== activeProfileID
     if (serverChanged || profileChanged) {
-      // Session navigation must not erase delete tombstones. A profile/config change starts a new
-      // namespace, so only that boundary clears them.
-      removedSessionIDsRef.current.clear()
       loadSelectedRequestRef.current += 1
       loadModelsRequestRef.current += 1
       autoSelectAttemptedRef.current = false
@@ -2808,9 +2816,10 @@ function App() {
       const statuses = Object.assign({}, ...statusMaps)
       const hydratedItems = items.map((session) => ({ ...session, ...scopedSessions.get(session.id), project: session.project }))
       const activityTimes = await loadSessionActivityTimes(hydratedItems)
+      const tombstones = removedSessionIDsRef.current.get(refreshContext.profileID + "\u0000" + refreshContext.configKey) ?? new Set<string>()
       const mapped = hydratedItems
         .map((session) => toSessionView(session, statuses[session.id], activityTimes.get(session.id)))
-        .filter((session) => !removedSessionIDsRef.current.has(session.id))
+        .filter((session) => !tombstones.has(session.id))
         .sort((a, b) => b.updated - a.updated)
       // A profile/session switch, or a fork that started while this fan-out was in flight, makes
       // this snapshot historical. Never let it replace a newer list (especially the just-inserted
@@ -3728,15 +3737,19 @@ function App() {
       const sameNamespace = currentDeleteContext?.profileID === deleteContext.profileID
         && currentDeleteContext.configKey === deleteContext.configKey
       if (sameNamespace) {
-        removedSessionIDsRef.current.add(sessionID)
+        const tombstones = removedSessionIDsRef.current.get(deleteContext.profileID + "\u0000" + deleteContext.configKey) ?? new Set<string>()
+        tombstones.add(sessionID)
+        removedSessionIDsRef.current.set(deleteContext.profileID + "\u0000" + deleteContext.configKey, tombstones)
         setSessions((current) => current.filter((item) => item.id !== sessionID))
       }
-      if (sameNamespace && isLeaseContextCurrent(lease) && currentDeleteContext?.sessionID === sessionID) {
+      if (sameNamespace && currentDeleteContext?.sessionID === sessionID) {
         // Remove the row and invalidate navigation before any refresh can reintroduce it.
         replaceMutationContext(null)
         // The tombstone intentionally survives this session-only context replacement so an
         // eventual-consistency refresh (and navigation) cannot resurrect the deleted row.
-        removedSessionIDsRef.current.add(sessionID)
+        const tombstones = removedSessionIDsRef.current.get(deleteContext.profileID + "\u0000" + deleteContext.configKey) ?? new Set<string>()
+        tombstones.add(sessionID)
+        removedSessionIDsRef.current.set(deleteContext.profileID + "\u0000" + deleteContext.configKey, tombstones)
         setSelectedID(null)
         setMessages([])
         loadedMessagesRef.current = []
@@ -4688,7 +4701,7 @@ function App() {
           </div>
           {sessionHeaderActions.length > 0 && (
             <div className="appbar-actions">
-              <SessionActionsMenu actions={sessionHeaderActions} t={t} />
+              <SessionActionsMenu actions={sessionHeaderActions} t={t} pendingAction={sessionActionPending} />
             </div>
           )}
         </header>
@@ -5075,7 +5088,7 @@ function App() {
                 )}
               </div>
               {isDesktop && selectedSession && sessionHeaderActions.length > 0 && (
-                <SessionActionsMenu actions={sessionHeaderActions} t={t} />
+                <SessionActionsMenu actions={sessionHeaderActions} t={t} pendingAction={sessionActionPending} />
               )}
             </div>
 

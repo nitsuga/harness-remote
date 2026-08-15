@@ -1,4 +1,4 @@
-import { useRef, useState, type RefObject } from "react"
+import { useEffect, useRef, useState, type RefObject } from "react"
 import { ATTACHMENT_MAX_COUNT, fileToAttachment, type AttachmentPart } from "../attachments"
 import { CloseIcon, PaperclipIcon, SendIcon, StopCircleIcon } from "../Icons"
 import type { Translator } from "../i18n"
@@ -48,6 +48,13 @@ export function SessionComposer({
   // File decoding is asynchronous. In particular, a large image can finish after the user has
   // navigated away, at which point appending it would stage it in the replacement session.
   const attachmentRequestState = useRef({ contextKey: attachmentContextKey, generation: 0 })
+  const mountedRef = useRef(true)
+  useEffect(() => () => {
+    // A decode can resolve after this composer has been replaced. Invalidate it before the
+    // replacement is allowed to stage anything in the shared parent state.
+    mountedRef.current = false
+    attachmentRequestState.current.generation += 1
+  }, [])
   // Do this during render, rather than in an effect: a completed decode must not slip between the
   // replacement render and the effect that records the new context.
   if (attachmentRequestState.current.contextKey !== attachmentContextKey) {
@@ -121,7 +128,7 @@ export function SessionComposer({
               : { contextKey: preparationContext, generation: preparationGeneration, count: 1 })
             try {
               const prepared = await Promise.all(chosen.map((file) => fileToAttachment(file)))
-              if (requestGeneration !== attachmentRequestState.current.generation) return
+               if (!mountedRef.current || requestGeneration !== attachmentRequestState.current.generation) return
               // The picker is disabled while work is pending, but keep the invariant here too:
               // multiple native change events can still be queued before React paints disabled.
               onAttachmentsChange((current) => [
@@ -129,8 +136,9 @@ export function SessionComposer({
                 ...prepared.slice(0, Math.max(0, ATTACHMENT_MAX_COUNT - current.length))
               ])
             } catch (err) {
-              if (requestGeneration === attachmentRequestState.current.generation) onAttachmentError((err as Error).message)
+              if (mountedRef.current && requestGeneration === attachmentRequestState.current.generation) onAttachmentError((err as Error).message)
             } finally {
+              if (!mountedRef.current) return
               setPendingPreparationState((current) => current.contextKey === preparationContext && current.generation === preparationGeneration
                 ? { ...current, count: Math.max(0, current.count - 1) }
                 : current)

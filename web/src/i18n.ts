@@ -168,6 +168,8 @@ type TranslationKey =
   | 'detail.compactSession'
   | 'detail.forkSession'
   | 'detail.compactQueued'
+  | 'detail.compacting'
+  | 'detail.forking'
   | 'todo.title'
   | 'todo.hide'
   | 'todo.show'
@@ -477,6 +479,8 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.compactSession': 'Compact session',
     'detail.forkSession': 'Fork session',
     'detail.compactQueued': 'Compaction queued',
+    'detail.compacting': 'Compacting…',
+    'detail.forking': 'Forking…',
     'todo.title': 'Todo Items',
     'todo.hide': 'Hide',
     'todo.show': 'Show',
@@ -785,6 +789,8 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.compactSession': 'Compatta sessione',
     'detail.forkSession': 'Duplica sessione',
     'detail.compactQueued': 'Compattazione in coda',
+    'detail.compacting': 'Compattazione…',
+    'detail.forking': 'Duplicazione…',
     'todo.title': 'Todo',
     'todo.hide': 'Nascondi',
     'todo.show': 'Mostra',
@@ -1086,6 +1092,8 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.compactSession': '壓縮工作階段',
     'detail.forkSession': '分叉工作階段',
     'detail.compactQueued': '壓縮已排入佇列',
+    'detail.compacting': '正在壓縮…',
+    'detail.forking': '正在分叉…',
     'todo.title': '待辦事項',
     'todo.hide': '隱藏',
     'todo.show': '顯示',
@@ -1335,6 +1343,8 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.compactSession': '压缩会话',
     'detail.forkSession': '分叉会话',
     'detail.compactQueued': '压缩已排队',
+    'detail.compacting': '正在压缩…',
+    'detail.forking': '正在分叉…',
     'todo.title': '待办事项',
     'todo.hide': '隐藏',
     'todo.show': '显示',

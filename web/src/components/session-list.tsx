@@ -87,15 +87,6 @@ export function SessionCard({
   return (
     <article
       className={`session-card ${session.status} ${selectedID === session.id ? "active" : ""} ${isRenaming ? "renaming" : ""} fade-in`}
-      onClick={() => onOpen(session)}
-      role="button"
-      tabIndex={0}
-      onKeyDown={(event) => {
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault()
-          onOpen(session)
-        }
-      }}
     >
       <div className="session-card-main">
         <div>
@@ -132,9 +123,12 @@ export function SessionCard({
               </button>
             </div>
           ) : (
-            <h3 title={session.title}>{session.title}</h3>
+            <button type="button" className="session-card-open" onClick={() => onOpen(session)} title={t('sessions.open')}>
+              <h3 title={session.title}>{session.title}</h3>
+              <p title={session.directory}>{shortDirectory(session.directory)}</p>
+            </button>
           )}
-          <p title={session.directory}>{shortDirectory(session.directory)}</p>
+          {isRenaming && <p title={session.directory}>{shortDirectory(session.directory)}</p>}
         </div>
       </div>
       <div className="session-stats">

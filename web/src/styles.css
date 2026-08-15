@@ -336,7 +336,7 @@ button {
   font-weight: 550;
   color: var(--text);
   background: var(--surface);
-  cursor: pointer;
+  cursor: default;
   white-space: nowrap;
   transition: background var(--motion-fast) var(--ease), border-color var(--motion-fast) var(--ease),
     color var(--motion-fast) var(--ease), box-shadow var(--motion-fast) var(--ease);
@@ -2497,7 +2497,11 @@ a:focus-visible,
   align-items: center;
   gap: var(--space-1);
   min-width: 0;
-  overflow: hidden;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 2px;
+  scrollbar-width: thin;
 }
 
 .composer-chip {
@@ -2512,6 +2516,25 @@ a:focus-visible,
   background: var(--surface-subtle);
   color: var(--muted-strong);
   font-size: var(--font-xs);
+  flex: 0 0 auto;
+}
+
+.session-card-open {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.session-card-open:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 3px;
+  border-radius: var(--radius-sm);
 }
 
 .composer-chip strong {
@@ -2696,6 +2719,14 @@ a:focus-visible,
   font-weight: 500;
   justify-content: flex-start;
   text-align: left;
+}
+
+.session-action-pending {
+  display: block;
+  margin-top: var(--space-1);
+  color: var(--muted-strong);
+  font-size: var(--font-xs);
+  white-space: nowrap;
 }
 
 @media (hover: hover) {
