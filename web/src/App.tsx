@@ -2249,6 +2249,9 @@ function App() {
   const [sessionActionPending, setSessionActionPending] = useState<"compact" | "fork" | null>(null)
   const sessionActionPendingRef = useRef<"compact" | "fork" | null>(null)
   sessionActionPendingRef.current = sessionActionPending
+  // Keep fork checks live across awaits without letting TypeScript treat the ref's
+  // value as permanently narrowed after an early return.
+  const isSessionForkPending = () => sessionActionPendingRef.current === "fork"
   const [activatingSkill, setActivatingSkill] = useState<string | null>(null)
   const [loadingSessionID, setLoadingSessionID] = useState<string | null>(null)
   /** The empty transcript state is only meaningful after this session's first history snapshot succeeds. */
@@ -2924,7 +2927,7 @@ function App() {
 
   /** Compact is a queued current-session action: it must not replace the selected session. */
   async function compactCurrentSession() {
-    if (config.backend !== "opencode2" || !selectedSession || sessionActionPending || isWorking || busySending
+    if (config.backend !== "opencode2" || !selectedSession || sessionActionPending || sessionActionPendingRef.current || isWorking || busySending
       || !messages.some((message) => message.info.role === "user")) return
     setSessionActionPending("compact")
     setRuntimeError(null)
@@ -2940,7 +2943,7 @@ function App() {
   }
 
   async function forkCurrentSession() {
-    if (config.backend !== "opencode2" || !selectedSession || sessionActionPending || isWorking || busySending
+    if (config.backend !== "opencode2" || !selectedSession || sessionActionPending || sessionActionPendingRef.current || isWorking || busySending
       || !messages.some((message) => message.info.role === "user")) return
     const original = selectedSession
     const forkContext = {
@@ -2954,6 +2957,9 @@ function App() {
         && current.configKey === forkContext.configKey
         && current.sessionID === forkContext.sessionID
     }
+    // State updates are batched. Update the ref too so callbacks and an awaited command
+    // discovery cannot slip through during the render before the pending state commits.
+    sessionActionPendingRef.current = "fork"
     setSessionActionPending("fork")
     setRuntimeError(null)
     setActionNotice(null)
@@ -2971,6 +2977,7 @@ function App() {
     } catch (err) {
       if (isCurrentForkContext()) setRuntimeError((err as Error).message)
     } finally {
+      sessionActionPendingRef.current = null
       setSessionActionPending(null)
     }
   }
@@ -3235,6 +3242,7 @@ function App() {
   }
 
   async function activateSkill(skill: CommandInfo, input = `/${skill.name}`) {
+    if (sessionActionPendingRef.current === "fork") return
     if (!selectedSession) {
       setRuntimeError(t('help.skillRequiresSession'))
       return
@@ -3286,7 +3294,10 @@ function App() {
   }
 
   async function send() {
-    if (!selectedSession || sessionActionPending === "fork") return
+    // Read the ref here as well as after awaited work. The render-state check would
+    // narrow sessionActionPending for the rest of this function, even though the ref
+    // is the live guard needed to catch a fork that starts while this send is pending.
+    if (!selectedSession || isSessionForkPending()) return
     const text = composer.trim()
     // An image with no caption is a complete prompt, so emptiness is about both.
     if (!text && attachments.length === 0) return
@@ -3333,12 +3344,18 @@ function App() {
       if (availableCommands.length === 0) {
         try {
           availableCommands = await api.listCommands(config)
+          // Fork can begin while command discovery is in flight. Do not let the
+          // stale closure dispatch a command or update command state afterwards.
+          if (isSessionForkPending()) return
           setCommands(availableCommands)
         } catch (err) {
+          if (isSessionForkPending()) return
           setRuntimeError(`Cannot load server commands: ${(err as Error).message}`)
           return
         }
       }
+
+      if (isSessionForkPending()) return
 
       const matchingCommand = availableCommands.find((item) => item.name === command)
       if (!matchingCommand) {
@@ -5329,10 +5346,10 @@ http://YOUR_PC_IP:4096/global/health</pre>
                        <div className="command-card-header">
                          <code className="command-name">/{cmd.name}</code>
                          {cmd.source === "skill" && (
-                           <button
-                             type="button"
-                             className="btn-secondary"
-                             disabled={!selectedSession || config.backend !== "opencode2" || busySending}
+                            <button
+                              type="button"
+                              className="btn-secondary"
+                              disabled={!selectedSession || config.backend !== "opencode2" || busySending || sessionActionPending === "fork"}
                              onClick={() => void activateSkill(cmd)}
                              title={!selectedSession
                                ? t('help.skillRequiresSession')
