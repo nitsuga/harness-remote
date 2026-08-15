@@ -27,12 +27,14 @@ export type V2Session = {
   subpath?: string
   model?: { id?: string; providerID?: string; variant?: string }
   projectID?: string
+  parentID?: string
+  fork?: { sessionID?: string; parentID?: string }
   revert?: { messageID?: string; partID?: string }
   files?: Array<{ file: string; patch?: string; additions?: number; deletions?: number; status?: string }>
 }
 
 export function toSession(session: V2Session): Session {
-  return {
+  const mapped: Session = {
     id: session.id,
     title: session.title ?? "",
     directory: session.location?.directory ?? "",
@@ -49,8 +51,11 @@ export function toSession(session: V2Session): Session {
           deletions: session.files.reduce((sum, file) => sum + (file.deletions ?? 0), 0)
         }
       : undefined,
-    external: false
+    external: false,
   }
+  const parentID = session.parentID ?? session.fork?.parentID ?? session.fork?.sessionID
+  if (parentID) Object.defineProperty(mapped, "parentID", { value: parentID, enumerable: false })
+  return mapped
 }
 
 export function toToolState(state: {

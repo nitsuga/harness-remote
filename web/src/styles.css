@@ -1935,6 +1935,13 @@ a:focus-visible,
   padding: var(--space-3) var(--space-4);
 }
 
+.message-delivery-notice {
+  margin-top: .45rem;
+  color: var(--muted);
+  font-size: .75rem;
+  font-style: italic;
+}
+
 .message.assistant {
   align-self: stretch;
 }

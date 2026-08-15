@@ -114,6 +114,7 @@ export type Session = {
     partID?: string
   }
   external?: boolean
+  parentID?: string
 }
 
 export type SessionStatus = {
@@ -161,6 +162,7 @@ export type MessageEnvelope = {
     /** V2 synthetic message metadata used by asynchronous compaction actions. */
     type?: string
     compactionStatus?: "running" | "completed" | "failed"
+    delivery?: "queue" | "steer"
   }
   parts: MessagePart[]
 }

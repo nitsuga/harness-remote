@@ -173,6 +173,7 @@ type TranslationKey =
   | 'detail.compactCompleted'
   | 'detail.compactFailed'
   | 'detail.deliveryIndeterminate'
+  | 'detail.queuedPrompt'
   | 'todo.title'
   | 'todo.hide'
   | 'todo.show'
@@ -487,6 +488,7 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.compactCompleted': 'Compaction completed',
     'detail.compactFailed': 'Compaction failed; you can try again',
     'detail.deliveryIndeterminate': 'Delivery status is unknown. The server is being reconciled; do not resend.',
+    'detail.queuedPrompt': 'Queued · waiting to send',
     'todo.title': 'Todo Items',
     'todo.hide': 'Hide',
     'todo.show': 'Show',
@@ -800,6 +802,7 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.compactCompleted': 'Compattazione completata',
     'detail.compactFailed': 'Compattazione non riuscita; puoi riprovare',
     'detail.deliveryIndeterminate': 'Stato della consegna sconosciuto. Sincronizzazione in corso; non inviare di nuovo.',
+    'detail.queuedPrompt': 'In coda · in attesa di invio',
     'todo.title': 'Todo',
     'todo.hide': 'Nascondi',
     'todo.show': 'Mostra',
@@ -1106,6 +1109,7 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.compactCompleted': '壓縮完成',
     'detail.compactFailed': '壓縮失敗；可以再試一次',
     'detail.deliveryIndeterminate': '傳送狀態不明。正在與伺服器同步，請勿重送。',
+    'detail.queuedPrompt': '已排隊 · 等待傳送',
     'todo.title': '待辦事項',
     'todo.hide': '隱藏',
     'todo.show': '顯示',
@@ -1361,6 +1365,7 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.compactCompleted': '压缩完成',
     'detail.compactFailed': '压缩失败；可以重试',
     'detail.deliveryIndeterminate': '传送状态未知。正在与服务器同步，请勿重新发送。',
+    'detail.queuedPrompt': '已排队 · 等待发送',
     'todo.title': '待办事项',
     'todo.hide': '隐藏',
     'todo.show': '显示',

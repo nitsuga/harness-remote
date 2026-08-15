@@ -1547,14 +1547,15 @@ function formatLimit(value?: number): string {
   return String(value)
 }
 
-function createOptimisticUserMessage(sessionID: string, text: string): MessageEnvelope {
+function createOptimisticUserMessage(sessionID: string, text: string, delivery?: "queue" | "steer"): MessageEnvelope {
   const now = Date.now()
   return {
     info: {
       id: `optimistic-${now}`,
       role: "user",
       sessionID,
-      time: { created: now }
+        time: { created: now },
+        delivery
     },
     parts: [
       {
@@ -1615,7 +1616,11 @@ function mergeFetchedMessages(current: MessageEnvelope[], fetched: MessageEnvelo
     const fetchedPartIDs = new Set(message.parts.map((part) => part.id))
     const missingReasoning = previous.parts.filter((part) => part.type === "reasoning" && !fetchedPartIDs.has(part.id))
     const mergedParts = missingReasoning.length === 0 ? parts : [...missingReasoning, ...parts]
-    return partsEqual(previous.parts, mergedParts) ? previous : { ...message, parts: mergedParts }
+    const metadataChanged = previous.info.type !== message.info.type
+      || previous.info.compactionStatus !== message.info.compactionStatus
+      || previous.info.time.completed !== message.info.time.completed
+      || previous.info.delivery !== message.info.delivery
+    return !metadataChanged && partsEqual(previous.parts, mergedParts) ? previous : { ...message, parts: mergedParts }
   })
 }
 
@@ -2028,6 +2033,7 @@ const MessageArticle = memo(function MessageArticle({
           />
         )
       )}
+      {message.info.delivery === "queue" && <div className="message-delivery-notice">{t('detail.queuedPrompt')}</div>}
     </MessageContextMenu>
   )
 })
@@ -2445,6 +2451,7 @@ function App() {
     setActionNotice(terminal.info.compactionStatus === "failed" ? t('detail.compactFailed') : t('detail.compactCompleted'))
   }, [activeProfileID, config, messages, selectedID, sessionActionPending, t])
   const forkFocusSessionRef = useRef<string | null>(null)
+  const forkReconcilingRef = useRef(false)
   const [activatingSkill, setActivatingSkill] = useState<string | null>(null)
   const [loadingSessionID, setLoadingSessionID] = useState<string | null>(null)
   /** The empty transcript state is only meaningful after this session's first history snapshot succeeds. */
@@ -3299,11 +3306,16 @@ function App() {
       await api.compactSession(config, selectedSession.id, selectedSession.directory)
       if (isLeaseContextCurrent(lease)) setActionNotice(t('detail.compactQueued'))
     } catch (err) {
-      compactObservationRef.current = null
       if (isLeaseContextCurrent(lease)) {
-        setSessionActionPending(null)
-        sessionActionPendingRef.current = null
-        setRuntimeError((err as Error).message)
+        if (isIndeterminateDeliveryError(err)) {
+          setActionNotice(t('detail.deliveryIndeterminate'))
+          void loadSelected(selectedSession.id, selectedSession.directory, true).catch(() => undefined)
+        } else {
+          compactObservationRef.current = null
+          setSessionActionPending(null)
+          sessionActionPendingRef.current = null
+          setRuntimeError((err as Error).message)
+        }
       }
     } finally {
       if (isLeaseContextCurrent(lease)) {
@@ -3329,6 +3341,7 @@ function App() {
     // State updates are batched. Update the ref too so callbacks and an awaited command
     // discovery cannot slip through during the render before the pending state commits.
     sessionActionPendingRef.current = "fork"
+    forkReconcilingRef.current = false
     setSessionActionPending("fork")
     setRuntimeError(null)
     setActionNotice(null)
@@ -3342,24 +3355,46 @@ function App() {
         ? current
         : [forkedView, ...current].sort((a, b) => b.updated - a.updated))
       // Keep the original session and navigate through the shared session-opening path.
-      sessionActionPendingRef.current = null
-      setSessionActionPending(null)
-      releaseMutation(lease)
-      forkFocusSessionRef.current = forkedView.id
-      await openSession(forkedView.id, forkedView.directory)
+       forkFocusSessionRef.current = forkedView.id
+       await openSession(forkedView.id, forkedView.directory)
       // A fork copies server history, not the unsent composer. Restore the snapshot only when the
       // navigation that this request initiated still owns the destination context.
       const childContext = { profileID: activeProfileID, configKey: configKey(config), sessionID: forkedView.id }
       if (mutationCoordinator.isContextCurrent(childContext) && activeContextRef.current.sessionID === forkedView.id) {
         setComposer(forkDraft.text)
-        setAttachments(forkDraft.attachments)
-      }
+         setAttachments(forkDraft.attachments)
+       }
+       forkReconcilingRef.current = false
+       sessionActionPendingRef.current = null
+       setSessionActionPending(null)
     } catch (err) {
-      if (isLeaseContextCurrent(lease)) setRuntimeError((err as Error).message)
+      if (isLeaseContextCurrent(lease)) {
+        if (isIndeterminateDeliveryError(err)) {
+          forkReconcilingRef.current = true
+          setActionNotice(t('detail.deliveryIndeterminate'))
+          // The POST may have committed even though its response was lost. Reconcile using the
+          // authoritative session list and V2 fork lineage; never ask the user to retry blindly.
+          void api.listSessions(config).then((listed) => {
+            const child = listed.find((candidate) => candidate.parentID === original.id)
+            if (!child || !isLeaseContextCurrent(lease) || !mutationCoordinator.isContextCurrent(forkContext)) return
+            const childView = toSessionView(child)
+            setSessions((current) => current.some((session) => session.id === childView.id) ? current : [childView, ...current])
+            forkFocusSessionRef.current = childView.id
+            forkReconcilingRef.current = false
+            sessionActionPendingRef.current = null
+            setSessionActionPending(null)
+            void openSession(childView.id, childView.directory)
+          }).catch(() => undefined)
+        } else {
+          setRuntimeError((err as Error).message)
+        }
+      }
     } finally {
       if (isLeaseContextCurrent(lease)) {
-        sessionActionPendingRef.current = null
-        setSessionActionPending(null)
+        if (!forkReconcilingRef.current) {
+          sessionActionPendingRef.current = null
+          setSessionActionPending(null)
+        }
       }
       releaseMutation(lease)
     }
@@ -3708,9 +3743,9 @@ function App() {
             setActionNotice(t('detail.deliveryIndeterminate'))
             void loadSelected(session.id, session.directory, true).catch(() => undefined)
             void refreshSessions(false, undefined, true).catch(() => undefined)
+            return
           }
-        setActionNotice(null)
-        setRuntimeError(t('help.skillActivationFailed', { skill: skill.name, message: (err as Error).message }))
+          setRuntimeError(t('help.skillActivationFailed', { skill: skill.name, message: (err as Error).message }))
       }
     } finally {
       if (isLeaseContextCurrent(lease)) {
@@ -3864,9 +3899,12 @@ function App() {
 
     const promptLease = acquireMutation("prompt")
     if (!promptLease) return
+    // Preserve the normal working follow-up contract (`attachments, isWorking ? "queue" : "steer"`)
+    // and extend it to the short interval where compaction has acknowledged but is not terminal.
+    const promptDelivery = sessionActionPending === "compact" ? "queue" : (isWorking ? "queue" : "steer")
     setComposer("")
     setAttachments([])
-    const optimisticMessage = createOptimisticUserMessage(selectedSession.id, text)
+    const optimisticMessage = createOptimisticUserMessage(selectedSession.id, text, promptDelivery)
     setOptimisticUserMessages((current) => [...current, optimisticMessage])
     awaitingAssistantBaselineRef.current = assistantResponseSignature
     completionShouldPlayRef.current = true
@@ -3877,7 +3915,7 @@ function App() {
     setRuntimeError(null)
     let promptDispatched = false
     try {
-      await (api.sendPrompt as unknown as (...args: [ServerConfig, string, string, string, ModelSelection | undefined, string | undefined, AttachmentPart[], "steer" | "queue"]) => Promise<unknown>)(config, selectedSession.id, text, selectedSession.directory, activeModel, activeAgentID, attachments, isWorking ? "queue" : "steer")
+      await (api.sendPrompt as unknown as (...args: [ServerConfig, string, string, string, ModelSelection | undefined, string | undefined, AttachmentPart[], "steer" | "queue"]) => Promise<unknown>)(config, selectedSession.id, text, selectedSession.directory, activeModel, activeAgentID, attachments, promptDelivery)
       promptDispatched = true
       if (!isLeaseContextCurrent(promptLease)) return
       // Dispatch is the commit boundary. A history/sidebar refresh is best effort and must never
