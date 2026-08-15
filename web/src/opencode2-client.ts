@@ -43,8 +43,9 @@ import {
  * The v2 server API is a rewrite of the v1 surface this app originally spoke: every endpoint lives
  * under `/api/*`, responses are wrapped as `{ data, location?, cursor? }` (pagination cursors ride in
  * the body, not a header), sessions carry their working directory as `location.directory`, and the
- * v1 question flow is replaced by "forms". This module maps those shapes back into the app's existing
- * types so the rest of the UI needs no v2-specific branches.
+ * v1 question flow is replaced by "forms". Exceptions that answer bare (no `data` envelope):
+ * `/api/health`, `/api/location` and `/api/project/current`. This module maps those shapes back into
+ * the app's existing types so the rest of the UI needs no v2-specific branches.
  */
 
 function unauthorizedDetail(config: ServerConfig): string {
@@ -200,7 +201,8 @@ export const opencode2Api = {
   },
 
   health(config: ServerConfig) {
-    return v2Request<HealthResponse>(config, "/api/health").then((health) => ({ ...health, backend: "opencode2" }))
+    // `/api/health` answers bare (no `data` envelope), so read the body directly.
+    return v2Raw(config, "/api/health").then(({ body }) => ({ ...(body as HealthResponse), backend: "opencode2" }))
   },
 
   capabilities() {
@@ -226,10 +228,13 @@ export const opencode2Api = {
     return statuses
   },
 
-  async loadPath(config: ServerConfig, _directory?: string) {
-    const location = await v2Request<{ directory: string }>(config, "/api/location")
-    const resolved = location.directory ?? ""
-    return { home: resolved, state: "", config: "", worktree: resolved, directory: resolved } as PathInfo
+  async loadPath(config: ServerConfig, directory?: string) {
+    // `/api/location` answers bare (no `data` envelope), so read the body directly.
+    const { body } = await v2Raw(config, withLocation("/api/location", directory))
+    const location = body as { directory?: string; project?: { directory?: string } } | undefined
+    const resolved = location?.directory ?? ""
+    const worktree = location?.project?.directory ?? "/"
+    return { home: resolved, state: "", config: "", worktree, directory: resolved } as PathInfo
   },
 
   async listFiles(config: ServerConfig, path: string, directory?: string) {
@@ -325,7 +330,9 @@ export const opencode2Api = {
   },
 
   async loadProjectCurrent(config: ServerConfig, directory?: string) {
-    return v2Request<ProjectCurrent>(config, withLocation("/api/project/current", directory))
+    // `/api/project/current` answers bare (no `data` envelope), so read the body directly.
+    const { body } = await v2Raw(config, withLocation("/api/project/current", directory))
+    return body as ProjectCurrent
   },
 
   async loadVcs(config: ServerConfig, directory?: string) {
