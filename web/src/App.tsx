@@ -2374,6 +2374,8 @@ function App() {
     if (commandFilter === "skill") return commands.filter((command) => command.source === "skill")
     return commands
   }, [commands, commandFilter])
+  const isSessionRunning = Boolean(selectedSession && isSessionWorking(selectedSession.status))
+  const isWorking = awaitingAssistantReply || busySending || isSessionRunning
   const messageMenuActions = useMemo(() => {
     const supported = new Set(commands.map((command) => command.name.toLowerCase()))
     const actions: MessageMenuAction[] = []
@@ -2405,16 +2407,16 @@ function App() {
       ? messages.some((message) => message.info.role === "user" && (!revertMessageID || message.info.id < revertMessageID))
       : undoAction ? undoAction.enabled : supported.has("undo")
     const hasRedo = config.backend === "opencode" || config.backend === "opencode2" ? !!revertMessageID : redoAction ? redoAction.enabled : supported.has("redo")
-    if (hasUndo) actions.push({ id: "undo", label: t('detail.undo'), onSelect: () => void runNativeHistoryCommand("undo") })
-    if (hasRedo) actions.push({ id: "redo", label: t('detail.redo'), onSelect: () => void runNativeHistoryCommand("redo") })
-    if (selectedSession && capabilities.compactSession) {
-      actions.push({ id: "compact", label: t('detail.compactSession'), disabled: sessionActionPending !== null || !hasUserMessage, onSelect: () => void compactCurrentSession() })
+    if (hasUndo) actions.push({ id: "undo", label: t('detail.undo'), disabled: sessionActionPending !== null, onSelect: () => void runNativeHistoryCommand("undo") })
+    if (hasRedo) actions.push({ id: "redo", label: t('detail.redo'), disabled: sessionActionPending !== null, onSelect: () => void runNativeHistoryCommand("redo") })
+    if (selectedSession && config.backend === "opencode2" && capabilities.compactSession) {
+      actions.push({ id: "compact", label: t('detail.compactSession'), disabled: sessionActionPending !== null || !hasUserMessage || isWorking || busySending, onSelect: () => void compactCurrentSession() })
     }
-    if (selectedSession && capabilities.forkSession) {
-      actions.push({ id: "fork", label: t('detail.forkSession'), disabled: sessionActionPending !== null || !hasUserMessage, onSelect: () => void forkCurrentSession() })
+    if (selectedSession && config.backend === "opencode2" && capabilities.forkSession) {
+      actions.push({ id: "fork", label: t('detail.forkSession'), disabled: sessionActionPending !== null || !hasUserMessage || isWorking || busySending, onSelect: () => void forkCurrentSession() })
     }
     return actions
-  }, [capabilities.compactSession, capabilities.forkSession, commands, config.backend, extensionActions, messages, selectedSession, sessionActionPending, t])
+  }, [awaitingAssistantReply, busySending, capabilities.compactSession, capabilities.forkSession, commands, config.backend, extensionActions, isWorking, messages, selectedSession, sessionActionPending, t])
   const selectedNewSessionDirectory = normalizeDirectory(newSessionDirectory)
 
   const renderedMessages = useMemo(() => {
@@ -2466,9 +2468,7 @@ function App() {
         : eventStreamState === "fallback"
           ? t('events.fallback', { error: liveEventError ?? t('events.unknownError') })
           : ""
-  const isSessionRunning = Boolean(selectedSession && isSessionWorking(selectedSession.status))
   const isWaitingForOpenCodeReply = awaitingAssistantReply || busySending || isSessionRunning
-  const isWorking = isWaitingForOpenCodeReply
   const showStopAction = isWorking && !composer.trim() && attachments.length === 0
   const showTypingBubble = Boolean(selectedSession) && isWaitingForOpenCodeReply
   const activeSessions = sessions.filter((session) => isSessionWorking(session.status)).length
@@ -2911,7 +2911,8 @@ function App() {
 
   /** Compact is a queued current-session action: it must not replace the selected session. */
   async function compactCurrentSession() {
-    if (!selectedSession || sessionActionPending) return
+    if (config.backend !== "opencode2" || !selectedSession || sessionActionPending || isWorking || busySending
+      || !messages.some((message) => message.info.role === "user")) return
     setSessionActionPending("compact")
     setRuntimeError(null)
     setActionNotice(null)
@@ -2926,7 +2927,8 @@ function App() {
   }
 
   async function forkCurrentSession() {
-    if (!selectedSession || sessionActionPending) return
+    if (config.backend !== "opencode2" || !selectedSession || sessionActionPending || isWorking || busySending
+      || !messages.some((message) => message.info.role === "user")) return
     const original = selectedSession
     setSessionActionPending("fork")
     setRuntimeError(null)

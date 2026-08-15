@@ -240,14 +240,26 @@ for (const capability of ['agents', 'models', 'todos', 'diff', 'questions', 'per
 }
 assert.ok(/capabilities\.compactSession[\s\S]*?t\('detail\.compactSession'\)/.test(app), 'compact must be a capability-gated current-session menu action')
 assert.ok(/capabilities\.forkSession[\s\S]*?t\('detail\.forkSession'\)/.test(app), 'fork must be a capability-gated current-session menu action')
+assert.ok(/selectedSession && config\.backend === "opencode2" && capabilities\.compactSession/.test(app), 'compact must only render for the OpenCode 2 backend')
+assert.ok(/selectedSession && config\.backend === "opencode2" && capabilities\.forkSession/.test(app), 'fork must only render for the OpenCode 2 backend')
 assert.ok(app.includes("await api.compactSession(config, selectedSession.id, selectedSession.directory)"), 'compact must invoke the API once for the selected session')
 assert.ok(app.includes("setActionNotice(t('detail.compactQueued'))"), 'compact must show the queued notice without replacing the session')
 assert.ok(app.includes('const forked = await api.forkSession(config, original.id, original.directory)'), 'fork must invoke the API once for the current session')
 assert.ok(app.includes('setSessions((current) => current.some((session) => session.id === forkedView.id)'), 'fork must insert the returned child while preserving the original')
 assert.ok(app.includes('await openSession(forkedView.id, forkedView.directory)'), 'fork must navigate through the shared session-opening path')
 assert.ok(
-  /const hasUserMessage = messages\.some\(\(message\) => message\.info\.role === "user"\)[\s\S]*?id: "compact"[\s\S]*?disabled: sessionActionPending !== null \|\| !hasUserMessage[\s\S]*?id: "fork"[\s\S]*?disabled: sessionActionPending !== null \|\| !hasUserMessage/.test(app),
+  /const hasUserMessage = messages\.some\(\(message\) => message\.info\.role === "user"\)[\s\S]*?id: "compact"[\s\S]*?disabled: sessionActionPending !== null \|\| !hasUserMessage \|\| isWorking \|\| busySending[\s\S]*?id: "fork"[\s\S]*?disabled: sessionActionPending !== null \|\| !hasUserMessage \|\| isWorking \|\| busySending/.test(app),
   'compact and fork must be disabled for sessions with no visible user message'
+)
+assert.ok(
+  /id: "undo", label: t\('detail\.undo'\), disabled: sessionActionPending !== null/.test(app)
+    && /id: "redo", label: t\('detail\.redo'\), disabled: sessionActionPending !== null/.test(app),
+  'undo and redo must be disabled while compact or fork is pending'
+)
+assert.ok(
+  /function compactCurrentSession\(\)[\s\S]*?config\.backend !== "opencode2"[\s\S]*?isWorking[\s\S]*?busySending/.test(app)
+    && /function forkCurrentSession\(\)[\s\S]*?config\.backend !== "opencode2"[\s\S]*?isWorking[\s\S]*?busySending/.test(app),
+  'compact and fork handlers must retain the backend and active-work guards'
 )
 
 // A follow-up prompt can be queued while the agent is still working.
