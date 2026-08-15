@@ -163,6 +163,10 @@ export type MessageEnvelope = {
     type?: string
     compactionStatus?: "running" | "completed" | "failed"
     delivery?: "queue" | "steer"
+    /** Server-confirmed durable message id on optimistic rows: the admission response returns the
+     *  exact id the message will carry in history (and the inbox), so the optimistic bubble can be
+     *  retired by id instead of by text once the server confirms admission. */
+    durableID?: string
   }
   parts: MessagePart[]
 }

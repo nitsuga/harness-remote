@@ -172,7 +172,10 @@ type TranslationKey =
   | 'detail.forking'
   | 'detail.compactCompleted'
   | 'detail.compactFailed'
+  | 'detail.compactUnconfirmed'
   | 'detail.deliveryIndeterminate'
+  | 'detail.deliveryAdmitted'
+  | 'detail.forkUnconfirmed'
   | 'detail.queuedPrompt'
   | 'todo.title'
   | 'todo.hide'
@@ -487,7 +490,10 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.forking': 'Forking…',
     'detail.compactCompleted': 'Compaction completed',
     'detail.compactFailed': 'Compaction failed; you can try again',
+    'detail.compactUnconfirmed': 'Compaction status is unknown. Check the transcript and wait for the current run to finish before compacting again.',
     'detail.deliveryIndeterminate': 'Delivery status is unknown. The server is being reconciled; do not resend.',
+    'detail.deliveryAdmitted': 'Delivery confirmed with the server; nothing was sent twice.',
+    'detail.forkUnconfirmed': 'Could not confirm the forked session. Refresh the session list to find it.',
     'detail.queuedPrompt': 'Queued · waiting to send',
     'todo.title': 'Todo Items',
     'todo.hide': 'Hide',
@@ -801,7 +807,10 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.forking': 'Duplicazione…',
     'detail.compactCompleted': 'Compattazione completata',
     'detail.compactFailed': 'Compattazione non riuscita; puoi riprovare',
+    'detail.compactUnconfirmed': 'Stato della compattazione sconosciuto. Controlla la trascrizione e attendi che l’esecuzione in corso finisca prima di compattare di nuovo.',
     'detail.deliveryIndeterminate': 'Stato della consegna sconosciuto. Sincronizzazione in corso; non inviare di nuovo.',
+    'detail.deliveryAdmitted': 'Consegna confermata con il server; nulla è stato inviato due volte.',
+    'detail.forkUnconfirmed': 'Impossibile confermare la sessione duplicata. Aggiorna l’elenco delle sessioni per trovarla.',
     'detail.queuedPrompt': 'In coda · in attesa di invio',
     'todo.title': 'Todo',
     'todo.hide': 'Nascondi',
@@ -1108,7 +1117,10 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.forking': '正在分叉…',
     'detail.compactCompleted': '壓縮完成',
     'detail.compactFailed': '壓縮失敗；可以再試一次',
+    'detail.compactUnconfirmed': '壓縮狀態不明。請檢查對話記錄，並等待目前執行結束後再壓縮。',
     'detail.deliveryIndeterminate': '傳送狀態不明。正在與伺服器同步，請勿重送。',
+    'detail.deliveryAdmitted': '已與伺服器確認傳送；沒有重複傳送。',
+    'detail.forkUnconfirmed': '無法確認分叉的工作階段。請重新整理工作階段清單以尋找它。',
     'detail.queuedPrompt': '已排隊 · 等待傳送',
     'todo.title': '待辦事項',
     'todo.hide': '隱藏',
@@ -1364,7 +1376,10 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.forking': '正在分叉…',
     'detail.compactCompleted': '压缩完成',
     'detail.compactFailed': '压缩失败；可以重试',
+    'detail.compactUnconfirmed': '压缩状态未知。请检查对话记录，并等待当前运行结束后再压缩。',
     'detail.deliveryIndeterminate': '传送状态未知。正在与服务器同步，请勿重新发送。',
+    'detail.deliveryAdmitted': '已与服务器确认传送；没有重复传送。',
+    'detail.forkUnconfirmed': '无法确认分叉的会话。请刷新会话列表以找到它。',
     'detail.queuedPrompt': '已排队 · 等待发送',
     'todo.title': '待办事项',
     'todo.hide': '隐藏',

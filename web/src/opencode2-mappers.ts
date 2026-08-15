@@ -58,6 +58,41 @@ export function toSession(session: V2Session): Session {
   return mapped
 }
 
+/**
+ * One `GET /api/session/{sessionID}/inbox` entry (`SessionInbox.Info`): durable enqueued session
+ * work that has not been delivered yet. The message list does not carry delivery state — a queued
+ * prompt is admitted here first and only reaches the transcript once it is delivered — so this is
+ * the authoritative source for the app's queued indicators.
+ */
+export type V2InboxItem = {
+  id: string
+  sessionID: string
+  timeCreated: number
+  type: "user" | "synthetic" | "compaction" | "move"
+  payload?: Record<string, unknown>
+  delivery?: "steer" | "queue"
+}
+
+/**
+ * Overlay the server's inbox delivery metadata onto a fetched transcript. A message that the inbox
+ * still lists as queued keeps its "Queued · waiting to send" indicator across reconciliation; once
+ * the item is delivered it leaves the inbox and the overlay stops applying, so the indicator
+ * disappears exactly when the server says the prompt was sent.
+ */
+export function applyInboxDelivery(messages: MessageEnvelope[], inbox: V2InboxItem[]): MessageEnvelope[] {
+  if (!inbox || inbox.length === 0) return messages
+  const deliveryByID = new Map<string, "steer" | "queue">()
+  for (const item of inbox) {
+    if (item.delivery && (item.type === "user" || item.type === "synthetic")) deliveryByID.set(item.id, item.delivery)
+  }
+  if (deliveryByID.size === 0) return messages
+  return messages.map((message) => {
+    const delivery = deliveryByID.get(message.info.id)
+    if (!delivery || message.info.delivery === delivery) return message
+    return { ...message, info: { ...message.info, delivery } }
+  })
+}
+
 export function toToolState(state: {
   status?: string
   input?: unknown

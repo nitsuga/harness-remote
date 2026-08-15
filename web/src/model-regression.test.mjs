@@ -29,7 +29,7 @@ assert.ok(app.includes('agentOptions.filter((agent) => agent.mode === "primary" 
 assert.ok(app.includes('activeAgent?.id ?? "build"'), 'agent selection should default to build')
 assert.ok(app.includes('id="agent-select"'), 'AI sheet should render an agent selector')
 assert.ok(app.includes('attachments, isWorking ? "queue" : "steer"'), 'chat prompts should use selected agent, staged attachments, and queue follow-ups while working')
-assert.ok(app.includes('api.sendCommand(config, selectedSession.id, command, args, selectedSession.directory, activeModel, activeAgentID)'), 'slash commands should use selected agent')
+assert.ok(app.includes('sendCommandV2(config, selectedSession.id, command, args, selectedSession.directory, activeModel, activeAgentID, commandRequestID)'), 'slash commands should use selected agent')
 assert.ok(app.includes('session-context-strip'), 'detail UX should expose compact mobile context chips')
 assert.ok(app.includes('activeDetailSheet === "ai"'), 'model picker should open in the bottom sheet')
 assert.ok(app.includes("t('detail.modelHint')"), 'model picker should explain when the change applies')

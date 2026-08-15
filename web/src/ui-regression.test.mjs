@@ -125,7 +125,7 @@ assert.match(app, /if \(!promptDispatched && !isIndeterminateDeliveryError\(err\
 assert.match(app, /if \(!isLeaseContextCurrent\(lease\)\) return/, 'session results must reject work from a stale lease, context, or fork generation')
 assert.ok(app.includes('sessionActionPendingRef.current = "fork"'), 'fork must synchronously publish its pending state before React commits the render')
 assert.match(app, /const forkDraft = \{ text: composer, attachments: \[\.\.\.attachments\] \}/, 'fork must snapshot unsent composer content before navigation')
-assert.match(app, /setComposer\(forkDraft\.text\)[\s\S]*?setAttachments\(forkDraft\.attachments\)/, 'fork must restore its draft only after child-context navigation succeeds')
+assert.match(app, /setComposer\(\(current\) => \(current === "" \? forkDraft\.text : current\)\)[\s\S]*?setAttachments\(\(current\) => \(current\.length === 0 \? forkDraft\.attachments : current\)\)/, 'fork must restore its draft only into an empty child composer, never overwriting newer child edits')
 assert.match(app, /!isIndeterminateDeliveryError\(err\)/, 'indeterminate delivery must not restore a duplicate draft')
 assert.match(app, /sessionActionPendingRef\.current = null[\s\S]*?detail\.compactCompleted/, 'compaction must release its pending action only after terminal history metadata')
 assert.match(app, /async function activateSkill\([\s\S]*?if \(isSessionMutationLocked\(\)\) return[\s\S]*?const lease = acquireMutation\("skill"\)/, 'direct skill activation must use the synchronous coordinator lease')
@@ -297,13 +297,36 @@ assert.ok(/capabilities\.compactSession[\s\S]*?t\('detail\.compactSession'\)/.te
 assert.ok(/capabilities\.forkSession[\s\S]*?t\('detail\.forkSession'\)/.test(app), 'fork must be a capability-gated current-session menu action')
 assert.ok(/selectedSession && config\.backend === "opencode2" && capabilities\.compactSession/.test(app), 'compact must only render for the OpenCode 2 backend')
 assert.ok(/selectedSession && config\.backend === "opencode2" && capabilities\.forkSession/.test(app), 'fork must only render for the OpenCode 2 backend')
-assert.ok(app.includes("await api.compactSession(config, selectedSession.id, selectedSession.directory)"), 'compact must invoke the API once for the selected session')
+assert.ok(app.includes("compactSessionV2(config, selectedSession.id, selectedSession.directory, compactRequestID)"), 'compact must invoke the API once for the selected session with a stable admission id')
 assert.ok(app.includes("setActionNotice(t('detail.compactQueued'))"), 'compact must show the queued notice without replacing the session')
 assert.ok(app.includes('const forked = await api.forkSession(config, original.id, original.directory)'), 'fork must invoke the API once for the current session')
 assert.ok(app.includes('setSessions((current) => current.some((session) => session.id === forkedView.id)'), 'fork must insert the returned child while preserving the original')
 assert.ok(app.includes('await openSession(forkedView.id, forkedView.directory)'), 'fork must navigate through the shared session-opening path')
 assert.ok(app.includes('forkFocusSessionRef.current = forkedView.id') && app.includes('detailHeadingRef.current?.focus()'), 'fork navigation must focus the mounted child session context')
 assert.match(app, /const forkContext = \{[\s\S]*?profileID: activeProfileID[\s\S]*?configKey: configKey\(config\)[\s\S]*?sessionID: original\.id/, 'fork must capture the active profile, server, and session identity before awaiting')
+// Indeterminate fork reconciliation must not depend on the released lease: it keeps its own
+// captured context/generation, a baseline of pre-existing children, paginated authoritative
+// listings with bounded retries, and a resolvable terminal notice instead of a hanging spinner.
+assert.ok(app.includes('const baselineChildIDs = new Set<string>()'), 'fork must capture the pre-existing child ids as a baseline')
+assert.ok(app.includes('!baselineChildIDs.has(candidate.id)'), 'fork reconciliation must only navigate to the NEW child, never an older fork child')
+assert.match(app, /const isReconcileCurrent = \(\) => mutationCoordinator\.isContextGenerationCurrent\(reconcileGeneration\)/, 'fork reconciliation must be current-checked by captured generation, not by the released lease')
+assert.ok(app.includes('FORK_RECONCILE_MAX_ATTEMPTS'), 'fork reconciliation must be bounded')
+assert.ok(app.includes('detail.forkUnconfirmed'), 'an unconfirmed fork must resolve with a retryable notice')
+assert.ok(app.includes('restoreForkDraft(childView.id)'), 'reconciled child navigation must restore the forked draft and attachments')
+// Compaction must correlate terminal state to the exact admission id returned by the server, and
+// resolve (instead of hanging) when the admission cannot be established.
+assert.match(app, /observation\.expectedID = admission\?\.id \?\? compactRequestID/, 'compact must track the exact admission id from the server response')
+assert.ok(app.includes('observation.expectedID'), 'compact terminal state must be correlated to the tracked admission id')
+assert.ok(app.includes('detail.compactUnconfirmed'), 'an unconfirmed compaction must resolve with a retryable notice instead of blocking forever')
+assert.ok(app.includes('COMPACTION_PENDING_MAX_MS'), 'compaction pending state must have a bounded deadline')
+// Stable request ids make post-transmission retries idempotent: the same id is re-sent, and the
+// server's 409 conflict (or silent dedupe for skills) confirms the earlier admission.
+assert.ok(app.includes('const promptRequestID = createMessageRequestID()'), 'prompt sends must carry a stable durable admission id')
+assert.ok(app.includes('const commandRequestID = createMessageRequestID()'), 'slash commands must carry a stable durable admission id')
+assert.ok(app.includes('const skillRequestID = createMessageRequestID()'), 'skill activations must carry a stable durable admission id')
+assert.ok(app.includes('const compactRequestID = createMessageRequestID()'), 'compactions must carry a stable durable admission id')
+assert.ok(app.includes('isAdmissionConflict(retryErr)'), 'an idempotent retry must recognize the 409 conflict that confirms the earlier admission')
+assert.ok(app.includes("t('detail.deliveryAdmitted')"), 'a confirmed idempotent retry must announce the resolved delivery')
 assert.match(
   app,
   /if \(!isLeaseContextCurrent\(lease\) \|\| !mutationCoordinator\.isContextCurrent\(forkContext\)\) return/,
@@ -327,10 +350,91 @@ assert.ok(
 // A follow-up prompt can be queued while the agent is still working.
 assert.ok(app.includes('const showStopAction = canAbortSession'), 'stop should remain offered while a working session has a draft')
 assert.equal(app.includes('disabled={!selectedSession || isWorking}'), false, 'the composer must stay usable while the agent works')
+// Prompts must queue for the whole window where compaction has acknowledged but is not terminal,
+// read through the synchronous ref so a send in the same tick as a pending compact still queues.
+assert.ok(
+  app.includes('sessionActionPendingRef.current === "compact" || sessionActionPending === "compact"'),
+  'a follow-up prompt must queue while a compaction is pending, not steer into it'
+)
+// Queued delivery metadata must survive server reconciliation: the inbox is the authoritative
+// delivery source, its metadata is overlaid on fetched transcripts, and inbox-only queued prompts
+// render as stable transcript rows.
+assert.ok(app.includes('listInboxV2(config, sessionID, directory)'), 'session loads must read the v2 inbox for queued delivery state')
+assert.ok(app.includes('applyInboxDelivery(msg, inbox)'), 'server delivery metadata must be overlaid on fetched transcripts')
+assert.ok(app.includes('queuedInboxMessageEnvelopes(sessionID, inbox'), 'inbox-only queued prompts must render as stable transcript rows')
+assert.ok(app.includes('queuedInboxMessages'), 'server-admitted queued prompts must survive reconciliation as transcript state')
+assert.ok(app.includes('role="status" aria-live="polite"'), 'indeterminate delivery and other action notices must announce with accessible live semantics')
+
+// --- Exact-delivery client contract (issues #1-#6) ---------------------------------------------
+// Optimistic prompt/command rows are tagged with the admission response's durable message id and
+// retire by that EXACT id once the message reaches history or the inbox — immune to identical text
+// sent twice. Text matching is only the fallback for rows still awaiting their admission response
+// (or whose response was lost), guarded by creation time so a pre-existing identical message can
+// never retire a fresh row.
+assert.ok(app.includes('durableID'), 'optimistic rows must carry the server-confirmed durable message id')
+assert.match(
+  app,
+  /function hasMatchingUserMessage\([\s\S]*?if \(optimistic\.info\.durableID\) \{[\s\S]*?message\.info\.id === optimistic\.info\.durableID[\s\S]*?\}[\s\S]*?extractText\(optimistic\)/,
+  'optimistic retirement must prefer the exact durable id and fall back to text only for untagged rows'
+)
+assert.match(app, /message\.info\.time\.created >= optimistic\.info\.time\.created/, 'the text fallback must only match messages created after the optimistic row was sent')
+assert.match(app, /durableID: admission\?\.messageID[\s\S]*?delivery: admission\?\.delivery/, 'a confirmed admission must tag the optimistic row with the returned message id and delivery')
+assert.match(app, /durableID: promptRequestID/, 'a 409-confirmed prompt retry must tag the row with its durably admitted request id')
+assert.match(app, /durableID: commandRequestID/, 'a 409-confirmed command retry must tag the row with its durably admitted request id')
+assert.match(app, /const readmission = await sendPromptV2\([\s\S]*?durableID: readmission\.messageID/, 'a prompt retry must use the returned admission metadata')
+assert.match(app, /const readmission = await sendCommandV2\([\s\S]*?durableID: readmission\.messageID/, 'a command retry must use the returned admission metadata')
+// Queued delivery renders a localized status for every row — fetched transcripts overlaid with the
+// inbox, optimistic rows tagged with queue delivery, and inbox-only queued rows — on both layouts.
+assert.match(
+  app,
+  /message\.info\.delivery === "queue" && <div className="message-delivery-notice">\{t\('detail\.queuedPrompt'\)\}/,
+  'every queued row must render the localized queue status in the shared message view'
+)
+
+// Compaction correlates terminal state ONLY with the exact admission/request id — no baseline or
+// any-terminal heuristic — including the double-indeterminate path where the request id is the only
+// known-valid correlation; context mismatches clear the observation and the pending state.
+assert.equal(app.includes('observation.baseline'), false, 'compaction must not track a baseline of pre-existing compaction messages')
+assert.equal(app.includes('observation.observed'), false, 'compaction must not track observed running message ids')
+assert.match(
+  app,
+  /const expected = observation\.expectedID[\s\S]*?compactions\.find\(\(message\) => message\.info\.id === observation\.expectedID\)/,
+  'terminal compaction state must only release on the exact expected message id'
+)
+assert.match(app, /isAdmissionConflict\(retryErr\)[\s\S]*?observation\.expectedID = compactRequestID/, 'a 409-confirmed compaction must correlate with the durably admitted request id')
+assert.match(app, /isIndeterminateDeliveryError\(retryErr\)[\s\S]*?observation\.expectedID = compactRequestID[\s\S]*?deliveryIndeterminate/, 'a double-indeterminate compaction must still correlate with the request id and announce indeterminate delivery')
+assert.match(
+  app,
+  /observation\.context !== context \|\| !selectedID[\s\S]*?compactObservationRef\.current === observation[\s\S]*?setSessionActionPending\(null\)/,
+  'a stale compaction context must clear its observation and pending state'
+)
+
+// Fork reconciliation clears pending in a finally on exhaustion or confirmed navigation, and the
+// draft restore is guarded so newer child edits are never overwritten.
+assert.match(
+  app,
+  /const reconcileFork = async \(\) => \{[\s\S]*?finally \{[\s\S]*?if \(isReconcileCurrent\(\)\) finishForkPending\(\)/,
+  'fork reconciliation must release pending state in a finally on exhaustion or navigation'
+)
+
+// Skill activation is NOT durably admitted by id: an indeterminate failure must never retry the
+// POST automatically (a duplicate event id can defect); the tagged optimistic row plus poll
+// confirmation correlated by the original request id is the only safe reconciliation, and the
+// indeterminate notice must never read as a definite failure.
+assert.equal((app.match(/await sendSkillV2\(/g) ?? []).length, 1, 'skill activation must never retry the POST automatically, even on indeterminate delivery')
+assert.ok(app.includes('pendingSkillRequestsRef'), 'lost skill acknowledgements must be tracked for poll confirmation')
+assert.match(app, /pendingSkillRequestsRef\.current\.set\(skillRequestID, \{ sessionID: session\.id, skillName: skill\.name \}\)/, 'an indeterminate skill activation must register its original request id for confirmation')
+assert.match(app, /transcript\.some\(\(message\) => message\.info\.id === requestID\)/, 'skill confirmation must correlate by the original request id in history')
+assert.match(
+  app,
+  /if \(!isIndeterminateDeliveryError\(err\)\) \{[\s\S]*?help\.skillActivationFailed[\s\S]*?\} else \{[\s\S]*?pendingSkillRequestsRef\.current\.set[\s\S]*?detail\.deliveryIndeterminate/,
+  'indeterminate skill delivery must reconcile via the accessible indeterminate notice, never a definite-failure message'
+)
+
 // External OMP history must replace stale cached ordering even when the corrected payload is shorter.
 // This no longer needs its own escape hatch: every fetched snapshot is now applied, and only same-id
 // same-type text is held back from shrinking, so a corrected external history replaces the cache.
-assert.ok(app.includes("if (!messagesHaveSameContent(current, msg)) {"), "a fetched snapshot must be applied whenever it differs from what is on screen")
+assert.ok(app.includes("if (!messagesHaveSameContent(current, transcript)) {"), "a fetched snapshot must be applied whenever it differs from what is on screen")
 // The marker moved from below the messages, where the sticky composer cut it in half, into the
 // header. What matters is that an external session is still marked and still explained, not where.
 assert.ok(app.includes("selectedSession.external && ("), "a session from another client must be marked as such")
@@ -616,7 +720,7 @@ assert.ok(api.includes('`/session/${sessionID}/action`'), 'session action discov
 assert.ok(api.includes('`/session/${sessionID}/action/${encodeURIComponent(actionID)}`'), 'action execution should use a structured endpoint rather than a chat prompt')
 assert.ok(app.includes('capabilities.actions ? api.listActions'), 'the selected session should discover actions only when the bridge supports them')
 assert.ok(app.includes('api.invokeAction(config, selectedSession.id, command, selectedSession.directory)'), 'OMP Undo/Redo should execute through the action API')
-assert.ok(app.includes('replaceMessages ? msg : mergeFetchedMessages(prev, msg)'), 'a successful Undo must be allowed to shrink the rendered conversation')
+assert.ok(app.includes('replaceMessages ? transcript : mergeFetchedMessages(prev, transcript)'), 'a successful Undo must be allowed to shrink the rendered conversation')
 assert.ok(app.includes('setExtensionActions(result.actions)'), 'action execution should apply the returned session-specific enabled state immediately')
 assert.ok(app.includes("if (result.applied === false)"), 'only an authoritative no-op result should show no-op feedback')
 assert.ok(app.includes('result.applied !== false'), 'unknown results should still refresh the active ACP context without being called no-ops')
@@ -628,7 +732,7 @@ assert.match(app, /case "session\.undo":\s*if \(sessionActionPending !== null\) 
 assert.match(app, /case "session\.redo":\s*if \(sessionActionPending !== null\) return/, 'the menubar/native redo dispatcher must reject pending session actions')
 assert.match(app, /action\.id === "undo" && !action\.disabled/, 'menubar and palette undo entries must use the action disabled state')
 assert.match(app, /action\.id === "redo" && !action\.disabled/, 'menubar and palette redo entries must use the action disabled state')
-assert.ok(app.includes('{actionNotice && <div className=\"notice info fade-in\">'), 'no-op action feedback should render as visible information rather than an error')
+assert.ok(app.includes('{actionNotice && <div className="notice info fade-in" role="status" aria-live="polite">'), 'no-op action feedback should render as visible information rather than an error')
 
 // Session actions in the header (issue #104): Undo can strip the transcript to nothing, leaving
 // Redo enabled but unreachable through the message context menu, which needs a bubble to exist.

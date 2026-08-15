@@ -195,7 +195,13 @@ export async function desktopRequestResult(config: ServerConfig, request: Deskto
 
 export async function desktopRequest(config: ServerConfig, request: DesktopRequest): Promise<DesktopResponse> {
   const result = await desktopRequestResult(config, request)
-  if (!result.ok) throw new Error(result.error.message)
+  if (!result.ok) {
+    const error = new Error(result.error.message)
+    // Keep the HTTP status when the bridge transport surfaced one, so the v2 client can recognize
+    // an idempotent admission conflict (409) on the desktop build as well as on web/Capacitor.
+    if (result.error.status) (error as Error & { status?: number }).status = result.error.status
+    throw error
+  }
   return result.response
 }
 

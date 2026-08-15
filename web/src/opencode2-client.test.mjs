@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { createTranslator } from './i18n.ts'
 import {
+  applyInboxDelivery,
   fetchSkillCatalog,
   isV2RouteAbsent,
   mergeCommandCatalog,
@@ -457,14 +458,26 @@ assert.match(clientSource, /delivery: promptDelivery/, 'prompt delivery must be 
 assert.match(clientSource, /delivery\?: "steer" \| "queue"/, 'v2 prompt delivery must use the protocol enum')
 assert.match(clientSource, /IndeterminateDeliveryError/, 'transport loss after a mutation request must remain indeterminate')
 assert.match(readFileSync(new URL('./opencode2-mappers.ts', import.meta.url), 'utf8'), /compactionStatus/, 'compaction terminal metadata must survive history mapping')
+// Compact is durably admitted under a stable client id (`msg_` prefix) so a lost acknowledgement can
+// be retried idempotently, and the admission response carries the exact compaction message id the UI
+// correlates terminal history state against.
 assert.ok(
-  clientSource.includes('`/api/session/${encodeURIComponent(sessionID)}/compact`, {\n      method: "POST",\n      body: {}\n    })'),
-  'compact must POST an empty body — both payload fields are optional and the response is an acknowledgement'
+  clientSource.includes('`/api/session/${encodeURIComponent(sessionID)}/compact`, {\n      method: "POST",\n      body\n    })'),
+  'compact must POST its admission body (stable id + queued delivery)'
 )
+assert.match(clientSource, /body\.id = compactRequestID/, 'compact must carry a stable admission id')
+assert.match(clientSource, /return \{ id: admitted\?\.id \?\? compactRequestID, requestID: compactRequestID \}/, 'compact must return the exact admission id for terminal correlation')
 assert.ok(
   clientSource.includes('`/api/session/${encodeURIComponent(sessionID)}/fork`, {\n      method: "POST",\n      body: { boundary: { type: "through" } }\n    })'),
   'fork must POST the through boundary — the only fork boundary that needs no messageID'
 )
+// The durable admission id makes prompt/command/skill/compact/create retryable without duplication:
+// the server answers 409 when the id is already recorded, and isAdmissionConflict recognizes that.
+assert.match(clientSource, /body\.id = promptRequestID/, 'prompt must carry its stable admission id')
+assert.match(clientSource, /if \(requestID\) body\.id = requestID/, 'command, skill, and create must carry their stable admission id when provided')
+assert.match(clientSource, /isAdmissionConflict/, 'the client must recognize an idempotent admission conflict (409)')
+assert.ok(clientSource.includes('`/api/session/${encodeURIComponent(sessionID)}/inbox`'), 'queued delivery state must be readable from the v2 inbox endpoint')
+assert.ok(clientSource.includes('`/api/session?parentID=${encodeURIComponent(parentID)}`'), 'fork reconciliation must list children by parent id')
 
 // The v1/bridge backends must reject compact/fork honestly (same pattern as sendSkill) so the UI
 // never sees a silent success from a backend that cannot perform the operation.
@@ -477,6 +490,70 @@ assert.ok(
   apiSource.includes('return Promise.reject(new Error("Session forking is only supported on OpenCode 2 servers"))'),
   'v1 forkSession must reject honestly'
 )
+
+// --- Inbox delivery metadata (issues #1/#6) ------------------------------------------------
+
+// The message list does not carry delivery state; the inbox (`GET /api/session/{id}/inbox`) does.
+// `applyInboxDelivery` overlays the server's queued/steer metadata onto the fetched transcript so a
+// queued prompt keeps its indicator across reconciliation, and drops it once the item is delivered.
+const queuedTranscript = [
+  toMessageEnvelope({ id: 'msg_pending', type: 'user', time: { created: 1 }, text: 'Queued hello' }, 'ses_x'),
+  toMessageEnvelope({ id: 'msg_delivered', type: 'user', time: { created: 2 }, text: 'Delivered hello' }, 'ses_x')
+]
+const inboxItems = [
+  { id: 'msg_pending', sessionID: 'ses_x', timeCreated: 1, type: 'user', payload: { text: 'Queued hello' }, delivery: 'queue' },
+  { id: 'msg_delivered', sessionID: 'ses_x', timeCreated: 2, type: 'user', payload: { text: 'Delivered hello' }, delivery: 'steer' },
+  { id: 'msg_compact', sessionID: 'ses_x', timeCreated: 3, type: 'compaction', payload: {}, delivery: 'queue' }
+]
+const overlaid = applyInboxDelivery(queuedTranscript, inboxItems)
+assert.equal(overlaid[0].info.delivery, 'queue', 'a message the inbox still holds as queued must keep its queued indicator')
+assert.equal(overlaid[1].info.delivery, 'steer', 'a message the inbox reports as steered must carry steer delivery')
+assert.equal(applyInboxDelivery(queuedTranscript, []), queuedTranscript, 'an empty inbox must leave the transcript untouched')
+assert.equal(applyInboxDelivery(queuedTranscript, [{ id: 'msg_compact', sessionID: 'ses_x', timeCreated: 3, type: 'compaction', payload: {}, delivery: 'queue' }]), queuedTranscript, 'compaction inbox items must not affect user message delivery metadata')
+// A message with no inbox entry (or one whose delivery already matches) must keep its identity so
+// the memoized message rendering does not re-run on every poll.
+const steerOnly = applyInboxDelivery(queuedTranscript, [{ id: 'msg_delivered', sessionID: 'ses_x', timeCreated: 2, type: 'user', payload: {}, delivery: 'steer' }])
+assert.equal(steerOnly[1].info.delivery, 'steer')
+assert.notEqual(steerOnly[1], queuedTranscript[1])
+const alreadyQueued = applyInboxDelivery(overlaid, [{ id: 'msg_pending', sessionID: 'ses_x', timeCreated: 1, type: 'user', payload: {}, delivery: 'queue' }])
+assert.equal(alreadyQueued[0], overlaid[0], 'an unchanged delivery must preserve the message identity')
+
+// --- Compaction admission id (issue #4) ------------------------------------------------
+
+// The client supplies its own stable `msg_` id so the acknowledgement can be retried idempotently,
+// and the server's `{ data: SessionInbox.Compaction }` response carries the exact compaction message
+// id that terminal history state is correlated against.
+assert.match(clientSource, /createMessageRequestID/, 'the client must generate stable msg_ admission ids')
+assert.match(clientSource, /compactRequestID = requestID \?\? createMessageRequestID\(\)/, 'compact must default its admission id when none is supplied')
+
+// --- Prompt/command admission metadata (issues #1/#2) -------------------------------------
+
+// `POST /api/session/{id}/prompt` and `/command` succeed with `{ data: Session.Inbox.User }` — the
+// exact durable message id and the delivery the server recorded. The client must surface both in its
+// return instead of discarding the response: prompt previously returned only `{ admitted, requestID }`
+// and command fabricated a placeholder envelope.
+assert.match(clientSource, /const admitted = await v2Request<\{ id\?: string; delivery\?: "steer" \| "queue" \}>\(config, `\/api\/session\/\$\{encodeURIComponent\(sessionID\)\}\/prompt`/, 'prompt must read the admitted Session.Inbox.User (exact id + delivery) from the response envelope')
+assert.match(clientSource, /const admitted = await v2Request<\{ id\?: string; delivery\?: "steer" \| "queue" \}>\(config, `\/api\/session\/\$\{encodeURIComponent\(sessionID\)\}\/command`/, 'command must read the admitted Session.Inbox.User (exact id + delivery) from the response envelope')
+assert.match(clientSource, /return \{ admitted: true, requestID: promptRequestID, messageID: admitted\?\.id, delivery: admitted\?\.delivery \}/, 'prompt must return the exact durable message id and delivery alongside its stable request id')
+assert.match(clientSource, /return \{ admitted: true, requestID, messageID: admitted\?\.id, delivery: admitted\?\.delivery \}/, 'command must return the exact durable message id and delivery alongside its stable request id')
+assert.ok(!clientSource.includes('parts: [] } as MessageEnvelope'), 'command must not fabricate a placeholder envelope')
+// The stable client admission ids survive the metadata change: prompt keeps its defaulted id and
+// command keeps its caller-supplied id on the wire.
+assert.match(clientSource, /body\.id = promptRequestID/, 'prompt must keep its stable durable admission id')
+assert.match(clientSource, /if \(requestID\) body\.id = requestID/, 'command must keep its stable durable admission id when provided')
+
+// --- Skill activation: NOT idempotent by id (issue #5) ------------------------------------
+
+// The skill endpoint is not durably admitted by id — it derives an event id from the request id,
+// and re-admitting a duplicate event id can defect. The client comment must document that (the
+// previous claim that a retry "can never activate the skill twice" was wrong), and the client must
+// not attempt an automatic idempotent retry for skills the way prompt/command/compact allow.
+const sendSkillSource = clientSource.slice(clientSource.indexOf('async sendSkill'), clientSource.indexOf('async compactSession'))
+assert.ok(!clientSource.includes('can never activate the skill twice'), 'the misleading skill idempotency claim must be removed')
+assert.match(clientSource, /durably admitted by id/, 'the client must document that skill activation is not durably admitted by id')
+assert.match(clientSource, /duplicate event id can defect/, 'the client must document that a duplicate skill event id can defect')
+assert.equal((sendSkillSource.match(/\/skill`, \{/g) ?? []).length, 1, 'sendSkill must admit the activation exactly once — no automatic retry added')
+assert.equal((sendSkillSource.match(/sendSkillV2|sendSkill\(/g) ?? []).length, 1, 'sendSkill must not call itself or a sibling dispatch (no retry loop)')
 
 // Every language must ship the compact/fork labels and the compact queued notice.
 const compactSessionLabels = {
@@ -497,11 +574,20 @@ const compactQueuedLabels = {
   'zh-TW': '壓縮已排入佇列',
   'zh-CN': '压缩已排队'
 }
+const unconfirmedLabels = {
+  en: 'Compaction status is unknown. Check the transcript and wait for the current run to finish before compacting again.',
+  it: 'Stato della compattazione sconosciuto. Controlla la trascrizione e attendi che l’esecuzione in corso finisca prima di compattare di nuovo.',
+  'zh-TW': '壓縮狀態不明。請檢查對話記錄，並等待目前執行結束後再壓縮。',
+  'zh-CN': '压缩状态未知。请检查对话记录，并等待当前运行结束后再压缩。'
+}
 for (const language of ['en', 'it', 'zh-TW', 'zh-CN']) {
   const t = createTranslator(language)
   assert.equal(t('detail.compactSession'), compactSessionLabels[language], `${language} compactSession label`)
   assert.equal(t('detail.forkSession'), forkSessionLabels[language], `${language} forkSession label`)
   assert.equal(t('detail.compactQueued'), compactQueuedLabels[language], `${language} compactQueued notice`)
+  assert.equal(t('detail.compactUnconfirmed'), unconfirmedLabels[language], `${language} compactUnconfirmed notice`)
+  assert.notEqual(t('detail.deliveryAdmitted'), 'detail.deliveryAdmitted', `${language} deliveryAdmitted notice`)
+  assert.notEqual(t('detail.forkUnconfirmed'), 'detail.forkUnconfirmed', `${language} forkUnconfirmed notice`)
 }
 
 console.log('OpenCode 2 client mapping tests passed')

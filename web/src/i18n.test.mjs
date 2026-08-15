@@ -70,6 +70,22 @@ for (const translator of [en, it, zh, zhCN]) {
   assert.notEqual(translator('detail.forking'), 'detail.forking')
 }
 
+// The unconfirmed-compaction notice must not invite an immediate duplicate compaction, and the
+// queued status line must be localized for the shared queue indicator.
+assert.ok(
+  en('detail.compactUnconfirmed').includes('before compacting again'),
+  'the unconfirmed compaction notice must counsel waiting, not an immediate duplicate compaction'
+)
+assert.ok(
+  !en('detail.compactUnconfirmed').includes('compact again if needed'),
+  'the unconfirmed compaction notice must not invite an immediate retry'
+)
+for (const translator of [en, it, zh, zhCN]) {
+  assert.notEqual(translator('detail.compactUnconfirmed'), 'detail.compactUnconfirmed')
+  assert.notEqual(translator('detail.queuedPrompt'), 'detail.queuedPrompt')
+  assert.notEqual(translator('detail.deliveryIndeterminate'), 'detail.deliveryIndeterminate')
+}
+
 assert.equal(en('settings.deleteServerTitle'), 'Delete saved server?')
 assert.equal(it('settings.deleteServerTitle'), 'Eliminare il server salvato?')
 assert.equal(zh('settings.deleteServerTitle'), '刪除已儲存的伺服器？')

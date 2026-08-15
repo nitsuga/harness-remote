@@ -4,7 +4,12 @@ import { Capacitor, type PluginListenerHandle } from "@capacitor/core"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { api, isValidServerConfig } from "./api"
-import { isIndeterminateDeliveryError } from "./opencode2-client"
+import {
+  createMessageRequestID,
+  createSessionRequestID,
+  isAdmissionConflict,
+  isIndeterminateDeliveryError
+} from "./opencode2-client"
 import {
   createDesktopOpenCodeEventSubscription,
   desktopProfileID,
@@ -27,7 +32,7 @@ import {
 } from "./opencode-events"
 import { createTranslator, languageOptions, normalizeLanguage, type LanguageCode } from "./i18n"
 import { stripMarkdownDirectives } from "./markdownDirectives"
-import { isQuestionActive } from "./opencode2-mappers"
+import { isQuestionActive, applyInboxDelivery, type V2InboxItem } from "./opencode2-mappers"
 import { DEFAULT_HARNESS_CAPABILITIES } from "./backendCapabilities"
 import { BACKEND_CLIENTS } from "./backendClient"
 import { copyToClipboard } from "./clipboard"
@@ -150,6 +155,44 @@ const MAIN_WIDTH_MIN = 420
 /** Below this the inspector is folded away automatically: three panes in less room than this turns
  *  the conversation into a gutter, and the same content is one click away in the context chips. */
 const INSPECTOR_MIN_WINDOW_WIDTH = 1180
+
+/** How long a compaction whose admission (or terminal message) could not be confirmed may keep its
+ *  pending state before resolving with a retryable notice. Bounded so the menu never blocks forever. */
+const COMPACTION_PENDING_MAX_MS = 45_000
+
+/** Fork reconciliation after a lost acknowledgement: how many authoritative child listings to try,
+ *  and how long to wait between them, before giving up on confirming the child. */
+const FORK_RECONCILE_MAX_ATTEMPTS = 5
+const FORK_RECONCILE_ATTEMPT_DELAY_MS = 800
+
+// The shared `api` proxy is typed to the v1 clients' surface; the v2 client implements richer
+// signatures (stable request ids, admission ids, child listings). These casts expose only the
+// extra parameters/returns the call sites below need, never the transport itself.
+const compactSessionV2 = api.compactSession as unknown as (
+  config: ServerConfig, sessionID: string, directory: string, requestID: string
+) => Promise<{ id?: string; requestID?: string }>
+const sendPromptV2 = api.sendPrompt as unknown as (
+  config: ServerConfig, sessionID: string, text: string, directory: string | undefined,
+  model: ModelSelection | undefined, agentID: string | undefined,
+  attachments: AttachmentPart[], delivery: "steer" | "queue", requestID: string
+) => Promise<{ admitted: boolean; requestID?: string; messageID?: string; delivery?: "steer" | "queue" }>
+const sendCommandV2 = api.sendCommand as unknown as (
+  config: ServerConfig, sessionID: string, command: string, argumentsText: string,
+  directory: string | undefined, model: ModelSelection | undefined, agentID: string | undefined,
+  requestID: string
+) => Promise<{ admitted: boolean; requestID?: string; messageID?: string; delivery?: "steer" | "queue" }>
+const sendSkillV2 = api.sendSkill as unknown as (
+  config: ServerConfig, sessionID: string, skill: string, directory: string | undefined, requestID: string
+) => Promise<unknown>
+const listChildSessionsV2 = (api as unknown as {
+  listChildSessions(config: ServerConfig, parentID: string): Promise<Session[]>
+}).listChildSessions
+const getSessionV2 = (api as unknown as {
+  getSession(config: ServerConfig, sessionID: string): Promise<Session>
+}).getSession
+const listInboxV2 = (api as unknown as {
+  listInbox(config: ServerConfig, sessionID: string, directory?: string): Promise<V2InboxItem[]>
+}).listInbox
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value))
@@ -1547,7 +1590,7 @@ function formatLimit(value?: number): string {
   return String(value)
 }
 
-function createOptimisticUserMessage(sessionID: string, text: string, delivery?: "queue" | "steer"): MessageEnvelope {
+function createOptimisticUserMessage(sessionID: string, text: string, delivery?: "queue" | "steer", durableID?: string): MessageEnvelope {
   const now = Date.now()
   return {
     info: {
@@ -1555,7 +1598,10 @@ function createOptimisticUserMessage(sessionID: string, text: string, delivery?:
       role: "user",
       sessionID,
         time: { created: now },
-        delivery
+        delivery,
+        // The server-confirmed durable message id, once the admission response returns it. Rows
+        // without one (still awaiting the response, or a response that was lost) retire by text.
+        durableID
     },
     parts: [
       {
@@ -1565,6 +1611,31 @@ function createOptimisticUserMessage(sessionID: string, text: string, delivery?:
       }
     ]
   }
+}
+
+/** Build transcript rows for inbox entries the server still holds as queued user input. The message
+ *  list drops undelivered items, so without these rows a queued prompt would silently disappear
+ *  after any reconciliation (app restart, poll, session reopen) even though the server still holds
+ *  it durably. Rows use the server's own message id so they stay stable across polls and disappear
+ *  the moment the item is delivered (it leaves the inbox and enters history). */
+function queuedInboxMessageEnvelopes(sessionID: string, inbox: V2InboxItem[], inHistoryIDs: Set<string>): MessageEnvelope[] {
+  const rows: MessageEnvelope[] = []
+  for (const item of inbox) {
+    if (item.type !== "user" || item.delivery !== "queue" || inHistoryIDs.has(item.id)) continue
+    const text = typeof item.payload?.text === "string" ? item.payload.text : ""
+    rows.push({
+      info: {
+        id: item.id,
+        role: "user",
+        sessionID,
+        time: { created: item.timeCreated },
+        delivery: "queue",
+        type: "user"
+      },
+      parts: text ? [{ id: `${item.id}:text`, type: "text", text }] : []
+    })
+  }
+  return rows
 }
 
 function createLocalAssistantMessage(sessionID: string, text: string): MessageEnvelope {
@@ -1661,12 +1732,22 @@ function applyStreamedPartDelta(
   return changed ? next : messages
 }
 
+/** Whether a fetched transcript or inbox row proves an optimistic bubble is now server-admitted.
+ *  Rows tagged with the admission response's durable message id retire by that EXACT id — the same
+ *  id the message carries in history (and in the inbox while it is still queued) — which is immune
+ *  to identical text sent twice. Rows still awaiting their admission response (or whose response was
+ *  lost) fall back to matching the same user text, guarded so only messages created after this row
+ *  was sent can retire it, never a pre-existing identical message. */
 function hasMatchingUserMessage(messages: MessageEnvelope[], optimistic: MessageEnvelope): boolean {
+  if (optimistic.info.durableID) {
+    return messages.some((message) => message.info.id === optimistic.info.durableID)
+  }
   const text = extractText(optimistic)
   return messages.some((message) => (
     message.info.sessionID === optimistic.info.sessionID &&
     message.info.role === "user" &&
-    extractText(message) === text
+    extractText(message) === text &&
+    message.info.time.created >= optimistic.info.time.created
   ))
 }
 
@@ -2356,6 +2437,10 @@ function App() {
       setModelOptions([])
       setModelLoadError(null)
       setOptimisticUserMessages([])
+      setQueuedInboxMessages([])
+      compactObservationRef.current = null
+      forkReconcilingRef.current = false
+      pendingSkillRequestsRef.current.clear()
       setComposer("")
       setAttachments([])
       completionShouldPlayRef.current = false
@@ -2412,6 +2497,9 @@ function App() {
   const [pickerError, setPickerError] = useState<string | null>(null)
   const [messages, setMessages] = useState<MessageEnvelope[]>([])
   const [optimisticUserMessages, setOptimisticUserMessages] = useState<MessageEnvelope[]>([])
+  /** Server-admitted but still queued prompts (from `GET /api/session/{id}/inbox`), rendered as
+   *  transcript rows with the queued indicator so they survive reconciliation. */
+  const [queuedInboxMessages, setQueuedInboxMessages] = useState<MessageEnvelope[]>([])
   const [todos, setTodos] = useState<TodoItem[]>([])
   const [diffFiles, setDiffFiles] = useState<DiffFile[]>([])
   const [pendingQuestions, setPendingQuestions] = useState<QuestionRequest[]>([])
@@ -2429,29 +2517,73 @@ function App() {
   const [sessionActionPending, setSessionActionPending] = useState<"compact" | "fork" | null>(null)
   const sessionActionPendingRef = useRef<"compact" | "fork" | null>(null)
   sessionActionPendingRef.current = sessionActionPending
-  const compactObservationRef = useRef<{ context: string; baseline: Set<string>; observed: Set<string> } | null>(null)
+  /** Tracks one in-flight compaction: the exact admission id when the acknowledgement confirmed it
+   *  (so terminal state is correlated to THAT request), the stable request id otherwise — the server
+   *  admits compaction durably under the client-supplied id, so the terminal compaction message
+   *  carries that same id in every path, including a lost acknowledgement or double-indeterminate
+   *  response — plus a bounded deadline for when the admission could not be established. No
+   *  baseline/any-terminal heuristic: only the exact admission/request id resolves the pending
+   *  state, so a later unrelated compaction can never release this one. */
+  const compactObservationRef = useRef<{
+    context: string
+    expectedID: string | null
+    startedAt: number
+  } | null>(null)
   useEffect(() => {
     const observation = compactObservationRef.current
     if (!observation || sessionActionPending !== "compact") return
     const context = JSON.stringify({ profileID: activeProfileID, configKey: configKey(config), sessionID: selectedID })
-    if (observation.context !== context || !selectedID) return
-    const compactions = messages.filter((message) => message.info.type === "compaction")
-    for (const message of compactions) {
-      if (message.info.compactionStatus === "running") observation.observed.add(message.info.id)
+    if (observation.context !== context || !selectedID) {
+      // The compaction belongs to a context this view no longer owns. Clear the observation and the
+      // pending action so a stale compaction can never strand the global sessionActionPending.
+      if (compactObservationRef.current === observation) compactObservationRef.current = null
+      sessionActionPendingRef.current = null
+      setSessionActionPending(null)
+      return
     }
-    const terminal = compactions.find((message) =>
-      (message.info.compactionStatus === "completed" || message.info.compactionStatus === "failed")
-      && !observation.baseline.has(message.info.id)
-      && (observation.observed.has(message.info.id) || !compactions.some((item) => item.info.id === message.info.id && item.info.compactionStatus === "running"))
-    )
-    if (!terminal) return
-    compactObservationRef.current = null
-    setSessionActionPending(null)
-    sessionActionPendingRef.current = null
-    setActionNotice(terminal.info.compactionStatus === "failed" ? t('detail.compactFailed') : t('detail.compactCompleted'))
+    const compactions = messages.filter((message) => message.info.type === "compaction")
+    const resolve = (terminal: MessageEnvelope) => {
+      compactObservationRef.current = null
+      setSessionActionPending(null)
+      sessionActionPendingRef.current = null
+      setActionNotice(terminal.info.compactionStatus === "failed" ? t('detail.compactFailed') : t('detail.compactCompleted'))
+    }
+    // Exact correlation only: the terminal compaction message carries the same durable id the server
+    // admitted under, so only a message with the expected id may release the pending action.
+    const expected = observation.expectedID
+      ? compactions.find((message) => message.info.id === observation.expectedID)
+      : undefined
+    if (expected && (expected.info.compactionStatus === "completed" || expected.info.compactionStatus === "failed")) {
+      resolve(expected)
+      return
+    }
+    // Bounded terminal recovery: the expected message never reached terminal state. Do not let the
+    // pending action (and the compact button) block forever — check inline on every message change
+    // AND schedule a timer for a quiet session that stops changing.
+    const remaining = COMPACTION_PENDING_MAX_MS - (Date.now() - observation.startedAt)
+    if (remaining <= 0) {
+      compactObservationRef.current = null
+      setSessionActionPending(null)
+      sessionActionPendingRef.current = null
+      setActionNotice(t('detail.compactUnconfirmed'))
+      return
+    }
+    const deadlineTimer = setTimeout(() => {
+      const active = compactObservationRef.current
+      if (!active || active !== observation || sessionActionPendingRef.current !== "compact") return
+      compactObservationRef.current = null
+      setSessionActionPending(null)
+      sessionActionPendingRef.current = null
+      setActionNotice(t('detail.compactUnconfirmed'))
+    }, remaining)
+    return () => clearTimeout(deadlineTimer)
   }, [activeProfileID, config, messages, selectedID, sessionActionPending, t])
   const forkFocusSessionRef = useRef<string | null>(null)
   const forkReconcilingRef = useRef(false)
+  /** Skill activations whose 204 acknowledgement was lost: keyed by the original request id (which
+   *  the projected skill message carries, see `Session.skill`), so a later poll can confirm the
+   *  activation by exact id instead of retrying the unsafe duplicate admission. */
+  const pendingSkillRequestsRef = useRef(new Map<string, { sessionID: string; skillName: string }>())
   const [activatingSkill, setActivatingSkill] = useState<string | null>(null)
   const [loadingSessionID, setLoadingSessionID] = useState<string | null>(null)
   /** The empty transcript state is only meaningful after this session's first history snapshot succeeds. */
@@ -2666,11 +2798,11 @@ function App() {
 
   const renderedMessages = useMemo(() => {
     const revertMessageID = config.backend === "opencode" || config.backend === "opencode2" ? selectedSession?.revertMessageID : undefined
-    return [...messages, ...optimisticUserMessages]
+    return [...messages, ...optimisticUserMessages, ...queuedInboxMessages]
       .filter((message) => !revertMessageID || message.info.id < revertMessageID)
       .map(toRenderedMessage)
       .filter((message) => message.text || message.parts.some((part) => part.type !== "step-start" && part.type !== "step-finish"))
-  }, [config.backend, messages, optimisticUserMessages, selectedSession?.revertMessageID])
+  }, [config.backend, messages, optimisticUserMessages, queuedInboxMessages, selectedSession?.revertMessageID])
 
   const timelineGroups = useMemo(() => groupRenderedMessages(renderedMessages), [renderedMessages])
 
@@ -3180,13 +3312,16 @@ function App() {
     const isCurrentLoad = () => requestID === loadSelectedRequestRef.current
       && mutationCoordinator.isContextGenerationCurrent(loadContextGeneration)
       && mutationCoordinator.isContextCurrent(loadContext)
-    const [msg, todo, diff, questions, permissions, actions] = await Promise.all([
+    const [msg, todo, diff, questions, permissions, actions, inbox] = await Promise.all([
       api.loadMessages(config, sessionID, directory, backendClient.messageRefreshSupported && refreshHistory),
       capabilities.todos ? api.loadTodo(config, sessionID, directory) : Promise.resolve([]),
       capabilities.diff ? api.loadDiff(config, sessionID, directory).catch(() => []) : Promise.resolve([]),
       capabilities.questions ? api.loadQuestions(config, directory).catch(() => []) : Promise.resolve([]),
       capabilities.permissions ? api.loadPermissions(config, directory).catch(() => []) : Promise.resolve([]),
-      capabilities.actions ? api.listActions(config, sessionID, directory).catch(() => []) : Promise.resolve([])
+      capabilities.actions ? api.listActions(config, sessionID, directory).catch(() => []) : Promise.resolve([]),
+      config.backend === "opencode2"
+        ? listInboxV2(config, sessionID, directory).catch(() => [])
+        : Promise.resolve([] as V2InboxItem[])
     ])
     if (requestID !== loadSelectedRequestRef.current) return
     if (!isCurrentLoad()) return
@@ -3195,21 +3330,44 @@ function App() {
     // not stay stuck on the failure state once its history does arrive.
     setLoadFailure((failure) => (failure?.sessionID === sessionID ? null : failure))
     const current = loadedMessagesRef.current
+    // The server admits queued prompts durably before delivering them: overlay the inbox's delivery
+    // metadata on messages that reached history (their queued indicator survives reconciliation) and
+    // render inbox-only queued items as stable transcript rows (see queuedInboxMessageEnvelopes).
+    const transcript = config.backend === "opencode2" ? applyInboxDelivery(msg, inbox) : msg
+    const queuedRows = config.backend === "opencode2"
+      ? queuedInboxMessageEnvelopes(sessionID, inbox, new Set(transcript.map((message) => message.info.id)))
+      : []
     // A snapshot carrying less assistant text than is already on screen used to be rejected wholesale, to
     // avoid erasing streamed content. But the optimistic user bubble below is cleared against this same
     // snapshot either way, so rejecting it made a just-sent message vanish — and since the rejected
     // snapshot never reached state, the comparison stayed true and swallowed every later message too,
     // until the session was reopened. Shrinking text is now held back per part in mergeFetchedMessages
     // instead, which keeps the streamed text without ever dropping the messages that came with it.
-    if (!messagesHaveSameContent(current, msg)) {
-      shouldAutoScrollRef.current = messagesExtendContent(current, msg) && isNearMessagesBottom()
-      loadedMessagesRef.current = msg
-      setMessages((prev) => replaceMessages ? msg : mergeFetchedMessages(prev, msg))
+    if (!messagesHaveSameContent(current, transcript)) {
+      shouldAutoScrollRef.current = messagesExtendContent(current, transcript) && isNearMessagesBottom()
+      loadedMessagesRef.current = transcript
+      setMessages((prev) => replaceMessages ? transcript : mergeFetchedMessages(prev, transcript))
     }
+    // A prompt the server has durably admitted (in history or still queued in the inbox) retires the
+    // app's own optimistic bubble for the same text.
+    const optimisticMatchSource = [...transcript, ...queuedRows]
     setOptimisticUserMessages((current) => {
-      const remaining = current.filter((message) => !hasMatchingUserMessage(msg, message))
+      const remaining = current.filter((message) => !hasMatchingUserMessage(optimisticMatchSource, message))
       return remaining.length === current.length ? current : remaining
     })
+    // A skill activation whose 204 acknowledgement was lost is confirmed when the projected skill
+    // message — which carries the original request id — appears in history. The tagged optimistic
+    // row was retired by that exact id above; announce the confirmation once, when it lands.
+    if (pendingSkillRequestsRef.current.size > 0) {
+      for (const [requestID, entry] of pendingSkillRequestsRef.current) {
+        if (entry.sessionID !== sessionID) continue
+        if (transcript.some((message) => message.info.id === requestID)) {
+          pendingSkillRequestsRef.current.delete(requestID)
+          if (isCurrentLoad()) setActionNotice(t('help.skillActivated', { skill: entry.skillName }))
+        }
+      }
+    }
+    setQueuedInboxMessages((current) => keepIfUnchanged(current, queuedRows))
     setTodos((current) => keepIfUnchanged(current, todo))
     setDiffFiles((current) => keepIfUnchanged(current, diff))
     setPendingQuestions((current) => keepIfUnchanged(current, questions.filter((question) => question.sessionID === sessionID)))
@@ -3297,19 +3455,54 @@ function App() {
     setSessionActionPending("compact")
     setRuntimeError(null)
     setActionNotice(null)
-    compactObservationRef.current = {
+    // A stable admission id makes the acknowledgement retryable (the server answers 409 once the id
+    // is durably recorded) and lets terminal history state be correlated to THIS compaction. The
+    // server admits compaction durably under this id and the terminal compaction message carries the
+    // same id, so the observation's expectedID is the exact admission id when the response confirms
+    // it, and the stable request id otherwise — including a 409 conflict or a double-indeterminate
+    // response, where no heuristic is needed: either the exact message appears and releases the
+    // pending action, or the bounded deadline resolves it as unconfirmed.
+    const compactRequestID = createMessageRequestID()
+    const observation = {
       context: JSON.stringify({ profileID: activeProfileID, configKey: configKey(config), sessionID: selectedSession.id }),
-      baseline: new Set(messages.filter((message) => message.info.type === "compaction").map((message) => message.info.id)),
-      observed: new Set()
+      expectedID: compactRequestID as string | null,
+      startedAt: Date.now()
     }
+    compactObservationRef.current = observation
     try {
-      await api.compactSession(config, selectedSession.id, selectedSession.directory)
+      const admission = await compactSessionV2(config, selectedSession.id, selectedSession.directory, compactRequestID)
+      observation.expectedID = admission?.id ?? compactRequestID
       if (isLeaseContextCurrent(lease)) setActionNotice(t('detail.compactQueued'))
     } catch (err) {
       if (isLeaseContextCurrent(lease)) {
         if (isIndeterminateDeliveryError(err)) {
-          setActionNotice(t('detail.deliveryIndeterminate'))
-          void loadSelected(selectedSession.id, selectedSession.directory, true).catch(() => undefined)
+          // The acknowledgement was lost. The server admits compaction durably under our id, so one
+          // idempotent retry with the SAME id either confirms the earlier admission (409 conflict)
+          // or performs it — it can never queue the compaction twice.
+          try {
+            const admission = await compactSessionV2(config, selectedSession.id, selectedSession.directory, compactRequestID)
+            observation.expectedID = admission?.id ?? compactRequestID
+            setActionNotice(t('detail.compactQueued'))
+          } catch (retryErr) {
+            if (isAdmissionConflict(retryErr)) {
+              // The earlier admission is durably recorded under the request id; correlate with it.
+              observation.expectedID = compactRequestID
+              setActionNotice(t('detail.compactQueued'))
+            } else if (isIndeterminateDeliveryError(retryErr)) {
+              // Still unknown: if the transmission landed, the server admitted the compaction under
+              // the request id, so correlating with that exact id still resolves the pending action
+              // at terminal state; if it never landed, the bounded deadline resolves as unconfirmed.
+              observation.expectedID = compactRequestID
+              setActionNotice(t('detail.deliveryIndeterminate'))
+              void loadSelected(selectedSession.id, selectedSession.directory, true).catch(() => undefined)
+            } else {
+              // The retry answered definitely (not a conflict): the compaction was never admitted.
+              compactObservationRef.current = null
+              setSessionActionPending(null)
+              sessionActionPendingRef.current = null
+              setRuntimeError((retryErr as Error).message)
+            }
+          }
         } else {
           compactObservationRef.current = null
           setSessionActionPending(null)
@@ -3318,10 +3511,8 @@ function App() {
         }
       }
     } finally {
-      if (isLeaseContextCurrent(lease)) {
-        // Keep the logical action pending after a successful acknowledgement. The server performs
-        // compaction asynchronously; the refresh metadata effect releases it at terminal state.
-      }
+      // Keep the logical action pending after a successful acknowledgement. The server performs
+      // compaction asynchronously; the refresh metadata effect releases it at terminal state.
       releaseMutation(lease)
     }
   }
@@ -3345,7 +3536,86 @@ function App() {
     setSessionActionPending("fork")
     setRuntimeError(null)
     setActionNotice(null)
+    // Children that already exist BEFORE the request are the baseline: reconciliation must find the
+    // child THIS fork created, never navigate to an older fork's child.
+    const baselineChildIDs = new Set<string>()
+    const captureBaseline = async () => {
+      try {
+        for (const child of await listChildSessionsV2(config, original.id)) baselineChildIDs.add(child.id)
+      } catch {
+        try {
+          for (const child of await api.listGlobalSessions(config)) if (child.parentID === original.id) baselineChildIDs.add(child.id)
+        } catch {
+          try {
+            for (const child of await api.listSessions(config)) if (child.parentID === original.id) baselineChildIDs.add(child.id)
+          } catch { /* best-effort: an empty baseline still reconciles, only less selectively */ }
+        }
+      }
+    }
+    // Currency for the reconciliation is deliberately NOT the lease: the fork lease is released as
+    // soon as the acknowledgement is lost, so a check like isLeaseContextCurrent would fail the
+    // moment the reconciliation starts. The captured context/generation is the authority.
+    const reconcileGeneration = mutationCoordinator.getContextGeneration()
+    const isReconcileCurrent = () => mutationCoordinator.isContextGenerationCurrent(reconcileGeneration)
+      && mutationCoordinator.isContextCurrent(forkContext)
+    const restoreForkDraft = (childID: string) => {
+      const childContext = { profileID: activeProfileID, configKey: configKey(config), sessionID: childID }
+      if (mutationCoordinator.isContextCurrent(childContext) && activeContextRef.current.sessionID === childID) {
+        // Only restore into an empty composer/attachment tray: the reconciliation can lag the
+        // navigation (bounded retries with delays), and anything the user typed into the child in
+        // the meantime is newer than the forked snapshot and must never be overwritten.
+        setComposer((current) => (current === "" ? forkDraft.text : current))
+        setAttachments((current) => (current.length === 0 ? forkDraft.attachments : current))
+      }
+    }
+    const finishForkPending = () => {
+      forkReconcilingRef.current = false
+      sessionActionPendingRef.current = null
+      setSessionActionPending(null)
+    }
+    /** Indeterminate fork: the POST may have committed even though its response was lost. Reconcile
+     *  with bounded, paginated, authoritative listings; never ask the user to retry blindly. */
+    const reconcileFork = async () => {
+      try {
+        for (let attempt = 0; attempt < FORK_RECONCILE_MAX_ATTEMPTS; attempt += 1) {
+          if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, FORK_RECONCILE_ATTEMPT_DELAY_MS))
+          if (!isReconcileCurrent()) return
+          const children = await (async () => {
+            try { return await listChildSessionsV2(config, original.id) }
+            catch {
+              try { return (await api.listGlobalSessions(config)).filter((child) => child.parentID === original.id) }
+              catch {
+                try { return (await api.listSessions(config)).filter((child) => child.parentID === original.id) }
+                catch { return [] }
+              }
+            }
+          })()
+          const child = children.find((candidate) => !baselineChildIDs.has(candidate.id))
+          if (child && isReconcileCurrent()) {
+            const childView = toSessionView(child)
+            setSessions((current) => current.some((session) => session.id === childView.id)
+              ? current
+              : [childView, ...current].sort((a, b) => b.updated - a.updated))
+            forkFocusSessionRef.current = childView.id
+            await openSession(childView.id, childView.directory)
+            restoreForkDraft(childView.id)
+            return
+          }
+        }
+        // Bounded terminal recovery: the child could not be confirmed. Resolve the pending state and
+        // leave a resolvable path (refresh the session list) instead of blocking the menu forever.
+        if (isReconcileCurrent()) setActionNotice(t('detail.forkUnconfirmed'))
+      } finally {
+        // Always release the pending state on exhaustion (and on confirmed navigation, where the
+        // child open already cleared it). When the context changed mid-reconciliation, navigation
+        // cleared the pending state synchronously, and a newer action's state must not be clobbered
+        // by this stale reconciliation's finally.
+        if (isReconcileCurrent()) finishForkPending()
+      }
+    }
     try {
+      await captureBaseline()
+      if (!isLeaseContextCurrent(lease) || !mutationCoordinator.isContextCurrent(forkContext)) return
       const forked = await api.forkSession(config, original.id, original.directory)
       // The user may have switched profile or session while the server created the child. Do not
       // insert it into the new context or steal navigation from the session they chose meanwhile.
@@ -3359,11 +3629,7 @@ function App() {
        await openSession(forkedView.id, forkedView.directory)
       // A fork copies server history, not the unsent composer. Restore the snapshot only when the
       // navigation that this request initiated still owns the destination context.
-      const childContext = { profileID: activeProfileID, configKey: configKey(config), sessionID: forkedView.id }
-      if (mutationCoordinator.isContextCurrent(childContext) && activeContextRef.current.sessionID === forkedView.id) {
-        setComposer(forkDraft.text)
-         setAttachments(forkDraft.attachments)
-       }
+      restoreForkDraft(forkedView.id)
        forkReconcilingRef.current = false
        sessionActionPendingRef.current = null
        setSessionActionPending(null)
@@ -3372,19 +3638,9 @@ function App() {
         if (isIndeterminateDeliveryError(err)) {
           forkReconcilingRef.current = true
           setActionNotice(t('detail.deliveryIndeterminate'))
-          // The POST may have committed even though its response was lost. Reconcile using the
-          // authoritative session list and V2 fork lineage; never ask the user to retry blindly.
-          void api.listSessions(config).then((listed) => {
-            const child = listed.find((candidate) => candidate.parentID === original.id)
-            if (!child || !isLeaseContextCurrent(lease) || !mutationCoordinator.isContextCurrent(forkContext)) return
-            const childView = toSessionView(child)
-            setSessions((current) => current.some((session) => session.id === childView.id) ? current : [childView, ...current])
-            forkFocusSessionRef.current = childView.id
-            forkReconcilingRef.current = false
-            sessionActionPendingRef.current = null
-            setSessionActionPending(null)
-            void openSession(childView.id, childView.directory)
-          }).catch(() => undefined)
+          // Runs detached from this function: the lease is released in finally while the
+          // reconciliation continues on its own (bounded) schedule.
+          void reconcileFork()
         } else {
           setRuntimeError((err as Error).message)
         }
@@ -3619,6 +3875,9 @@ function App() {
     if (creatingSession || isSessionMutationLocked()) return
     const lease = acquireMutation("create")
     if (!lease) return
+    // v2 create accepts an optional client id (`Session.ID`); with it, a lost response can be
+    // reconciled by fetching the session by id instead of retrying the mutation blindly.
+    const createRequestID = config.backend === "opencode2" ? createSessionRequestID() : undefined
     setCreatingSession(true)
     setRuntimeError(null)
     setPickerError(null)
@@ -3629,7 +3888,26 @@ function App() {
           throw new Error(t('sessions.projectDirectoryInvalid', { directory }))
         }
       }
-      const created = await api.createSession(config, t('sessions.remoteSessionTitle'), activeModel, directory)
+      let created: Session
+      if (createRequestID) {
+        try {
+          created = await (api.createSession as unknown as (config: ServerConfig, title: string, model: ModelSelection | undefined, directory: string | undefined, requestID: string) => Promise<Session>)(config, t('sessions.remoteSessionTitle'), activeModel, directory, createRequestID)
+        } catch (createErr) {
+          if (!isIndeterminateDeliveryError(createErr)) throw createErr
+          // The POST may have committed before the response was lost. Reconcile by id: the session
+          // either exists (created once) or was never admitted. Never blind-retry the create.
+          try {
+            created = await getSessionV2(config, createRequestID)
+            setActionNotice(t('detail.deliveryAdmitted'))
+          } catch {
+            setActionNotice(t('detail.deliveryIndeterminate'))
+            void refreshSessions(false, undefined, true).catch(() => undefined)
+            return
+          }
+        }
+      } else {
+        created = await api.createSession(config, t('sessions.remoteSessionTitle'), activeModel, directory)
+      }
       if (!isLeaseContextCurrent(lease)) return
       const createdView = toSessionView(created)
       if (directory) {
@@ -3699,11 +3977,17 @@ function App() {
     const session = selectedSession
     const lease = acquireMutation("skill")
     if (!lease) return
+    // Stable durable admission id: the projected skill message carries this exact id (the server
+    // derives the event id from it), so an indeterminate acknowledgement can be confirmed by id on a
+    // later poll. Unlike prompt/command/compact the skill endpoint is NOT durably admitted by id, so
+    // the id is only ever used for correlation — never for an automatic retry, which could defect on
+    // a duplicate event id.
+    const skillRequestID = createMessageRequestID()
     setComposer("")
     setActivatingSkill(skillName)
     setActionNotice(t('help.skillActivating'))
     setRuntimeError(null)
-    const optimisticMessage = createOptimisticUserMessage(session.id, input)
+    const optimisticMessage = createOptimisticUserMessage(session.id, input, undefined, skillRequestID)
     setOptimisticUserMessages((current) => [...current, optimisticMessage])
     awaitingAssistantBaselineRef.current = assistantResponseSignature
     completionShouldPlayRef.current = true
@@ -3713,7 +3997,7 @@ function App() {
     try {
       // The v1 compatibility surface deliberately rejects this method, but shares the v2 signature;
       // the proxy routes the same call to the live v2 client for OpenCode 2.
-      await api.sendSkill(config, session.id, skillName, session.directory)
+      await sendSkillV2(config, session.id, skillName, session.directory, skillRequestID)
       if (!isLeaseContextCurrent(lease)) return
       // A successful 204 is the commit point. Refreshes are best-effort and must not turn a
       // completed activation into a failed command or put the slash text back in the composer.
@@ -3735,17 +4019,24 @@ function App() {
       if (isLeaseContextCurrent(lease)) {
         completionShouldPlayRef.current = false
         setAwaitingAssistantReply(false)
-        setOptimisticUserMessages((current) => current.filter((message) => message.info.id !== optimisticMessage.info.id))
-          if (!isIndeterminateDeliveryError(err)) {
-            setComposer((current) => current || input)
-            setAttachments((current) => current.length ? current : stagedAttachments)
-          } else {
-            setActionNotice(t('detail.deliveryIndeterminate'))
-            void loadSelected(session.id, session.directory, true).catch(() => undefined)
-            void refreshSessions(false, undefined, true).catch(() => undefined)
-            return
-          }
+        if (!isIndeterminateDeliveryError(err)) {
+          // Definite failure: the activation was never accepted, so the optimistic row is retired,
+          // the draft is restored, and the failure is named as such.
+          setOptimisticUserMessages((current) => current.filter((message) => message.info.id !== optimisticMessage.info.id))
+          setComposer((current) => current || input)
+          setAttachments((current) => current.length ? current : stagedAttachments)
           setRuntimeError(t('help.skillActivationFailed', { skill: skill.name, message: (err as Error).message }))
+        } else {
+          // Indeterminate delivery: the 204 may have been lost after the server activated the skill.
+          // The skill endpoint is not durably admitted by id, so re-POSTing can defect on a duplicate
+          // event id — never retry automatically. Keep the tagged optimistic row as the visible trace
+          // and reconcile: a poll that surfaces the projected skill message under the original
+          // request id confirms the activation (loadSelected retires the row and announces it).
+          pendingSkillRequestsRef.current.set(skillRequestID, { sessionID: session.id, skillName: skill.name })
+          setActionNotice(t('detail.deliveryIndeterminate'))
+          void loadSelected(session.id, session.directory, true).catch(() => undefined)
+          void refreshSessions(false, undefined, true).catch(() => undefined)
+        }
       }
     } finally {
       if (isLeaseContextCurrent(lease)) {
@@ -3850,13 +4141,21 @@ function App() {
       completionShouldPlayRef.current = true
       setAwaitingAssistantReply(true)
       scrollMessagesToBottom("smooth")
+      // Stable durable admission id for the resolved prompt input (see sendPrompt).
+      const commandRequestID = createMessageRequestID()
 
       setBusySending(true)
       setRuntimeError(null)
       try {
-        await api.sendCommand(config, selectedSession.id, command, args, selectedSession.directory, activeModel, activeAgentID)
+        const admission = await sendCommandV2(config, selectedSession.id, command, args, selectedSession.directory, activeModel, activeAgentID, commandRequestID)
         if (!isLeaseContextCurrent(commandLease)) return
-        setOptimisticUserMessages((current) => current.filter((message) => message.info.id !== optimisticMessage.info.id))
+        // Tag the optimistic row with the durable admission metadata instead of removing it: the
+        // exact message id retires the bubble by id once the resolved prompt reaches history (or the
+        // inbox), and the server-recorded delivery keeps any queued status visible in the meantime.
+        setOptimisticUserMessages((current) => current.map((message) =>
+          message.info.id === optimisticMessage.info.id
+            ? { ...message, info: { ...message.info, durableID: admission?.messageID, delivery: admission?.delivery ?? message.info.delivery } }
+            : message))
         // sendCommand is the commit boundary. History/session refreshes are best effort and must
         // not make a successfully dispatched command look retryable or restore its draft.
         let refreshFailed = false
@@ -3877,15 +4176,60 @@ function App() {
         if (isLeaseContextCurrent(commandLease)) {
           completionShouldPlayRef.current = false
           setAwaitingAssistantReply(false)
-          setOptimisticUserMessages((current) => current.filter((message) => message.info.id !== optimisticMessage.info.id))
           if (!isIndeterminateDeliveryError(err)) {
+            setOptimisticUserMessages((current) => current.filter((message) => message.info.id !== optimisticMessage.info.id))
             setComposer((current) => current || text)
             setAttachments((current) => current.length ? current : attachments)
             setRuntimeError((err as Error).message)
           } else {
-            setActionNotice(t('detail.deliveryIndeterminate'))
-            void loadSelected(selectedSession.id, selectedSession.directory, true).catch(() => undefined)
-            void refreshSessions(false, undefined, true).catch(() => undefined)
+            // Indeterminate delivery: one idempotent retry with the SAME id either confirms the
+            // earlier admission (409 conflict) or performs it — never dispatches the command twice.
+            // The resolved prompt is admitted durably under the request id, so a confirmed retry
+            // tags the row with that exact id for retirement by id on the next poll.
+            let resolved = false
+            try {
+              const readmission = await sendCommandV2(config, selectedSession.id, command, args, selectedSession.directory, activeModel, activeAgentID, commandRequestID)
+              resolved = true
+              if (readmission?.messageID) {
+                setOptimisticUserMessages((current) => current.map((message) =>
+                  message.info.id === optimisticMessage.info.id
+                    ? { ...message, info: { ...message.info, durableID: readmission.messageID, delivery: readmission.delivery ?? message.info.delivery } }
+                    : message))
+              } else {
+                // A 204-style admission without the envelope: the durable admission key is the
+                // request id itself, which the resolved prompt will carry.
+                setOptimisticUserMessages((current) => current.map((message) =>
+                  message.info.id === optimisticMessage.info.id
+                    ? { ...message, info: { ...message.info, durableID: commandRequestID } }
+                    : message))
+              }
+            } catch (retryErr) {
+              if (isAdmissionConflict(retryErr)) {
+                resolved = true
+                // The request id was durably admitted; the resolved prompt surfaces under that id.
+                setOptimisticUserMessages((current) => current.map((message) =>
+                  message.info.id === optimisticMessage.info.id
+                    ? { ...message, info: { ...message.info, durableID: commandRequestID } }
+                    : message))
+              }
+            }
+            if (resolved && isLeaseContextCurrent(commandLease)) {
+              setActionNotice(t('detail.deliveryAdmitted'))
+              void loadSelected(selectedSession.id, selectedSession.directory, true).catch(() => undefined)
+              void refreshSessions(false, undefined, true).catch(() => undefined)
+            } else if (isLeaseContextCurrent(commandLease)) {
+              // Still unknown after the idempotent retry. The resolved prompt is admitted durably
+              // under the request id when the transmission landed — and its history text differs from
+              // the typed slash command, so text matching could never retire this row — tag it with
+              // the stable request id so a surfacing message retires it by exact id instead.
+              setOptimisticUserMessages((current) => current.map((message) =>
+                message.info.id === optimisticMessage.info.id
+                  ? { ...message, info: { ...message.info, durableID: commandRequestID } }
+                  : message))
+              setActionNotice(t('detail.deliveryIndeterminate'))
+              void loadSelected(selectedSession.id, selectedSession.directory, true).catch(() => undefined)
+              void refreshSessions(false, undefined, true).catch(() => undefined)
+            }
           }
         }
       } finally {
@@ -3900,8 +4244,15 @@ function App() {
     const promptLease = acquireMutation("prompt")
     if (!promptLease) return
     // Preserve the normal working follow-up contract (`attachments, isWorking ? "queue" : "steer"`)
-    // and extend it to the short interval where compaction has acknowledged but is not terminal.
-    const promptDelivery = sessionActionPending === "compact" ? "queue" : (isWorking ? "queue" : "steer")
+    // and extend it to the whole window where compaction has acknowledged but is not terminal. The
+    // ref is the synchronous authority, so a send that lands in the same tick as a pending compact
+    // still queues instead of steering a prompt into the compaction.
+    const promptDelivery = (sessionActionPendingRef.current === "compact" || sessionActionPending === "compact")
+      ? "queue"
+      : (isWorking ? "queue" : "steer")
+    // Stable durable admission id: a lost acknowledgement can be retried with the SAME id, which the
+    // server answers with 409 (already admitted) instead of admitting the prompt twice.
+    const promptRequestID = createMessageRequestID()
     setComposer("")
     setAttachments([])
     const optimisticMessage = createOptimisticUserMessage(selectedSession.id, text, promptDelivery)
@@ -3915,9 +4266,16 @@ function App() {
     setRuntimeError(null)
     let promptDispatched = false
     try {
-      await (api.sendPrompt as unknown as (...args: [ServerConfig, string, string, string, ModelSelection | undefined, string | undefined, AttachmentPart[], "steer" | "queue"]) => Promise<unknown>)(config, selectedSession.id, text, selectedSession.directory, activeModel, activeAgentID, attachments, promptDelivery)
+      const admission = await sendPromptV2(config, selectedSession.id, text, selectedSession.directory, activeModel, activeAgentID, attachments, promptDelivery, promptRequestID)
       promptDispatched = true
       if (!isLeaseContextCurrent(promptLease)) return
+      // Tag the optimistic row with the durable admission metadata instead of removing it: the exact
+      // message id retires the bubble by id once the prompt reaches history (or the inbox), and the
+      // server-recorded delivery keeps the queued status visible until the inbox stops listing it.
+      setOptimisticUserMessages((current) => current.map((message) =>
+        message.info.id === optimisticMessage.info.id
+          ? { ...message, info: { ...message.info, durableID: admission?.messageID, delivery: admission?.delivery ?? message.info.delivery } }
+          : message))
       // Dispatch is the commit boundary. A history/sidebar refresh is best effort and must never
       // turn a prompt that the server accepted into a retryable send failure or restore its draft.
       let refreshFailed = false
@@ -3936,9 +4294,54 @@ function App() {
       }
     } catch (err) {
       if (isLeaseContextCurrent(promptLease) && isIndeterminateDeliveryError(err)) {
-        setActionNotice(t('detail.deliveryIndeterminate'))
-        void loadSelected(selectedSession.id, selectedSession.directory, true).catch(() => undefined)
-        void refreshSessions(false, undefined, true).catch(() => undefined)
+        // The response was lost after transmission. The server admits durably under the request id,
+        // so exactly one idempotent retry with the same id confirms the earlier admission (409) or
+        // performs it — it can never send the prompt twice. A confirmed retry tags the row with the
+        // exact durable id so retirement is by id, never by text.
+        let resolved = false
+        try {
+          const readmission = await sendPromptV2(config, selectedSession.id, text, selectedSession.directory, activeModel, activeAgentID, attachments, promptDelivery, promptRequestID)
+          resolved = true
+          if (readmission?.messageID) {
+            setOptimisticUserMessages((current) => current.map((message) =>
+              message.info.id === optimisticMessage.info.id
+                ? { ...message, info: { ...message.info, durableID: readmission.messageID, delivery: readmission.delivery ?? message.info.delivery } }
+                : message))
+          } else {
+            // An admission without the envelope: the durable admission key is the request id itself.
+            setOptimisticUserMessages((current) => current.map((message) =>
+              message.info.id === optimisticMessage.info.id
+                ? { ...message, info: { ...message.info, durableID: promptRequestID } }
+                : message))
+          }
+        } catch (retryErr) {
+          if (isAdmissionConflict(retryErr)) {
+            resolved = true
+            // The request id was durably admitted; the prompt surfaces under that exact id.
+            setOptimisticUserMessages((current) => current.map((message) =>
+              message.info.id === optimisticMessage.info.id
+                ? { ...message, info: { ...message.info, durableID: promptRequestID } }
+                : message))
+          }
+        }
+        if (resolved && isLeaseContextCurrent(promptLease)) {
+          promptDispatched = true
+          setActionNotice(t('detail.deliveryAdmitted'))
+          void loadSelected(selectedSession.id, selectedSession.directory, true).catch(() => undefined)
+          void refreshSessions(false, undefined, true).catch(() => undefined)
+        } else if (isLeaseContextCurrent(promptLease)) {
+          // Still unknown after the idempotent retry. The server admits durably under the request id
+          // when the transmission landed, so tag the row with that stable id: if the prompt surfaces
+          // (in the inbox or history) it retires by exact id; if it never landed, the row stays as
+          // the visible trace of the indeterminate send.
+          setOptimisticUserMessages((current) => current.map((message) =>
+            message.info.id === optimisticMessage.info.id
+              ? { ...message, info: { ...message.info, durableID: promptRequestID } }
+              : message))
+          setActionNotice(t('detail.deliveryIndeterminate'))
+          void loadSelected(selectedSession.id, selectedSession.directory, true).catch(() => undefined)
+          void refreshSessions(false, undefined, true).catch(() => undefined)
+        }
       } else if (isLeaseContextCurrent(promptLease)) setRuntimeError((err as Error).message)
       if (!promptDispatched && !isIndeterminateDeliveryError(err) && isLeaseContextCurrent(promptLease)) {
         completionShouldPlayRef.current = false
@@ -5491,7 +5894,7 @@ function App() {
           />
 
           {runtimeError && <div className="error fade-in" role="alert">✗ {runtimeError}</div>}
-          {actionNotice && <div className="notice info fade-in">ℹ {actionNotice}</div>}
+          {actionNotice && <div className="notice info fade-in" role="status" aria-live="polite">ℹ {actionNotice}</div>}
         </main>
       )}
 
@@ -6016,7 +6419,7 @@ http://YOUR_PC_IP:4096/global/health</pre>
                    {!selectedSession ? t('help.skillRequiresSession') : t('help.skillRequiresOpenCode2')}
                  </p>
                )}
-               {actionNotice && <div className="notice info fade-in">ℹ {actionNotice}</div>}
+               {actionNotice && <div className="notice info fade-in" role="status" aria-live="polite">ℹ {actionNotice}</div>}
              </div>
            )}
           {runtimeError && <p className="error" role="alert">{runtimeError}</p>}
