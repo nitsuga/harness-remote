@@ -18,7 +18,10 @@ export const DEFAULT_HARNESS_CAPABILITIES: Record<BackendKind, HarnessCapabiliti
     sessionRename: true,
     sessionDelete: true,
     // Attachments reach the harness through the bridge; the OpenCode transport has no such path yet.
-    attachments: false
+    attachments: false,
+    // No native compact/fork endpoint outside OpenCode 2; the v1 transport has no such path yet.
+    compactSession: false,
+    forkSession: false
   },
   opencode2: {
     sessions: true,
@@ -37,7 +40,10 @@ export const DEFAULT_HARNESS_CAPABILITIES: Record<BackendKind, HarnessCapabiliti
     sessionRename: true,
     sessionDelete: true,
     // The v2 prompt accepts `files` attachments (base64 data URLs).
-    attachments: true
+    attachments: true,
+    // v2 exposes native session compaction and forking as async POST endpoints.
+    compactSession: true,
+    forkSession: true
   },
   omp: {
     sessions: true,
@@ -56,7 +62,9 @@ export const DEFAULT_HARNESS_CAPABILITIES: Record<BackendKind, HarnessCapabiliti
     sessionRename: true,
     sessionDelete: true,
     // Replaced by the live handshake as soon as /v1/capabilities answers.
-    attachments: false
+    attachments: false,
+    compactSession: false,
+    forkSession: false
   },
   pi: {
     sessions: true,
@@ -74,7 +82,9 @@ export const DEFAULT_HARNESS_CAPABILITIES: Record<BackendKind, HarnessCapabiliti
     actions: false,
     sessionRename: true,
     sessionDelete: true,
-    attachments: false
+    attachments: false,
+    compactSession: false,
+    forkSession: false
   },
   claude: {
     sessions: true,
@@ -92,7 +102,9 @@ export const DEFAULT_HARNESS_CAPABILITIES: Record<BackendKind, HarnessCapabiliti
     actions: false,
     sessionRename: true,
     sessionDelete: true,
-    attachments: false
+    attachments: false,
+    compactSession: false,
+    forkSession: false
   },
   codex: {
     sessions: true,
@@ -110,6 +122,8 @@ export const DEFAULT_HARNESS_CAPABILITIES: Record<BackendKind, HarnessCapabiliti
     actions: false,
     sessionRename: true,
     sessionDelete: true,
-    attachments: false
+    attachments: false,
+    compactSession: false,
+    forkSession: false
   }
 }

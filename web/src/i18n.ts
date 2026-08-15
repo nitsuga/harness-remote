@@ -165,6 +165,9 @@ type TranslationKey =
   | 'detail.sessionDetailsTitle'
   | 'detail.sessionDetailsHint'
   | 'detail.closeSheet'
+  | 'detail.compactSession'
+  | 'detail.forkSession'
+  | 'detail.compactQueued'
   | 'todo.title'
   | 'todo.hide'
   | 'todo.show'
@@ -471,6 +474,9 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.sessionDetailsTitle': 'Session details',
     'detail.sessionDetailsHint': 'Advanced project, VCS, file and model information.',
     'detail.closeSheet': 'Close',
+    'detail.compactSession': 'Compact session',
+    'detail.forkSession': 'Fork session',
+    'detail.compactQueued': 'Compaction queued',
     'todo.title': 'Todo Items',
     'todo.hide': 'Hide',
     'todo.show': 'Show',
@@ -776,6 +782,9 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.sessionDetailsTitle': 'Dettagli sessione',
     'detail.sessionDetailsHint': 'Informazioni avanzate su progetto, VCS, file e modello.',
     'detail.closeSheet': 'Chiudi',
+    'detail.compactSession': 'Compatta sessione',
+    'detail.forkSession': 'Duplica sessione',
+    'detail.compactQueued': 'Compattazione in coda',
     'todo.title': 'Todo',
     'todo.hide': 'Nascondi',
     'todo.show': 'Mostra',
@@ -1074,6 +1083,9 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.sessionDetailsTitle': '工作階段詳細資訊',
     'detail.sessionDetailsHint': '專案、VCS、檔案與模型的進階資訊。',
     'detail.closeSheet': '關閉',
+    'detail.compactSession': '壓縮工作階段',
+    'detail.forkSession': '分叉工作階段',
+    'detail.compactQueued': '壓縮已排入佇列',
     'todo.title': '待辦事項',
     'todo.hide': '隱藏',
     'todo.show': '顯示',
@@ -1320,6 +1332,9 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.sessionDetailsTitle': '会话详细信息',
     'detail.sessionDetailsHint': '项目、VCS、文件与模型的进阶信息。',
     'detail.closeSheet': '关闭',
+    'detail.compactSession': '压缩会话',
+    'detail.forkSession': '分叉会话',
+    'detail.compactQueued': '压缩已排队',
     'todo.title': '待办事项',
     'todo.hide': '隐藏',
     'todo.show': '显示',

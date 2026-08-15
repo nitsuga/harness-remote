@@ -27,6 +27,10 @@ export type HarnessCapabilities = {
   sessionRename: boolean
   sessionDelete: boolean
   attachments: boolean
+  /** Native session compaction (OpenCode 2 `/api/session/{id}/compact`). */
+  compactSession: boolean
+  /** Native session forking (OpenCode 2 `/api/session/{id}/fork`). */
+  forkSession: boolean
 }
 
 export type MachineAgentHost = {

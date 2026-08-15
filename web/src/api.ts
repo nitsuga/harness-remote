@@ -387,6 +387,20 @@ const apiV1 = {
     return Promise.reject(new Error("Skills are only supported on OpenCode 2 servers"))
   },
 
+  compactSession(_config: ServerConfig, _sessionID: string, _directory?: string) {
+    // OpenCode 1 (and the other v1-shaped backends) expose no session compaction endpoint — reject
+    // honestly rather than pretending compaction exists here. Only the opencode2 client implements
+    // compactSession.
+    return Promise.reject(new Error("Session compaction is only supported on OpenCode 2 servers"))
+  },
+
+  forkSession(_config: ServerConfig, _sessionID: string, _directory?: string) {
+    // OpenCode 1 (and the other v1-shaped backends) expose no session forking endpoint — reject
+    // honestly rather than pretending forking exists here. Only the opencode2 client implements
+    // forkSession.
+    return Promise.reject(new Error("Session forking is only supported on OpenCode 2 servers"))
+  },
+
   revertMessage(config: ServerConfig, sessionID: string, messageID: string, directory?: string) {
     return request<Session>(config, withDirectory(`/session/${sessionID}/revert`, directory), {
       method: "POST",

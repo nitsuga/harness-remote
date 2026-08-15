@@ -415,6 +415,29 @@ export const opencode2Api = {
     return true
   },
 
+  async compactSession(config: ServerConfig, sessionID: string, _directory?: string) {
+    // `POST /api/session/{id}/compact` (`v2.session.compact`) queues a durable compaction request;
+    // both payload fields (`id`, `delivery`) are optional, so the body is exactly `{}` and the
+    // response is an acknowledgement — the server runs the compaction asynchronously.
+    await v2Request<boolean>(config, `/api/session/${encodeURIComponent(sessionID)}/compact`, {
+      method: "POST",
+      body: {}
+    })
+    return true
+  },
+
+  async forkSession(config: ServerConfig, sessionID: string, _directory?: string) {
+    // `POST /api/session/{id}/fork` (`v2.session.fork`) creates a child session by copying projected
+    // history. The request boundary union requires a `messageID` only for `before`; `{ type:
+    // "through" }` stands alone. The endpoint answers `{ data: Session.Info }`, mapped like any
+    // other session.
+    const forked = await v2Request<V2Session>(config, `/api/session/${encodeURIComponent(sessionID)}/fork`, {
+      method: "POST",
+      body: { boundary: { type: "through" } }
+    })
+    return toSession(forked)
+  },
+
   async revertMessage(config: ServerConfig, sessionID: string, messageID: string, _directory?: string) {
     const revert = await v2Request<{ messageID: string; partID?: string }>(config, `/api/session/${encodeURIComponent(sessionID)}/revert/stage`, {
       method: "POST",

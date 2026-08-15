@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { createTranslator } from './i18n.ts'
 import {
   fetchSkillCatalog,
   isV2RouteAbsent,
@@ -414,5 +416,88 @@ assert.deepEqual(toFormAnswer(conditionalForm, [['Yes'], ['current-secret']]), {
   enabled: true,
   secret: 'current-secret'
 })
+
+// --- Session compact/fork lane (issue #4) ---------------------------------------------
+
+// `POST /api/session/{id}/fork` (`v2.session.fork`) answers `{ data: Session.Info }`. The fork
+// response carries extra fields (`fork`, `parentID`, `cost`, `tokens`, ...) the app's mapper does
+// not know about; it must still map to a usable Session — the client returns `toSession(forked)`
+// and the UI feeds that straight into its session view.
+const forkedInfo = {
+  id: 'ses_child',
+  parentID: 'ses_003dc6eaeffeXJgbfQFfpD8Od2',
+  fork: { sessionID: 'ses_003dc6eaeffeXJgbfQFfpD8Od2', boundary: { type: 'through', messageID: 'msg_x' } },
+  projectID: 'global',
+  agent: 'build',
+  model: { id: 'deepseek-v4-flash', providerID: 'opencode-go', variant: 'high' },
+  cost: 0.0012965372,
+  tokens: { input: 11583, output: 1236, reasoning: 453, cache: { read: 178048, write: 0 } },
+  time: { created: 1786641617238, updated: 1786710305014 },
+  title: 'Greeting (fork)',
+  location: { directory: '/home/eric' },
+  subpath: 'home/eric'
+}
+assert.deepEqual(toSession(forkedInfo), {
+  id: 'ses_child',
+  title: 'Greeting (fork)',
+  directory: '/home/eric',
+  time: { created: 1786641617238, updated: 1786710305014 },
+  model: { id: 'deepseek-v4-flash', providerID: 'opencode-go', variant: 'high' },
+  project: { id: 'global', worktree: '/home/eric' },
+  revert: undefined,
+  summary: undefined,
+  external: false
+})
+
+// Wire contract for the two new endpoints, checked against the client source the same way the
+// regression suites check App.tsx/api.ts: the node runner cannot import opencode2-client.ts (its
+// extensionless sibling imports), so the exact request shapes are asserted textually.
+const clientSource = readFileSync(new URL('./opencode2-client.ts', import.meta.url), 'utf8')
+assert.ok(
+  clientSource.includes('`/api/session/${encodeURIComponent(sessionID)}/compact`, {\n      method: "POST",\n      body: {}\n    })'),
+  'compact must POST an empty body — both payload fields are optional and the response is an acknowledgement'
+)
+assert.ok(
+  clientSource.includes('`/api/session/${encodeURIComponent(sessionID)}/fork`, {\n      method: "POST",\n      body: { boundary: { type: "through" } }\n    })'),
+  'fork must POST the through boundary — the only fork boundary that needs no messageID'
+)
+
+// The v1/bridge backends must reject compact/fork honestly (same pattern as sendSkill) so the UI
+// never sees a silent success from a backend that cannot perform the operation.
+const apiSource = readFileSync(new URL('./api.ts', import.meta.url), 'utf8')
+assert.ok(
+  apiSource.includes('return Promise.reject(new Error("Session compaction is only supported on OpenCode 2 servers"))'),
+  'v1 compactSession must reject honestly'
+)
+assert.ok(
+  apiSource.includes('return Promise.reject(new Error("Session forking is only supported on OpenCode 2 servers"))'),
+  'v1 forkSession must reject honestly'
+)
+
+// Every language must ship the compact/fork labels and the compact queued notice.
+const compactSessionLabels = {
+  en: 'Compact session',
+  it: 'Compatta sessione',
+  'zh-TW': '壓縮工作階段',
+  'zh-CN': '压缩会话'
+}
+const forkSessionLabels = {
+  en: 'Fork session',
+  it: 'Duplica sessione',
+  'zh-TW': '分叉工作階段',
+  'zh-CN': '分叉会话'
+}
+const compactQueuedLabels = {
+  en: 'Compaction queued',
+  it: 'Compattazione in coda',
+  'zh-TW': '壓縮已排入佇列',
+  'zh-CN': '压缩已排队'
+}
+for (const language of ['en', 'it', 'zh-TW', 'zh-CN']) {
+  const t = createTranslator(language)
+  assert.equal(t('detail.compactSession'), compactSessionLabels[language], `${language} compactSession label`)
+  assert.equal(t('detail.forkSession'), forkSessionLabels[language], `${language} forkSession label`)
+  assert.equal(t('detail.compactQueued'), compactQueuedLabels[language], `${language} compactQueued notice`)
+}
 
 console.log('OpenCode 2 client mapping tests passed')

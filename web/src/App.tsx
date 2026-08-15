@@ -1639,6 +1639,7 @@ type MessageMenuAction = {
   id: string
   label: string
   onSelect: () => void
+  disabled?: boolean
 }
 
 /** A ⋯ control in the conversation header exposing session-level actions from the connected
@@ -1695,7 +1696,9 @@ function SessionActionsMenu({
               key={action.id}
               type="button"
               role="menuitem"
+              disabled={action.disabled}
               onClick={() => {
+                if (action.disabled) return
                 setOpen(false)
                 action.onSelect()
               }}
@@ -2232,6 +2235,7 @@ function App() {
   const [attachments, setAttachments] = useState<AttachmentPart[]>([])
   const attachmentInputRef = useRef<HTMLInputElement | null>(null)
   const [busySending, setBusySending] = useState(false)
+  const [sessionActionPending, setSessionActionPending] = useState<"compact" | "fork" | null>(null)
   const [activatingSkill, setActivatingSkill] = useState<string | null>(null)
   const [loadingSessionID, setLoadingSessionID] = useState<string | null>(null)
   /** The empty transcript state is only meaningful after this session's first history snapshot succeeds. */
@@ -2396,14 +2400,21 @@ function App() {
     const revertMessageID = selectedSession?.revertMessageID
     const undoAction = extensionActions.find((action) => action.id === "undo")
     const redoAction = extensionActions.find((action) => action.id === "redo")
+    const hasUserMessage = messages.some((message) => message.info.role === "user")
     const hasUndo = config.backend === "opencode" || config.backend === "opencode2"
       ? messages.some((message) => message.info.role === "user" && (!revertMessageID || message.info.id < revertMessageID))
       : undoAction ? undoAction.enabled : supported.has("undo")
     const hasRedo = config.backend === "opencode" || config.backend === "opencode2" ? !!revertMessageID : redoAction ? redoAction.enabled : supported.has("redo")
     if (hasUndo) actions.push({ id: "undo", label: t('detail.undo'), onSelect: () => void runNativeHistoryCommand("undo") })
     if (hasRedo) actions.push({ id: "redo", label: t('detail.redo'), onSelect: () => void runNativeHistoryCommand("redo") })
+    if (selectedSession && capabilities.compactSession) {
+      actions.push({ id: "compact", label: t('detail.compactSession'), disabled: sessionActionPending !== null || !hasUserMessage, onSelect: () => void compactCurrentSession() })
+    }
+    if (selectedSession && capabilities.forkSession) {
+      actions.push({ id: "fork", label: t('detail.forkSession'), disabled: sessionActionPending !== null || !hasUserMessage, onSelect: () => void forkCurrentSession() })
+    }
     return actions
-  }, [commands, config.backend, extensionActions, messages, selectedSession?.revertMessageID, t])
+  }, [capabilities.compactSession, capabilities.forkSession, commands, config.backend, extensionActions, messages, selectedSession, sessionActionPending, t])
   const selectedNewSessionDirectory = normalizeDirectory(newSessionDirectory)
 
   const renderedMessages = useMemo(() => {
@@ -2895,6 +2906,43 @@ function App() {
       setRuntimeError((err as Error).message)
     } finally {
       setBusySending(false)
+    }
+  }
+
+  /** Compact is a queued current-session action: it must not replace the selected session. */
+  async function compactCurrentSession() {
+    if (!selectedSession || sessionActionPending) return
+    setSessionActionPending("compact")
+    setRuntimeError(null)
+    setActionNotice(null)
+    try {
+      await api.compactSession(config, selectedSession.id, selectedSession.directory)
+      setActionNotice(t('detail.compactQueued'))
+    } catch (err) {
+      setRuntimeError((err as Error).message)
+    } finally {
+      setSessionActionPending(null)
+    }
+  }
+
+  async function forkCurrentSession() {
+    if (!selectedSession || sessionActionPending) return
+    const original = selectedSession
+    setSessionActionPending("fork")
+    setRuntimeError(null)
+    setActionNotice(null)
+    try {
+      const forked = await api.forkSession(config, original.id, original.directory)
+      const forkedView = toSessionView(forked)
+      setSessions((current) => current.some((session) => session.id === forkedView.id)
+        ? current
+        : [forkedView, ...current].sort((a, b) => b.updated - a.updated))
+      // Keep the original session and navigate through the shared session-opening path.
+      await openSession(forkedView.id, forkedView.directory)
+    } catch (err) {
+      setRuntimeError((err as Error).message)
+    } finally {
+      setSessionActionPending(null)
     }
   }
 

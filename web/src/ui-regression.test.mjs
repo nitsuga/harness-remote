@@ -235,9 +235,20 @@ assert.ok(
 )
 
 assert.ok(app.includes('api.capabilities(config).then(setCapabilities)'), 'bridge capabilities must be loaded from the selected harness')
-for (const capability of ['agents', 'models', 'todos', 'diff', 'questions', 'permissions', 'sessionRename', 'sessionDelete']) {
+for (const capability of ['agents', 'models', 'todos', 'diff', 'questions', 'permissions', 'sessionRename', 'sessionDelete', 'compactSession', 'forkSession']) {
   assert.ok(app.includes(`capabilities.${capability}`), `${capability} UI must be capability-driven`)
 }
+assert.ok(/capabilities\.compactSession[\s\S]*?t\('detail\.compactSession'\)/.test(app), 'compact must be a capability-gated current-session menu action')
+assert.ok(/capabilities\.forkSession[\s\S]*?t\('detail\.forkSession'\)/.test(app), 'fork must be a capability-gated current-session menu action')
+assert.ok(app.includes("await api.compactSession(config, selectedSession.id, selectedSession.directory)"), 'compact must invoke the API once for the selected session')
+assert.ok(app.includes("setActionNotice(t('detail.compactQueued'))"), 'compact must show the queued notice without replacing the session')
+assert.ok(app.includes('const forked = await api.forkSession(config, original.id, original.directory)'), 'fork must invoke the API once for the current session')
+assert.ok(app.includes('setSessions((current) => current.some((session) => session.id === forkedView.id)'), 'fork must insert the returned child while preserving the original')
+assert.ok(app.includes('await openSession(forkedView.id, forkedView.directory)'), 'fork must navigate through the shared session-opening path')
+assert.ok(
+  /const hasUserMessage = messages\.some\(\(message\) => message\.info\.role === "user"\)[\s\S]*?id: "compact"[\s\S]*?disabled: sessionActionPending !== null \|\| !hasUserMessage[\s\S]*?id: "fork"[\s\S]*?disabled: sessionActionPending !== null \|\| !hasUserMessage/.test(app),
+  'compact and fork must be disabled for sessions with no visible user message'
+)
 
 // A follow-up prompt can be queued while the agent is still working.
 assert.ok(app.includes('const showStopAction = isWorking && !composer.trim()'), 'stop should be offered only when there is nothing to send')
