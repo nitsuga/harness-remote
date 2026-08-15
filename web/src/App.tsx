@@ -112,6 +112,21 @@ function persistSessionTombstones(tombstones: Map<string, Set<string>>): void {
   } catch { /* Storage can be disabled or full; memory protections still apply. */ }
 }
 
+function mergedSessionTombstones(
+  tombstones: Map<string, Set<string>>,
+  runtimeKey: string,
+  persistedKey: string
+): Set<string> {
+  // Hydrated state uses opaque keys while live ABA checks use the raw namespace key. They are
+  // two representations of one namespace, never alternatives where one can shadow the other.
+  const merged = new Set([...(tombstones.get(runtimeKey) ?? []), ...(tombstones.get(persistedKey) ?? [])])
+  if (merged.size) {
+    tombstones.set(runtimeKey, merged)
+    tombstones.set(persistedKey, merged)
+  }
+  return merged
+}
+
 type Translator = ReturnType<typeof createTranslator>
 
 /** One pixel past the stylesheet's `@media (max-width: 780px)` block, so the JS layout switches on
@@ -2854,7 +2869,11 @@ function App() {
       setConnectionMessage(t('connection.loadingSessions'))
     }
     try {
-      const items = await api.listGlobalSessions(config).catch(() => api.listSessions(config))
+      let authoritativeGlobalListing = true
+      const items = await api.listGlobalSessions(config).catch(async () => {
+        authoritativeGlobalListing = false
+        return api.listSessions(config)
+      })
       // OpenCode scopes both of these to a project directory, so each one has to be asked
       // separately. The bridge does not: called without a directory it answers for every session it
       // knows. Fanning out there turned one refresh into two requests per distinct directory — over
@@ -2878,32 +2897,35 @@ function App() {
       const activityTimes = await loadSessionActivityTimes(hydratedItems)
       const tombstoneKey = refreshContext.profileID + "\u0000" + refreshContext.configKey
       const persistedTombstoneKey = tombstoneNamespaceKey(refreshContext.profileID, refreshContext.configKey)
-      // removedSessionIDsRef.current.get(refreshContext.profileID + "\u0000" + refreshContext.configKey)
-      const tombstones = removedSessionIDsRef.current.get(tombstoneKey)
-        ?? removedSessionIDsRef.current.get(persistedTombstoneKey)
-        ?? new Set<string>()
+      const tombstones = mergedSessionTombstones(removedSessionIDsRef.current, tombstoneKey, persistedTombstoneKey)
       const mapped = hydratedItems
         .map((session) => toSessionView(session, statuses[session.id], activityTimes.get(session.id)))
         .filter((session) => !tombstones.has(session.id))
         .sort((a, b) => b.updated - a.updated)
-      // A successful authoritative list is the only evidence that a deleted id is gone for good.
-      // Never remove tombstones merely because a request failed or because a filtered snapshot omitted
-      // an item from a non-authoritative path.
-      const authoritativeIDs = new Set(hydratedItems.map((session) => session.id))
-      let tombstonesChanged = false
-      for (const id of [...tombstones]) {
-        if (!authoritativeIDs.has(id)) { tombstones.delete(id); tombstonesChanged = true }
-      }
-      if (tombstonesChanged) {
-        if (tombstones.size) removedSessionIDsRef.current.set(tombstoneKey, tombstones)
-        else removedSessionIDsRef.current.delete(tombstoneKey)
-        removedSessionIDsRef.current.delete(persistedTombstoneKey)
-        persistSessionTombstones(removedSessionIDsRef.current)
-      }
       // A profile/session switch, or a fork that started while this fan-out was in flight, makes
       // this snapshot historical. Never let it replace a newer list (especially the just-inserted
       // child row).
       if (!refreshIsCurrent()) return true
+      // Retirement needs both halves of the proof: the global endpoint really answered, and this
+      // refresh still belongs to the current context/generation. Scoped fallbacks and stale
+      // snapshots may hide rows, but can never erase durable deletion evidence.
+      if (authoritativeGlobalListing) {
+        const authoritativeIDs = new Set(hydratedItems.map((session) => session.id))
+        let tombstonesChanged = false
+        for (const id of [...tombstones]) {
+          if (!authoritativeIDs.has(id)) { tombstones.delete(id); tombstonesChanged = true }
+        }
+        if (tombstonesChanged) {
+          if (tombstones.size) {
+            removedSessionIDsRef.current.set(tombstoneKey, tombstones)
+            removedSessionIDsRef.current.set(persistedTombstoneKey, tombstones)
+          } else {
+            removedSessionIDsRef.current.delete(tombstoneKey)
+            removedSessionIDsRef.current.delete(persistedTombstoneKey)
+          }
+          persistSessionTombstones(removedSessionIDsRef.current)
+        }
+      }
       setSessions((current) => {
         // `current` is the list this refresh started from, so a session opened moments ago may not
         // be in it yet; the ref holds what is actually on screen. Falling back to `current` alone
@@ -3576,7 +3598,7 @@ function App() {
     }
   }
 
-  async function activateSkill(skill: CommandInfo, input = `/${skill.name}`) {
+  async function activateSkill(skill: CommandInfo, input = `/${skill.name}`, stagedAttachments = attachments) {
     if (isSessionMutationLocked()) return
     if (!selectedSession) {
       setRuntimeError(t('help.skillRequiresSession'))
@@ -3625,6 +3647,7 @@ function App() {
         setAwaitingAssistantReply(false)
         setOptimisticUserMessages((current) => current.filter((message) => message.info.id !== optimisticMessage.info.id))
         setComposer((current) => current || input)
+        setAttachments((current) => current.length ? current : stagedAttachments)
         setActionNotice(null)
         setRuntimeError(t('help.skillActivationFailed', { skill: skill.name, message: (err as Error).message }))
       }
@@ -3722,7 +3745,7 @@ function App() {
       if (matchingCommand.source === "skill") {
         releaseMutation(commandLease)
         if (!mutationCoordinator.isContextCurrent(commandContext) || !mutationCoordinator.isForkGenerationCurrent(commandForkGeneration)) return
-        await activateSkill(matchingCommand, text)
+        await activateSkill(matchingCommand, text, attachments)
         return
       }
 
@@ -3749,6 +3772,7 @@ function App() {
           setAwaitingAssistantReply(false)
           setOptimisticUserMessages((current) => current.filter((message) => message.info.id !== optimisticMessage.info.id))
           setComposer((current) => current || text)
+          setAttachments((current) => current.length ? current : attachments)
           setRuntimeError((err as Error).message)
         }
       } finally {
@@ -3818,12 +3842,10 @@ function App() {
        // visible list and selection below are allowed to depend on the current namespace.
         const tombstoneKey = deleteContext.profileID + "\u0000" + deleteContext.configKey
         const persistedTombstoneKey = tombstoneNamespaceKey(deleteContext.profileID, deleteContext.configKey)
-       const tombstones = removedSessionIDsRef.current.get(tombstoneKey) ?? new Set<string>()
+        const tombstones = mergedSessionTombstones(removedSessionIDsRef.current, tombstoneKey, persistedTombstoneKey)
         tombstones.add(sessionID)
         removedSessionIDsRef.current.set(tombstoneKey, tombstones)
-        const persistedTombstones = removedSessionIDsRef.current.get(persistedTombstoneKey) ?? new Set<string>()
-        persistedTombstones.add(sessionID)
-        removedSessionIDsRef.current.set(persistedTombstoneKey, persistedTombstones)
+        removedSessionIDsRef.current.set(persistedTombstoneKey, tombstones)
         persistSessionTombstones(removedSessionIDsRef.current)
        // Lease currency includes the session, so it is intentionally too strict for this part:
       // moving to another session does not make persistence of this deletion unsafe. Profile/config
@@ -3902,6 +3924,7 @@ function App() {
     const target = selectedSession
     const activeLease = mutationCoordinator.getActiveLease()
     const abortContext = mutationCoordinator.getContext()
+    const abortContextGeneration = mutationCoordinator.getContextGeneration()
     const abortKey = abortContext
       ? `${abortContext.profileID}\u0000${abortContext.configKey}\u0000${abortContext.sessionID ?? ""}`
       : ""
@@ -3927,7 +3950,8 @@ function App() {
     bumpMutationLock((value) => value + 1)
     let operation!: Promise<void>
     operation = (async () => {
-      const sameContext = () => mutationCoordinator.isContextCurrent(abortContext)
+      const sameContext = () => mutationCoordinator.isContextGenerationCurrent(abortContextGeneration)
+        && mutationCoordinator.isContextCurrent(abortContext)
       try {
         await api.abort(config, target.id, target.directory)
         // The original prompt lease may have released by now. Currency is the full captured
@@ -3944,8 +3968,10 @@ function App() {
         if (lease) releaseMutation(lease)
         if (abortInFlightRef.current.get(abortKey) === operation) {
           abortInFlightRef.current.delete(abortKey)
-          if (mutationCoordinator.isContextCurrent(abortContext)) setAbortPresentationContext(null)
-          bumpMutationLock((value) => value + 1)
+          if (sameContext()) {
+            setAbortPresentationContext(null)
+            bumpMutationLock((value) => value + 1)
+          }
         }
       }
     })()

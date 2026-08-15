@@ -63,6 +63,9 @@ assert.equal(zhCN('settings.themeSystem'), '跟随系统')
 assert.equal(zhCN('action.preparingTool', { tool: 'write' }), '正在准备 write')
 assert.equal(zhCN('detail.linesAddedDeleted', { additions: 3, deletions: 1 }), '+3 行 · -1 行')
 for (const translator of [en, it, zh, zhCN]) {
+  assert.match(translator('detail.removeAttachment', { filename: 'photo.png' }), /photo\.png/)
+}
+for (const translator of [en, it, zh, zhCN]) {
   assert.notEqual(translator('detail.compacting'), 'detail.compacting')
   assert.notEqual(translator('detail.forking'), 'detail.forking')
 }

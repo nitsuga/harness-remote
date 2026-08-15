@@ -97,7 +97,7 @@ export function SessionComposer({
       {attachments.length > 0 && <div className="composer-chips">
         {attachments.map((attachment, index) => <span className="composer-chip" key={`${attachment.filename}-${index}`}>
           <strong>{attachment.filename}</strong>
-          <button className="btn-ghost btn-icon" aria-label={t('detail.removeAttachment')} disabled={mutationLocked} onClick={() => onAttachmentsChange((current) => current.filter((_, position) => position !== index))}>
+           <button className="btn-ghost btn-icon" aria-label={t('detail.removeAttachment', { filename: attachment.filename })} disabled={mutationLocked} onClick={() => onAttachmentsChange((current) => current.filter((_, position) => position !== index))}>
             <CloseIcon size={12} />
           </button>
         </span>)}

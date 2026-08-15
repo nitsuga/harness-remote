@@ -176,7 +176,7 @@ assert.match(app, /const deleteContext = \{[\s\S]*?sessionID: sessionID[\s\S]*?c
 assert.match(app, /await api\.deleteSession\([\s\S]*?const tombstoneKey = deleteContext\.profileID[\s\S]*?tombstones\.add\(sessionID\)/, 'a successful delete must capture its tombstone before gating current-namespace UI updates')
 assert.match(app, /if \(sameNamespace\) \{[\s\S]*?setSessions\(\(current\) => current\.filter/, 'only current-namespace delete completion may remove the visible row')
 assert.match(app, /removedSessionIDsRef = useRef\(new Map<string, Set<string>>\(\)\)/, 'session tombstones must be stored per namespace')
-assert.match(app, /removedSessionIDsRef\.current\.get\(refreshContext\.profileID \+ "\\u0000" \+ refreshContext\.configKey\)/, 'session refreshes must read tombstones from the active profile/config namespace')
+assert.match(app, /mergedSessionTombstones\(removedSessionIDsRef\.current, tombstoneKey, persistedTombstoneKey\)/, 'session refreshes must merge tombstones from the active profile/config namespace')
 assert.match(app, /removedSessionIDsRef\.current\.set\(tombstoneKey, tombstones\)/, 'deletes must write tombstones to their captured profile/config namespace')
 assert.match(app, /sameNamespace && currentDeleteContext\?\.sessionID === sessionID/, 'a stale delete lease must still clear the currently selected target in its namespace')
 assert.ok(!app.includes('removedSessionIDsRef.current.clear()'), 'switching namespaces must not erase prior tombstones')
@@ -339,11 +339,14 @@ assert.match(app, /const activeLease = mutationCoordinator\.getActiveLease\(\)[\
 assert.match(app, /session\.stop[\s\S]*?disabled: !canAbortSession/, 'native menu and palette Stop entries must use the abort-specific availability guard')
 assert.ok(app.includes('const abortInFlightRef = useRef(new Map<string, Promise<void>>())'), 'abort requests need a synchronous per-context in-flight registry')
 assert.match(app, /abortInFlightRef\.current\.has\(abortKey\)[\s\S]*?abortInFlightRef\.current\.set\(abortKey, operation\)/, 'repeated Stop must deduplicate and presentation must share handler availability')
+assert.match(app, /const abortContextGeneration = mutationCoordinator\.getContextGeneration\(\)[\s\S]*?isContextGenerationCurrent\(abortContextGeneration\)[\s\S]*?isContextCurrent\(abortContext\)/, 'abort completion and cleanup must reject an away-and-back ABA context')
 assert.match(app, /activeLease\.context\.profileID === abortContext\.profileID[\s\S]*?activeLease\.context\.configKey === abortContext\.configKey/, 'abort authorization must match the full active lease context')
 assert.match(app, /const isSessionMutationLocked = \(\) => mutationCoordinator\.getActiveLease\(\) !== null \|\| abortInFlightRef\.current\.size > 0/, 'an abort remains a mutation lock after the original lease releases')
 assert.ok(composerView.includes('canAbortSession'), 'composer Stop presentation must receive the abort availability guard')
 assert.match(app, /setAttachments\(\[\]\)[\s\S]*?api\.sendCommand/, 'slash command dispatch must clear staged attachments')
 assert.match(app, /setAttachments\(\[\]\)[\s\S]*?api\.sendSkill/, 'skill dispatch must clear staged attachments')
+assert.match(app, /activateSkill\(skill: CommandInfo[\s\S]*?stagedAttachments[\s\S]*?setAttachments\(\(current\) => current\.length \? current : stagedAttachments\)/, 'failed skills must restore their staged attachments in the same context')
+assert.match(app, /api\.sendCommand[\s\S]*?setAttachments\(\(current\) => current\.length \? current : attachments\)/, 'failed slash commands must restore their staged attachments')
 assert.ok(app.includes('readSessionTombstones') && app.includes('persistSessionTombstones'), 'session tombstones must hydrate and persist safely')
 
 // A run bubble merges action groups that a message boundary split apart. Consecutive replies with

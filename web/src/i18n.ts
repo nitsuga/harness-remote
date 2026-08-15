@@ -102,7 +102,7 @@ type TranslationKey =
 
   | 'detail.composerPlaceholder'
   | 'detail.attachImage'
-  | 'detail.removeAttachment'
+   | 'detail.removeAttachment'
   | 'detail.attachedImage'
   | 'detail.externalSession'
   | 'detail.waiting'
@@ -413,7 +413,7 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.emptyHint': 'Start a conversation below',
     'detail.composerPlaceholder': 'Prompt, or / for commands',
     'detail.attachImage': 'Attach image',
-    'detail.removeAttachment': 'Remove attachment',
+    'detail.removeAttachment': 'Remove attachment {filename}',
     'detail.attachedImage': 'Attached image',
     'detail.externalSession': 'Started by another client',
     'detail.waiting': 'Waiting...',
@@ -723,7 +723,7 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.emptyHint': 'Inizia una conversazione qui sotto',
     'detail.composerPlaceholder': 'Prompt, o / per i comandi',
     'detail.attachImage': 'Allega immagine',
-    'detail.removeAttachment': 'Rimuovi allegato',
+    'detail.removeAttachment': 'Rimuovi allegato {filename}',
     'detail.attachedImage': 'Immagine allegata',
     'detail.externalSession': 'Avviata da un altro client',
     'detail.waiting': 'Attesa...',
@@ -1026,7 +1026,7 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.emptyHint': '在下方開始對話',
     'detail.composerPlaceholder': '輸入提示，或以 / 下命令',
     'detail.attachImage': '附加圖片',
-    'detail.removeAttachment': '移除附件',
+    'detail.removeAttachment': '移除附件 {filename}',
     'detail.attachedImage': '附加的圖片',
     'detail.externalSession': '由其他用戶端啟動',
     'detail.waiting': '等待中...',
@@ -1278,8 +1278,9 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.loadFailed': '无法打开此会话',
     'detail.emptyTitle': '暂无消息',
     'detail.emptyHint': '在下方开始对话',
-    'detail.composerPlaceholder': '输入提示，或以 / 输入命令',
-    'detail.externalSession': '由其他客户端启动',
+     'detail.composerPlaceholder': '输入提示，或以 / 输入命令',
+     'detail.removeAttachment': '移除附件 {filename}',
+     'detail.externalSession': '由其他客户端启动',
     'detail.waiting': '等待中...',
     'detail.copyText': '复制文本',
     'detail.copyMarkdown': '复制为 Markdown',
