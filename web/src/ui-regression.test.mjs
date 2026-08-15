@@ -120,6 +120,8 @@ assert.match(app, /const isSessionMutationLocked = \(\) => mutationCoordinator\.
 assert.match(app, /async function send\(\)\s*\{[\s\S]*?if \(!selectedSession \|\| isSessionMutationLocked\(\)\) return/, 'composer submission must synchronously reject an active mutation lease')
 assert.match(app, /async function send\(\)[\s\S]*?const commandLease = acquireMutation\("command"\)[\s\S]*?const promptLease = acquireMutation\("prompt"\)/, 'each send path must take an exclusive coordinator lease')
 assert.match(app, /await api\.sendPrompt\([\s\S]*?if \(!isLeaseContextCurrent\(promptLease\)\) return/, 'prompt results must be discarded when their lease, context, or fork generation is stale')
+assert.match(app, /await api\.sendPrompt\([\s\S]*?promptDispatched = true[\s\S]*?let refreshFailed = false[\s\S]*?setActionNotice/, 'prompt refresh failures must be soft notices after dispatch commits')
+assert.match(app, /if \(!promptDispatched && isLeaseContextCurrent\(promptLease\)\)[\s\S]*?setComposer/, 'only genuine prompt dispatch failures may restore the draft')
 assert.match(app, /if \(!isLeaseContextCurrent\(lease\)\) return/, 'session results must reject work from a stale lease, context, or fork generation')
 assert.ok(app.includes('sessionActionPendingRef.current = "fork"'), 'fork must synchronously publish its pending state before React commits the render')
 assert.match(app, /async function activateSkill\([\s\S]*?if \(isSessionMutationLocked\(\)\) return[\s\S]*?const lease = acquireMutation\("skill"\)/, 'direct skill activation must use the synchronous coordinator lease')
@@ -296,6 +298,7 @@ assert.ok(app.includes("setActionNotice(t('detail.compactQueued'))"), 'compact m
 assert.ok(app.includes('const forked = await api.forkSession(config, original.id, original.directory)'), 'fork must invoke the API once for the current session')
 assert.ok(app.includes('setSessions((current) => current.some((session) => session.id === forkedView.id)'), 'fork must insert the returned child while preserving the original')
 assert.ok(app.includes('await openSession(forkedView.id, forkedView.directory)'), 'fork must navigate through the shared session-opening path')
+assert.ok(app.includes('forkFocusSessionRef.current = forkedView.id') && app.includes('detailHeadingRef.current?.focus()'), 'fork navigation must focus the mounted child session context')
 assert.match(app, /const forkContext = \{[\s\S]*?profileID: activeProfileID[\s\S]*?configKey: configKey\(config\)[\s\S]*?sessionID: original\.id/, 'fork must capture the active profile, server, and session identity before awaiting')
 assert.match(
   app,
@@ -332,8 +335,8 @@ assert.ok(
   "the marker must read as a sentence, not a one-word tag that needs a tooltip touch cannot show"
 )
 assert.equal(app.includes("disabled={!selectedSession || selectedSession.external}"), false, "external sessions must remain writable")
-assert.ok(composerView.includes('onClick={showStopAction ? onAbort : sendNow}'), 'the action button should send a queued follow-up instead of only stopping')
-assert.match(composerView, /disabled=\{!selected \|\| \(!showStopAction && mutationLocked\)/, 'Stop must remain enabled while an active prompt is being cancelled')
+assert.ok(composerView.includes('hasQueuedFollowUp') && composerView.includes('onClick={sendNow}') && composerView.includes('onClick={onAbort}'), 'a working composer must expose both queued Send and reachable Stop controls')
+assert.match(composerView, /disabled=\{!selected \|\| !canAbortSession\}/, 'Stop must remain enabled while an active prompt is being cancelled')
 assert.match(app, /const canAbortSession = Boolean\(selectedSession && isWorking[\s\S]*?activeWorkingLease\.kind === "skill"/, 'Stop must be allowed only as an out-of-band action for active prompt, command, or skill work')
 assert.match(app, /const activeLease = mutationCoordinator\.getActiveLease\(\)[\s\S]*?const lease = activeLease \? null : acquireMutation\("abort"\)/, 'abort must not steal the active prompt lease or release it as if it owned it')
 assert.match(app, /session\.stop[\s\S]*?disabled: !canAbortSession/, 'native menu and palette Stop entries must use the abort-specific availability guard')
@@ -343,13 +346,15 @@ assert.match(app, /const abortContextGeneration = mutationCoordinator\.getContex
 assert.match(app, /activeLease\.context\.profileID === abortContext\.profileID[\s\S]*?activeLease\.context\.configKey === abortContext\.configKey/, 'abort authorization must match the full active lease context')
 assert.match(app, /const isSessionMutationLocked = \(\) => mutationCoordinator\.getActiveLease\(\) !== null \|\| abortInFlightRef\.current\.size > 0/, 'an abort remains a mutation lock after the original lease releases')
 assert.ok(composerView.includes('canAbortSession'), 'composer Stop presentation must receive the abort availability guard')
+assert.match(app, /runtimeError && <div className="error fade-in" role="alert">/, 'runtime errors must be announced accessibly in the detail view')
 assert.equal(
   app.slice(app.indexOf('async function activateSkill'), app.indexOf('async function send()')).includes('setAttachments([])'),
   false,
   'successful skills must preserve staged attachments because the skill API does not transmit them'
 )
-const commandDispatch = app.slice(app.indexOf('const optimisticMessage = createOptimisticUserMessage(selectedSession.id, text)'), app.indexOf('return\n    }\n\n    setComposer', app.indexOf('const optimisticMessage = createOptimisticUserMessage(selectedSession.id, text)')))
+const commandDispatch = app.slice(app.indexOf('await api.sendCommand(config, selectedSession.id, command'), app.indexOf('    const promptLease'))
 assert.equal(commandDispatch.includes('setAttachments([])'), false, 'successful slash commands must preserve staged attachments')
+assert.equal(app.slice(app.indexOf('if (localCommand === "help"'), app.indexOf('let availableCommands = commands')).includes('setAttachments([])'), false, 'local help, commands, skills, and status views must preserve staged attachments')
 assert.match(commandDispatch, /api\.sendCommand[\s\S]*?let refreshFailed = false[\s\S]*?setActionNotice/, 'command refresh failures must be soft notices after dispatch commits')
 assert.match(app, /activateSkill\(skill: CommandInfo[\s\S]*?stagedAttachments[\s\S]*?setAttachments\(\(current\) => current\.length \? current : stagedAttachments\)/, 'failed skills must restore their staged attachments in the same context')
 assert.match(app, /api\.sendCommand[\s\S]*?setAttachments\(\(current\) => current\.length \? current : attachments\)/, 'failed slash commands must restore their staged attachments')

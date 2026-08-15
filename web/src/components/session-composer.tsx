@@ -91,6 +91,7 @@ export function SessionComposer({
     invalidateAttachmentPreparation()
     onSend()
   }
+  const hasQueuedFollowUp = value.trim().length > 0 || attachments.length > 0
 
   return (
     <div className="composer" ref={composerRef}>
@@ -155,7 +156,32 @@ export function SessionComposer({
             <PaperclipIcon size={18} />
           </button>
         </>}
-        <div className="composer-actions"><button onClick={showStopAction ? onAbort : sendNow} aria-label={showStopAction ? t('command.stopAgent') : t('detail.send')} title={showStopAction ? t('command.stopAgent') : t('detail.send')} disabled={!selected || (!showStopAction && mutationLocked) || (!showStopAction && pendingPreparation > 0) || (showStopAction && !canAbortSession)} className={showStopAction ? "btn-danger composer-send" : "btn-primary composer-send"}>{showStopAction ? <StopCircleIcon size={18} /> : <SendIcon size={18} />}</button></div>
+        <div className="composer-actions">
+          {(!showStopAction || hasQueuedFollowUp) && (
+            <button
+              type="button"
+              onClick={sendNow}
+              aria-label={t('detail.send')}
+              title={t('detail.send')}
+              disabled={!selected || mutationLocked || pendingPreparation > 0}
+              className="btn-primary composer-send"
+            >
+              <SendIcon size={18} />
+            </button>
+          )}
+          {showStopAction && (
+            <button
+              type="button"
+              onClick={onAbort}
+              aria-label={t('command.stopAgent')}
+              title={t('command.stopAgent')}
+              disabled={!selected || !canAbortSession}
+              className="btn-danger composer-stop"
+            >
+              <StopCircleIcon size={18} />
+            </button>
+          )}
+        </div>
       </div>
     </div>
   )

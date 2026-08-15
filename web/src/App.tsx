@@ -2421,6 +2421,7 @@ function App() {
   const [sessionActionPending, setSessionActionPending] = useState<"compact" | "fork" | null>(null)
   const sessionActionPendingRef = useRef<"compact" | "fork" | null>(null)
   sessionActionPendingRef.current = sessionActionPending
+  const forkFocusSessionRef = useRef<string | null>(null)
   const [activatingSkill, setActivatingSkill] = useState<string | null>(null)
   const [loadingSessionID, setLoadingSessionID] = useState<string | null>(null)
   /** The empty transcript state is only meaningful after this session's first history snapshot succeeds. */
@@ -2458,7 +2459,15 @@ function App() {
   const messagesEndRef = useRef<HTMLDivElement | null>(null)
   const composerRef = useRef<HTMLDivElement | null>(null)
   const composerInputRef = useRef<HTMLTextAreaElement | null>(null)
+  const detailHeadingRef = useRef<HTMLHeadingElement | null>(null)
   const searchInputRef = useRef<HTMLInputElement | null>(null)
+  useLayoutEffect(() => {
+    if (forkFocusSessionRef.current !== selectedID || !selectedID || mainView !== "detail") return
+    // Focus the heading rather than the textarea: this gives both desktop and mobile users a
+    // deterministic announcement without unexpectedly opening a soft keyboard on mobile.
+    detailHeadingRef.current?.focus()
+    forkFocusSessionRef.current = null
+  }, [mainView, selectedID])
   // Both gate on mainView, not view: on desktop, picking a session leaves view === "sessions" while
   // the chat is what's actually rendered, so gating on view left the buttons permanently inactive.
   const [jumpAffordances, refreshChatJumps] = useJumpAffordances(mainView === "detail", () =>
@@ -3302,6 +3311,7 @@ function App() {
       sessionActionPendingRef.current = null
       setSessionActionPending(null)
       releaseMutation(lease)
+      forkFocusSessionRef.current = forkedView.id
       await openSession(forkedView.id, forkedView.directory)
     } catch (err) {
       if (isLeaseContextCurrent(lease)) setRuntimeError((err as Error).message)
@@ -3682,7 +3692,6 @@ function App() {
 
       if (localCommand === "help" || localCommand === "commands" || localCommand === "skills") {
         setComposer("")
-        setAttachments([])
         setRuntimeError(null)
         setCommandFilter(localCommand === "skills" ? "skill" : "all")
         setHelpPage("commands")
@@ -3702,7 +3711,6 @@ function App() {
           `Model: ${activeModelOption ? `${activeModelOption.providerName} / ${activeModelOption.modelName}` : "default"}`
         ].join("\n")
         setComposer("")
-        setAttachments([])
         setRuntimeError(null)
         setOptimisticUserMessages((current) => [
           ...current,
@@ -3801,6 +3809,8 @@ function App() {
       return
     }
 
+    const promptLease = acquireMutation("prompt")
+    if (!promptLease) return
     setComposer("")
     setAttachments([])
     const optimisticMessage = createOptimisticUserMessage(selectedSession.id, text)
@@ -3811,18 +3821,31 @@ function App() {
     scrollMessagesToBottom("smooth")
 
     setBusySending(true)
-    const promptLease = acquireMutation("prompt")
-    if (!promptLease) { setBusySending(false); return }
     setRuntimeError(null)
+    let promptDispatched = false
     try {
       await api.sendPrompt(config, selectedSession.id, text, selectedSession.directory, activeModel, activeAgentID, attachments)
-       if (!isLeaseContextCurrent(promptLease)) return
-       await loadSelected(selectedSession.id, selectedSession.directory)
-       if (!isLeaseContextCurrent(promptLease)) return
-       await refreshSessions()
+      promptDispatched = true
+      if (!isLeaseContextCurrent(promptLease)) return
+      // Dispatch is the commit boundary. A history/sidebar refresh is best effort and must never
+      // turn a prompt that the server accepted into a retryable send failure or restore its draft.
+      let refreshFailed = false
+      try {
+        await loadSelected(selectedSession.id, selectedSession.directory)
+      } catch {
+        refreshFailed = true
+      }
+      try {
+        if (!(await refreshSessions(false, undefined, true))) refreshFailed = true
+      } catch {
+        refreshFailed = true
+      }
+      if (refreshFailed && isLeaseContextCurrent(promptLease)) {
+        setActionNotice("Message sent, but the session view could not be refreshed. Please refresh to see the latest state.")
+      }
     } catch (err) {
       if (isLeaseContextCurrent(promptLease)) setRuntimeError((err as Error).message)
-      if (isLeaseContextCurrent(promptLease)) {
+      if (!promptDispatched && isLeaseContextCurrent(promptLease)) {
         completionShouldPlayRef.current = false
         setAwaitingAssistantReply(false)
         setOptimisticUserMessages((current) => current.filter((message) => message.info.id !== optimisticMessage.info.id))
@@ -4865,7 +4888,7 @@ function App() {
               <ArrowLeftIcon size={20} />
             </button>
             <div className="appbar-titles">
-              <h1 title={selectedSession.title}>{selectedSession.title}</h1>
+              <h1 ref={detailHeadingRef} tabIndex={-1} title={selectedSession.title}>{selectedSession.title}</h1>
               <p title={selectedSession.directory}>{projectLabel(selectedSession.directory)}</p>
             </div>
           </div>
@@ -5171,7 +5194,7 @@ function App() {
         <main className="panel detail fade-in">
           <div className="header-row detail-header desktop-detail-header">
               <div>
-              <h2>
+              <h2 ref={detailHeadingRef} tabIndex={-1}>
                 {selectedSession ? (
                   <div className="detail-title-row">
                     {renamingSessionID === selectedSession.id && renameSource === "header" ? (
@@ -5372,7 +5395,7 @@ function App() {
             onAbort={() => void abortSession()}
           />
 
-          {runtimeError && <div className="error fade-in">✗ {runtimeError}</div>}
+          {runtimeError && <div className="error fade-in" role="alert">✗ {runtimeError}</div>}
           {actionNotice && <div className="notice info fade-in">ℹ {actionNotice}</div>}
         </main>
       )}
@@ -5901,7 +5924,7 @@ http://YOUR_PC_IP:4096/global/health</pre>
                {actionNotice && <div className="notice info fade-in">ℹ {actionNotice}</div>}
              </div>
            )}
-          {runtimeError && <p className="error">{runtimeError}</p>}
+          {runtimeError && <p className="error" role="alert">{runtimeError}</p>}
         </section>
         </ConditionalWrapper>
       )}
