@@ -82,6 +82,19 @@ type RequestOptions = {
   readTimeout?: number
 }
 
+/** The server may durably admit a mutation before a broken connection reports failure. */
+export class IndeterminateDeliveryError extends Error {
+  readonly indeterminate = true
+  constructor(message: string) {
+    super(message)
+    this.name = "IndeterminateDeliveryError"
+  }
+}
+
+export function isIndeterminateDeliveryError(error: unknown): boolean {
+  return Boolean(error && typeof error === "object" && (error as { indeterminate?: boolean }).indeterminate === true)
+}
+
 /** Append a v2 `location[directory]` query param so a request targets the selected session's project. */
 function withLocation(path: string, directory?: string): string {
   if (!directory) return path
@@ -98,12 +111,18 @@ function withLocation(path: string, directory?: string): string {
 async function v2Raw(config: ServerConfig, path: string, options: RequestOptions = {}): Promise<{ status: number; body: unknown }> {
   const method = options.method ?? "GET"
   if (isDesktopPlatform()) {
-    const response = await desktopRequest(config, {
-      path,
-      method,
-      body: options.body,
-      readTimeout: options.readTimeout
-    })
+    let response
+    try {
+      response = await desktopRequest(config, {
+        path,
+        method,
+        body: options.body,
+        readTimeout: options.readTimeout
+      })
+    } catch (error) {
+      if (method === "POST") throw new IndeterminateDeliveryError((error as Error).message)
+      throw error
+    }
     return { status: response.status, body: response.data }
   }
 
@@ -124,7 +143,7 @@ async function v2Raw(config: ServerConfig, path: string, options: RequestOptions
         readTimeout: options.readTimeout ?? 30_000
       })
     } catch {
-      throw new Error(`Cannot reach ${config.host}:${config.port}.`)
+      throw new IndeterminateDeliveryError(`Cannot reach ${config.host}:${config.port}.`)
     }
     if (response.status >= 400) {
       if (response.status === 401) throw new Error(responseDetail(response.data) || unauthorizedDetail(config))
@@ -141,7 +160,7 @@ async function v2Raw(config: ServerConfig, path: string, options: RequestOptions
       body: options.body === undefined ? undefined : JSON.stringify(options.body)
     })
   } catch {
-    throw new Error(`Cannot reach ${config.host}:${config.port}.`)
+    throw new IndeterminateDeliveryError(`Cannot reach ${config.host}:${config.port}.`)
   }
 
   if (!response.ok) {
@@ -155,7 +174,12 @@ async function v2Raw(config: ServerConfig, path: string, options: RequestOptions
     throw new Error(detail)
   }
   if (response.status === 204) return { status: 204, body: undefined }
-  return { status: response.status, body: await response.json() }
+  try {
+    return { status: response.status, body: await response.json() }
+  } catch (error) {
+    if (method === "POST") throw new IndeterminateDeliveryError((error as Error).message)
+    throw error
+  }
 }
 
 /**
@@ -355,7 +379,7 @@ export const opencode2Api = {
     return Promise.reject(new Error("Session actions are not supported on OpenCode 2"))
   },
 
-  async sendPrompt(config: ServerConfig, sessionID: string, text: string, _directory?: string, model?: ModelSelection, agentID?: string, attachments: AttachmentPart[] = []) {
+  async sendPrompt(config: ServerConfig, sessionID: string, text: string, _directory?: string, model?: ModelSelection, agentID?: string, attachments: AttachmentPart[] = [], delivery?: "steer" | "queue") {
     // Model and agent are per-session on v2; apply them before prompting so the next turn uses them.
     if (model) {
       await v2Request<boolean>(config, `/api/session/${encodeURIComponent(sessionID)}/model`, {
@@ -369,16 +393,21 @@ export const opencode2Api = {
         body: { agent: agentID }
       }).catch(() => undefined)
     }
-    await v2Request<boolean>(config, `/api/session/${encodeURIComponent(sessionID)}/prompt`, {
+    const promptDelivery = delivery ?? "steer"
+    try { await v2Request<boolean>(config, `/api/session/${encodeURIComponent(sessionID)}/prompt`, {
       method: "POST",
       body: {
         text,
         files: attachments.map((attachment) => ({ uri: attachment.url, name: attachment.filename || "attachment" })),
-        delivery: "steer",
+        delivery: promptDelivery,
         resume: true
       },
       readTimeout: 300_000
-    })
+      })
+    } catch (error) {
+      if (isIndeterminateDeliveryError(error)) throw error
+      throw error
+    }
     return true
   },
 
@@ -395,11 +424,11 @@ export const opencode2Api = {
         body: { agent: agentID }
       }).catch(() => undefined)
     }
-    await v2Request<boolean>(config, `/api/session/${encodeURIComponent(sessionID)}/command`, {
+    try { await v2Request<boolean>(config, `/api/session/${encodeURIComponent(sessionID)}/command`, {
       method: "POST",
       body: { command, arguments: argumentsText || undefined },
       readTimeout: 300_000
-    })
+    }) } catch (error) { throw error }
     return { info: { id: "", role: "user", sessionID, time: { created: Date.now() } }, parts: [] } as MessageEnvelope
   },
 
@@ -407,11 +436,11 @@ export const opencode2Api = {
     // `POST /api/session/{id}/skill` (`v2.session.skill`) activates a skill by appending a skill
     // message and resuming execution. The body is exactly `{ skill, resume: true }` — the endpoint
     // rejects extra properties — and the server answers 204, which `v2Request` resolves to `true`.
-    await v2Request<boolean>(config, `/api/session/${encodeURIComponent(sessionID)}/skill`, {
+    try { await v2Request<boolean>(config, `/api/session/${encodeURIComponent(sessionID)}/skill`, {
       method: "POST",
       body: toSkillActivationBody(skill),
       readTimeout: 300_000
-    })
+    }) } catch (error) { throw error }
     return true
   },
 

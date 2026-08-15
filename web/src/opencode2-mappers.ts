@@ -105,7 +105,11 @@ export function toMessageEnvelope(message: V2Message, sessionID: string): Messag
     id: message.id,
     role,
     sessionID,
-    time: { created: message.time.created, completed: message.time.completed }
+    time: { created: message.time.created, completed: message.time.completed },
+    type: message.type,
+    compactionStatus: message.type === "compaction" && (message.status === "running" || message.status === "completed" || message.status === "failed")
+      ? message.status as "running" | "completed" | "failed"
+      : undefined
   }
 
   const parts: MessagePart[] = []

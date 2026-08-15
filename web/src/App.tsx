@@ -4,6 +4,7 @@ import { Capacitor, type PluginListenerHandle } from "@capacitor/core"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { api, isValidServerConfig } from "./api"
+import { isIndeterminateDeliveryError } from "./opencode2-client"
 import {
   createDesktopOpenCodeEventSubscription,
   desktopProfileID,
@@ -301,7 +302,8 @@ function toRenderedMessage(message: MessageEnvelope): MessageEnvelope & { text: 
 function messagesHaveSameContent(left: MessageEnvelope[], right: MessageEnvelope[]): boolean {
   return left.length === right.length && left.every((message, index) => {
     const candidate = right[index]
-    return candidate?.info.role === message.info.role && extractText(candidate) === extractText(message)
+    return candidate?.info.role === message.info.role && candidate?.info.type === message.info.type
+      && candidate?.info.compactionStatus === message.info.compactionStatus && extractText(candidate) === extractText(message)
   })
 }
 
@@ -2421,6 +2423,27 @@ function App() {
   const [sessionActionPending, setSessionActionPending] = useState<"compact" | "fork" | null>(null)
   const sessionActionPendingRef = useRef<"compact" | "fork" | null>(null)
   sessionActionPendingRef.current = sessionActionPending
+  const compactObservationRef = useRef<{ context: string; baseline: Set<string>; observed: Set<string> } | null>(null)
+  useEffect(() => {
+    const observation = compactObservationRef.current
+    if (!observation || sessionActionPending !== "compact") return
+    const context = JSON.stringify({ profileID: activeProfileID, configKey: configKey(config), sessionID: selectedID })
+    if (observation.context !== context || !selectedID) return
+    const compactions = messages.filter((message) => message.info.type === "compaction")
+    for (const message of compactions) {
+      if (message.info.compactionStatus === "running") observation.observed.add(message.info.id)
+    }
+    const terminal = compactions.find((message) =>
+      (message.info.compactionStatus === "completed" || message.info.compactionStatus === "failed")
+      && !observation.baseline.has(message.info.id)
+      && (observation.observed.has(message.info.id) || !compactions.some((item) => item.info.id === message.info.id && item.info.compactionStatus === "running"))
+    )
+    if (!terminal) return
+    compactObservationRef.current = null
+    setSessionActionPending(null)
+    sessionActionPendingRef.current = null
+    setActionNotice(terminal.info.compactionStatus === "failed" ? t('detail.compactFailed') : t('detail.compactCompleted'))
+  }, [activeProfileID, config, messages, selectedID, sessionActionPending, t])
   const forkFocusSessionRef = useRef<string | null>(null)
   const [activatingSkill, setActivatingSkill] = useState<string | null>(null)
   const [loadingSessionID, setLoadingSessionID] = useState<string | null>(null)
@@ -3267,15 +3290,25 @@ function App() {
     setSessionActionPending("compact")
     setRuntimeError(null)
     setActionNotice(null)
+    compactObservationRef.current = {
+      context: JSON.stringify({ profileID: activeProfileID, configKey: configKey(config), sessionID: selectedSession.id }),
+      baseline: new Set(messages.filter((message) => message.info.type === "compaction").map((message) => message.info.id)),
+      observed: new Set()
+    }
     try {
       await api.compactSession(config, selectedSession.id, selectedSession.directory)
       if (isLeaseContextCurrent(lease)) setActionNotice(t('detail.compactQueued'))
     } catch (err) {
-      if (isLeaseContextCurrent(lease)) setRuntimeError((err as Error).message)
-    } finally {
+      compactObservationRef.current = null
       if (isLeaseContextCurrent(lease)) {
         setSessionActionPending(null)
         sessionActionPendingRef.current = null
+        setRuntimeError((err as Error).message)
+      }
+    } finally {
+      if (isLeaseContextCurrent(lease)) {
+        // Keep the logical action pending after a successful acknowledgement. The server performs
+        // compaction asynchronously; the refresh metadata effect releases it at terminal state.
       }
       releaseMutation(lease)
     }
@@ -3285,6 +3318,7 @@ function App() {
     if (config.backend !== "opencode2" || !selectedSession || sessionActionPending || sessionActionPendingRef.current || isWorking || busySending || isSessionMutationLocked()
       || !messages.some((message) => message.info.role === "user")) return
     const original = selectedSession
+    const forkDraft = { text: composer, attachments: [...attachments] }
     const forkContext = {
       profileID: activeProfileID,
       configKey: configKey(config),
@@ -3313,6 +3347,13 @@ function App() {
       releaseMutation(lease)
       forkFocusSessionRef.current = forkedView.id
       await openSession(forkedView.id, forkedView.directory)
+      // A fork copies server history, not the unsent composer. Restore the snapshot only when the
+      // navigation that this request initiated still owns the destination context.
+      const childContext = { profileID: activeProfileID, configKey: configKey(config), sessionID: forkedView.id }
+      if (mutationCoordinator.isContextCurrent(childContext) && activeContextRef.current.sessionID === forkedView.id) {
+        setComposer(forkDraft.text)
+        setAttachments(forkDraft.attachments)
+      }
     } catch (err) {
       if (isLeaseContextCurrent(lease)) setRuntimeError((err as Error).message)
     } finally {
@@ -3594,8 +3635,8 @@ function App() {
           setLoadingSessionID((activeID) => (activeID === created.id ? null : activeID))
         }
       }
-    } catch (err) {
-      if (isLeaseContextCurrent(lease)) {
+      } catch (err) {
+        if (isLeaseContextCurrent(lease)) {
         setPickerError((err as Error).message)
         setRuntimeError((err as Error).message)
       }
@@ -3660,8 +3701,14 @@ function App() {
         completionShouldPlayRef.current = false
         setAwaitingAssistantReply(false)
         setOptimisticUserMessages((current) => current.filter((message) => message.info.id !== optimisticMessage.info.id))
-        setComposer((current) => current || input)
-        setAttachments((current) => current.length ? current : stagedAttachments)
+          if (!isIndeterminateDeliveryError(err)) {
+            setComposer((current) => current || input)
+            setAttachments((current) => current.length ? current : stagedAttachments)
+          } else {
+            setActionNotice(t('detail.deliveryIndeterminate'))
+            void loadSelected(session.id, session.directory, true).catch(() => undefined)
+            void refreshSessions(false, undefined, true).catch(() => undefined)
+          }
         setActionNotice(null)
         setRuntimeError(t('help.skillActivationFailed', { skill: skill.name, message: (err as Error).message }))
       }
@@ -3796,9 +3843,15 @@ function App() {
           completionShouldPlayRef.current = false
           setAwaitingAssistantReply(false)
           setOptimisticUserMessages((current) => current.filter((message) => message.info.id !== optimisticMessage.info.id))
-          setComposer((current) => current || text)
-          setAttachments((current) => current.length ? current : attachments)
-          setRuntimeError((err as Error).message)
+          if (!isIndeterminateDeliveryError(err)) {
+            setComposer((current) => current || text)
+            setAttachments((current) => current.length ? current : attachments)
+            setRuntimeError((err as Error).message)
+          } else {
+            setActionNotice(t('detail.deliveryIndeterminate'))
+            void loadSelected(selectedSession.id, selectedSession.directory, true).catch(() => undefined)
+            void refreshSessions(false, undefined, true).catch(() => undefined)
+          }
         }
       } finally {
         if (isLeaseContextCurrent(commandLease)) {
@@ -3824,7 +3877,7 @@ function App() {
     setRuntimeError(null)
     let promptDispatched = false
     try {
-      await api.sendPrompt(config, selectedSession.id, text, selectedSession.directory, activeModel, activeAgentID, attachments)
+      await (api.sendPrompt as unknown as (...args: [ServerConfig, string, string, string, ModelSelection | undefined, string | undefined, AttachmentPart[], "steer" | "queue"]) => Promise<unknown>)(config, selectedSession.id, text, selectedSession.directory, activeModel, activeAgentID, attachments, isWorking ? "queue" : "steer")
       promptDispatched = true
       if (!isLeaseContextCurrent(promptLease)) return
       // Dispatch is the commit boundary. A history/sidebar refresh is best effort and must never
@@ -3844,8 +3897,12 @@ function App() {
         setActionNotice("Message sent, but the session view could not be refreshed. Please refresh to see the latest state.")
       }
     } catch (err) {
-      if (isLeaseContextCurrent(promptLease)) setRuntimeError((err as Error).message)
-      if (!promptDispatched && isLeaseContextCurrent(promptLease)) {
+      if (isLeaseContextCurrent(promptLease) && isIndeterminateDeliveryError(err)) {
+        setActionNotice(t('detail.deliveryIndeterminate'))
+        void loadSelected(selectedSession.id, selectedSession.directory, true).catch(() => undefined)
+        void refreshSessions(false, undefined, true).catch(() => undefined)
+      } else if (isLeaseContextCurrent(promptLease)) setRuntimeError((err as Error).message)
+      if (!promptDispatched && !isIndeterminateDeliveryError(err) && isLeaseContextCurrent(promptLease)) {
         completionShouldPlayRef.current = false
         setAwaitingAssistantReply(false)
         setOptimisticUserMessages((current) => current.filter((message) => message.info.id !== optimisticMessage.info.id))

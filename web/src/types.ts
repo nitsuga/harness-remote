@@ -158,6 +158,9 @@ export type MessageEnvelope = {
       created: number
       completed?: number
     }
+    /** V2 synthetic message metadata used by asynchronous compaction actions. */
+    type?: string
+    compactionStatus?: "running" | "completed" | "failed"
   }
   parts: MessagePart[]
 }

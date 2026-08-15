@@ -28,7 +28,7 @@ assert.match(app, /function changeAgent\([\s\S]*?loadAgentsRequestRef\.current \
 assert.ok(app.includes('agentOptions.filter((agent) => agent.mode === "primary" || agent.mode === "all")'), 'agent picker should expose primary agents such as build and plan')
 assert.ok(app.includes('activeAgent?.id ?? "build"'), 'agent selection should default to build')
 assert.ok(app.includes('id="agent-select"'), 'AI sheet should render an agent selector')
-assert.ok(app.includes('api.sendPrompt(config, selectedSession.id, text, selectedSession.directory, activeModel, activeAgentID, attachments)'), 'chat prompts should use selected agent and carry staged attachments')
+assert.ok(app.includes('attachments, isWorking ? "queue" : "steer"'), 'chat prompts should use selected agent, staged attachments, and queue follow-ups while working')
 assert.ok(app.includes('api.sendCommand(config, selectedSession.id, command, args, selectedSession.directory, activeModel, activeAgentID)'), 'slash commands should use selected agent')
 assert.ok(app.includes('session-context-strip'), 'detail UX should expose compact mobile context chips')
 assert.ok(app.includes('activeDetailSheet === "ai"'), 'model picker should open in the bottom sheet')

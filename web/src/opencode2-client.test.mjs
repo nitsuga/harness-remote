@@ -453,6 +453,10 @@ assert.deepEqual(toSession(forkedInfo), {
 // regression suites check App.tsx/api.ts: the node runner cannot import opencode2-client.ts (its
 // extensionless sibling imports), so the exact request shapes are asserted textually.
 const clientSource = readFileSync(new URL('./opencode2-client.ts', import.meta.url), 'utf8')
+assert.match(clientSource, /delivery: promptDelivery/, 'prompt delivery must be selected explicitly for idle and queued follow-ups')
+assert.match(clientSource, /delivery\?: "steer" \| "queue"/, 'v2 prompt delivery must use the protocol enum')
+assert.match(clientSource, /IndeterminateDeliveryError/, 'transport loss after a mutation request must remain indeterminate')
+assert.match(readFileSync(new URL('./opencode2-mappers.ts', import.meta.url), 'utf8'), /compactionStatus/, 'compaction terminal metadata must survive history mapping')
 assert.ok(
   clientSource.includes('`/api/session/${encodeURIComponent(sessionID)}/compact`, {\n      method: "POST",\n      body: {}\n    })'),
   'compact must POST an empty body — both payload fields are optional and the response is an acknowledgement'
