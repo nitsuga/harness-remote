@@ -3707,19 +3707,36 @@ function App() {
 
   async function deleteSession(sessionID: string) {
     if (isSessionMutationLocked()) return
+    // Capture the target namespace and directory before awaiting the delete. Navigation may change
+    // the selected session while the server is processing this request, but a successful delete
+    // still needs a tombstone in the same profile/config namespace.
+    const deleteTarget = sessions.find((session) => session.id === sessionID) ?? sessionToDelete
+    const deleteContext = {
+      profileID: activeProfileID,
+      configKey: configKey(config),
+      sessionID: sessionID
+    }
+    const deleteDirectory = deleteTarget?.directory
     const lease = acquireMutation("delete", sessionID)
     if (!lease) return
     try {
-      await api.deleteSession(config, sessionID, sessionToDelete?.directory)
-      if (!isLeaseContextCurrent(lease)) return
-      removedSessionIDsRef.current.add(sessionID)
-      if (selectedID === sessionID) {
+      await api.deleteSession(config, sessionID, deleteDirectory)
+      // Lease currency includes the session, so it is intentionally too strict for this part:
+      // moving to another session does not make persistence of this deletion unsafe. Profile/config
+      // changes do, because their session list is a different namespace.
+      const currentDeleteContext = mutationCoordinator.getContext()
+      const sameNamespace = currentDeleteContext?.profileID === deleteContext.profileID
+        && currentDeleteContext.configKey === deleteContext.configKey
+      if (sameNamespace) {
+        removedSessionIDsRef.current.add(sessionID)
+        setSessions((current) => current.filter((item) => item.id !== sessionID))
+      }
+      if (sameNamespace && isLeaseContextCurrent(lease) && currentDeleteContext?.sessionID === sessionID) {
         // Remove the row and invalidate navigation before any refresh can reintroduce it.
         replaceMutationContext(null)
         // The tombstone intentionally survives this session-only context replacement so an
         // eventual-consistency refresh (and navigation) cannot resurrect the deleted row.
         removedSessionIDsRef.current.add(sessionID)
-        setSessions((current) => current.filter((item) => item.id !== sessionID))
         setSelectedID(null)
         setMessages([])
         loadedMessagesRef.current = []

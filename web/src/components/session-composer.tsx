@@ -56,7 +56,18 @@ export function SessionComposer({
       generation: attachmentRequestState.current.generation + 1
     }
   }
-  const [pendingPreparation, setPendingPreparation] = useState(0)
+  // Keep the count tied to both the context and the generation. A decode from the previous
+  // session may still be settling after navigation; it must not leave the replacement composer
+  // looking busy (or make a later visit to the same session inherit that count).
+  const [pendingPreparationState, setPendingPreparationState] = useState({
+    contextKey: attachmentContextKey,
+    generation: 0,
+    count: 0
+  })
+  const pendingPreparation = pendingPreparationState.contextKey === attachmentContextKey
+    && pendingPreparationState.generation === attachmentRequestState.current.generation
+    ? pendingPreparationState.count
+    : 0
   const invalidateAttachmentPreparation = () => {
     attachmentRequestState.current.generation += 1
   }
@@ -103,18 +114,29 @@ export function SessionComposer({
             event.target.value = ""
             if (!chosen.length) return
             const requestGeneration = attachmentRequestState.current.generation
-            setPendingPreparation((count) => count + 1)
+            const preparationContext = attachmentContextKey
+            const preparationGeneration = requestGeneration
+            setPendingPreparationState((current) => current.contextKey === preparationContext && current.generation === preparationGeneration
+              ? { ...current, count: current.count + 1 }
+              : { contextKey: preparationContext, generation: preparationGeneration, count: 1 })
             try {
               const prepared = await Promise.all(chosen.map((file) => fileToAttachment(file)))
               if (requestGeneration !== attachmentRequestState.current.generation) return
-              onAttachmentsChange((current) => [...current, ...prepared])
+              // The picker is disabled while work is pending, but keep the invariant here too:
+              // multiple native change events can still be queued before React paints disabled.
+              onAttachmentsChange((current) => [
+                ...current,
+                ...prepared.slice(0, Math.max(0, ATTACHMENT_MAX_COUNT - current.length))
+              ])
             } catch (err) {
               if (requestGeneration === attachmentRequestState.current.generation) onAttachmentError((err as Error).message)
             } finally {
-              setPendingPreparation((count) => Math.max(0, count - 1))
+              setPendingPreparationState((current) => current.contextKey === preparationContext && current.generation === preparationGeneration
+                ? { ...current, count: Math.max(0, current.count - 1) }
+                : current)
             }
           }} />
-          <button className="btn-ghost btn-icon" title={t('detail.attachImage')} aria-label={t('detail.attachImage')} onClick={() => attachmentInputRef.current?.click()} disabled={!selected || mutationLocked || attachments.length >= ATTACHMENT_MAX_COUNT}>
+          <button className="btn-ghost btn-icon" title={t('detail.attachImage')} aria-label={t('detail.attachImage')} onClick={() => attachmentInputRef.current?.click()} disabled={!selected || mutationLocked || pendingPreparation > 0 || attachments.length >= ATTACHMENT_MAX_COUNT}>
             <PaperclipIcon size={18} />
           </button>
         </>}
