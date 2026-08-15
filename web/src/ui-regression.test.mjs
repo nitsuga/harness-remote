@@ -337,6 +337,14 @@ assert.match(composerView, /disabled=\{!selected \|\| \(!showStopAction && mutat
 assert.match(app, /const canAbortSession = Boolean\(selectedSession && isWorking[\s\S]*?activeWorkingLease\.kind === "skill"/, 'Stop must be allowed only as an out-of-band action for active prompt, command, or skill work')
 assert.match(app, /const activeLease = mutationCoordinator\.getActiveLease\(\)[\s\S]*?const lease = activeLease \? null : acquireMutation\("abort"\)/, 'abort must not steal the active prompt lease or release it as if it owned it')
 assert.match(app, /session\.stop[\s\S]*?disabled: !canAbortSession/, 'native menu and palette Stop entries must use the abort-specific availability guard')
+assert.ok(app.includes('const abortInFlightRef = useRef(new Map<string, Promise<void>>())'), 'abort requests need a synchronous per-context in-flight registry')
+assert.match(app, /abortInFlightRef\.current\.has\(abortKey\)[\s\S]*?abortInFlightRef\.current\.set\(abortKey, operation\)/, 'repeated Stop must deduplicate and presentation must share handler availability')
+assert.match(app, /activeLease\.context\.profileID === abortContext\.profileID[\s\S]*?activeLease\.context\.configKey === abortContext\.configKey/, 'abort authorization must match the full active lease context')
+assert.match(app, /const isSessionMutationLocked = \(\) => mutationCoordinator\.getActiveLease\(\) !== null \|\| abortInFlightRef\.current\.size > 0/, 'an abort remains a mutation lock after the original lease releases')
+assert.ok(composerView.includes('canAbortSession'), 'composer Stop presentation must receive the abort availability guard')
+assert.match(app, /setAttachments\(\[\]\)[\s\S]*?api\.sendCommand/, 'slash command dispatch must clear staged attachments')
+assert.match(app, /setAttachments\(\[\]\)[\s\S]*?api\.sendSkill/, 'skill dispatch must clear staged attachments')
+assert.ok(app.includes('readSessionTombstones') && app.includes('persistSessionTombstones'), 'session tombstones must hydrate and persist safely')
 
 // A run bubble merges action groups that a message boundary split apart. Consecutive replies with
 // nothing groupable in them must stay separate, or two answers to two queued prompts render as one.

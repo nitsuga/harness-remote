@@ -41,6 +41,8 @@ assert.ok(app.includes('const removedSessionIDsRef = useRef(new Map<string, Set<
 assert.ok(app.includes('removedSessionIDsRef.current.get(refreshContext.profileID + "\\u0000" + refreshContext.configKey)'), 'session refreshes should filter tombstones for the active profile/server namespace')
 assert.ok(app.includes('removedSessionIDsRef.current.set(tombstoneKey, tombstones)'), 'deletes should persist tombstones in their captured profile/server namespace')
 assert.ok(!app.includes('removedSessionIDsRef.current.clear()'), 'profile/server transitions must not globally clear tombstones')
+assert.ok(app.includes('REMOVED_SESSION_STORAGE_KEY'), 'tombstones need a durable storage namespace')
+assert.match(app, /authoritativeIDs = new Set\(hydratedItems\.map/, 'only an authoritative list may reconcile tombstones')
 assert.ok(app.includes('modelSearchText'), 'model picker should support searching models')
 assert.ok(app.includes('id="model-search"'), 'model picker should render a searchable model input')
 assert.ok(app.includes("api.createSession(config, t('sessions.remoteSessionTitle'), activeModel, directory)"), 'new sessions should inherit the selected model and use a translated remote title')

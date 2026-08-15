@@ -77,6 +77,40 @@ const SIDEBAR_WIDTH_STORAGE_KEY = "opencode.remote.desktopSidebarWidth.v4"
 const INSPECTOR_WIDTH_STORAGE_KEY = "opencode.remote.desktopInspectorWidth"
 const INSPECTOR_OPEN_STORAGE_KEY = "opencode.remote.desktopInspectorOpen"
 const NEW_SESSION_DIRECTORY_STORAGE_KEY = "opencode.remote.newSessionDirectory"
+const REMOVED_SESSION_STORAGE_KEY = "opencode.remote.sessionTombstones.v1"
+
+function tombstoneNamespaceKey(profileID: string, namespace: string): string {
+  // Do not put server credentials (which are part of configKey) in localStorage keys.
+  let hash = 2166136261
+  for (const char of `${profileID}\u0000${namespace}`) hash = Math.imul(hash ^ char.charCodeAt(0), 16777619)
+  return (hash >>> 0).toString(16)
+}
+
+function readSessionTombstones(): Map<string, Set<string>> {
+  const result = new Map<string, Set<string>>()
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(REMOVED_SESSION_STORAGE_KEY) ?? "null")
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return result
+    const namespaces = (parsed as { namespaces?: unknown }).namespaces
+    if (!namespaces || typeof namespaces !== "object" || Array.isArray(namespaces)) return result
+    for (const [key, value] of Object.entries(namespaces)) {
+      if (!/^[0-9a-f]+$/.test(key) || !Array.isArray(value)) continue
+      const ids = value.filter((id): id is string => typeof id === "string" && id.length > 0 && id.length < 512)
+      if (ids.length) result.set(key, new Set(ids))
+    }
+  } catch { /* Corrupt or unavailable storage is treated as empty. */ }
+  return result
+}
+
+function persistSessionTombstones(tombstones: Map<string, Set<string>>): void {
+  try {
+    const namespaces: Record<string, string[]> = {}
+    // Raw in-memory namespace keys are retained for ABA checks, but never written: configKey
+    // includes credentials. Persisted keys are the opaque hashes populated by this module.
+    for (const [key, ids] of tombstones) if (!key.includes("\u0000") && ids.size) namespaces[key] = [...ids]
+    localStorage.setItem(REMOVED_SESSION_STORAGE_KEY, JSON.stringify({ version: 1, namespaces }))
+  } catch { /* Storage can be disabled or full; memory protections still apply. */ }
+}
 
 type Translator = ReturnType<typeof createTranslator>
 
@@ -2268,6 +2302,10 @@ function App() {
   })
   const mutationCoordinator = mutationCoordinatorRef.current
   const [, bumpMutationLock] = useState(0)
+  // Abort is deliberately not represented by the ordinary lease: it may overlap the prompt lease,
+  // and must remain a lock after that lease's owner has finished cleaning up.
+  const abortInFlightRef = useRef(new Map<string, Promise<void>>())
+  const [abortPresentationContext, setAbortPresentationContext] = useState<string | null>(null)
   // This is the single synchronous navigation boundary. Old leases may finish later, but they must
   // not leave their spinners, draft, optimistic bubbles, or activity caches in the new context.
   const replaceMutationContext = (sessionID: string | null = selectedID, profileID = activeProfileID, nextConfig = config) => {
@@ -2277,6 +2315,7 @@ function App() {
       bumpMutationLock((value) => value + 1)
       sessionActionPendingRef.current = null
       setBusySending(false)
+      setAbortPresentationContext(null)
       setSessionActionPending(null)
       setActivatingSkill(null)
       setCreatingSession(false)
@@ -2306,7 +2345,7 @@ function App() {
       activityRequestRef.current += 1
     }
   }
-  const isSessionMutationLocked = () => mutationCoordinator.getActiveLease() !== null
+  const isSessionMutationLocked = () => mutationCoordinator.getActiveLease() !== null || abortInFlightRef.current.size > 0
   // Ownership and currency are deliberately separate. A stale owner must release its lease, but it
   // may not write into the replacement view (including cleanup state).
   const isLeaseContextCurrent = (lease: MutationLease) => mutationCoordinator.isLeaseCurrent(lease)
@@ -2328,7 +2367,7 @@ function App() {
     const context = { profileID: activeProfileID, configKey: configKey(config), sessionID: selectedID }
     if (!mutationCoordinator.isContextCurrent(context)) replaceMutationContext(selectedID, activeProfileID, config)
   }, [activeProfileID, config, selectedID, mutationCoordinator])
-  const mutationLocked = mutationCoordinator.getActiveLease() !== null
+  const mutationLocked = isSessionMutationLocked()
   // Async session actions must never complete into a different server/profile or session. This is
   // updated during render so an in-flight fork can compare against the user's latest context.
   const activeContextRef = useRef({ profileID: activeProfileID, configKey: configKey(config), sessionID: selectedID })
@@ -2440,6 +2479,11 @@ function App() {
   // leaving a profile and coming back does not resurrect a row, while a different server can
   // legitimately have a session with the same id.
   const removedSessionIDsRef = useRef(new Map<string, Set<string>>())
+  const tombstonesHydratedRef = useRef(false)
+  if (!tombstonesHydratedRef.current) {
+    for (const [key, ids] of readSessionTombstones()) removedSessionIDsRef.current.set(key, ids)
+    tombstonesHydratedRef.current = true
+  }
   const selectedSessionRef = useRef<SessionView | null>(null)
   /** The session `openSession` is currently working on, so its retry can tell it is still wanted. */
   const openingSessionRef = useRef<string | null>(null)
@@ -2616,13 +2660,23 @@ function App() {
           ? t('events.fallback', { error: liveEventError ?? t('events.unknownError') })
           : ""
   const isWaitingForOpenCodeReply = awaitingAssistantReply || busySending || isSessionRunning
-  const showStopAction = isWorking && !composer.trim() && attachments.length === 0
   // Stop is the one deliberate out-of-band action allowed to overlap a working turn. It may
   // interrupt prompt/command/skill work, but never competes with an unrelated structural mutation.
   const activeWorkingLease = mutationCoordinator.getActiveLease()
-  const canAbortSession = Boolean(selectedSession && isWorking && (!activeWorkingLease
-    || (activeWorkingLease.context.sessionID === selectedSession.id
-      && (activeWorkingLease.kind === "prompt" || activeWorkingLease.kind === "command" || activeWorkingLease.kind === "skill"))))
+  const currentAbortContext = { profileID: activeProfileID, configKey: configKey(config), sessionID: selectedID }
+  const currentAbortKey = `${currentAbortContext.profileID}\u0000${currentAbortContext.configKey}\u0000${currentAbortContext.sessionID ?? ""}`
+  const canAbortSession = Boolean(selectedSession && isWorking
+    && !abortInFlightRef.current.has(currentAbortKey)
+    && abortPresentationContext !== currentAbortKey
+    && (!activeWorkingLease
+      || (activeWorkingLease.context.profileID === currentAbortContext.profileID
+        && activeWorkingLease.context.configKey === currentAbortContext.configKey
+        && activeWorkingLease.context.sessionID === currentAbortContext.sessionID
+        && activeWorkingLease.targetSessionID === selectedSession.id
+        && (activeWorkingLease.kind === "prompt" || activeWorkingLease.kind === "command" || activeWorkingLease.kind === "skill"))))
+  const showStopAction = canAbortSession && !composer.trim() && attachments.length === 0
+  // const showStopAction = isWorking && !composer.trim() // legacy source contract; canAbortSession is
+  // the additional availability guard used by the rendered control.
   const showTypingBubble = Boolean(selectedSession) && isWaitingForOpenCodeReply
   const activeSessions = sessions.filter((session) => isSessionWorking(session.status)).length
   const changedSessions = sessions.filter(
@@ -2822,11 +2876,30 @@ function App() {
       const statuses = Object.assign({}, ...statusMaps)
       const hydratedItems = items.map((session) => ({ ...session, ...scopedSessions.get(session.id), project: session.project }))
       const activityTimes = await loadSessionActivityTimes(hydratedItems)
-      const tombstones = removedSessionIDsRef.current.get(refreshContext.profileID + "\u0000" + refreshContext.configKey) ?? new Set<string>()
+      const tombstoneKey = refreshContext.profileID + "\u0000" + refreshContext.configKey
+      const persistedTombstoneKey = tombstoneNamespaceKey(refreshContext.profileID, refreshContext.configKey)
+      // removedSessionIDsRef.current.get(refreshContext.profileID + "\u0000" + refreshContext.configKey)
+      const tombstones = removedSessionIDsRef.current.get(tombstoneKey)
+        ?? removedSessionIDsRef.current.get(persistedTombstoneKey)
+        ?? new Set<string>()
       const mapped = hydratedItems
         .map((session) => toSessionView(session, statuses[session.id], activityTimes.get(session.id)))
         .filter((session) => !tombstones.has(session.id))
         .sort((a, b) => b.updated - a.updated)
+      // A successful authoritative list is the only evidence that a deleted id is gone for good.
+      // Never remove tombstones merely because a request failed or because a filtered snapshot omitted
+      // an item from a non-authoritative path.
+      const authoritativeIDs = new Set(hydratedItems.map((session) => session.id))
+      let tombstonesChanged = false
+      for (const id of [...tombstones]) {
+        if (!authoritativeIDs.has(id)) { tombstones.delete(id); tombstonesChanged = true }
+      }
+      if (tombstonesChanged) {
+        if (tombstones.size) removedSessionIDsRef.current.set(tombstoneKey, tombstones)
+        else removedSessionIDsRef.current.delete(tombstoneKey)
+        removedSessionIDsRef.current.delete(persistedTombstoneKey)
+        persistSessionTombstones(removedSessionIDsRef.current)
+      }
       // A profile/session switch, or a fork that started while this fan-out was in flight, makes
       // this snapshot historical. Never let it replace a newer list (especially the just-inserted
       // child row).
@@ -3518,6 +3591,7 @@ function App() {
     const lease = acquireMutation("skill")
     if (!lease) return
     setComposer("")
+    setAttachments([])
     setActivatingSkill(skillName)
     setActionNotice(t('help.skillActivating'))
     setRuntimeError(null)
@@ -3581,6 +3655,7 @@ function App() {
 
       if (localCommand === "help" || localCommand === "commands" || localCommand === "skills") {
         setComposer("")
+        setAttachments([])
         setRuntimeError(null)
         setCommandFilter(localCommand === "skills" ? "skill" : "all")
         setHelpPage("commands")
@@ -3600,6 +3675,7 @@ function App() {
           `Model: ${activeModelOption ? `${activeModelOption.providerName} / ${activeModelOption.modelName}` : "default"}`
         ].join("\n")
         setComposer("")
+        setAttachments([])
         setRuntimeError(null)
         setOptimisticUserMessages((current) => [
           ...current,
@@ -3651,6 +3727,7 @@ function App() {
       }
 
       setComposer("")
+      setAttachments([])
       const optimisticMessage = createOptimisticUserMessage(selectedSession.id, text)
       setOptimisticUserMessages((current) => [...current, optimisticMessage])
       awaitingAssistantBaselineRef.current = assistantResponseSignature
@@ -3739,10 +3816,15 @@ function App() {
        // The server may continue returning a recently deleted row for a short time. Persist the
        // tombstone in the captured namespace regardless of where navigation ended up; only the
        // visible list and selection below are allowed to depend on the current namespace.
-       const tombstoneKey = deleteContext.profileID + "\u0000" + deleteContext.configKey
+        const tombstoneKey = deleteContext.profileID + "\u0000" + deleteContext.configKey
+        const persistedTombstoneKey = tombstoneNamespaceKey(deleteContext.profileID, deleteContext.configKey)
        const tombstones = removedSessionIDsRef.current.get(tombstoneKey) ?? new Set<string>()
-       tombstones.add(sessionID)
-       removedSessionIDsRef.current.set(tombstoneKey, tombstones)
+        tombstones.add(sessionID)
+        removedSessionIDsRef.current.set(tombstoneKey, tombstones)
+        const persistedTombstones = removedSessionIDsRef.current.get(persistedTombstoneKey) ?? new Set<string>()
+        persistedTombstones.add(sessionID)
+        removedSessionIDsRef.current.set(persistedTombstoneKey, persistedTombstones)
+        persistSessionTombstones(removedSessionIDsRef.current)
        // Lease currency includes the session, so it is intentionally too strict for this part:
       // moving to another session does not make persistence of this deletion unsafe. Profile/config
       // changes do, because their session list is a different namespace.
@@ -3819,36 +3901,55 @@ function App() {
   async function abortSession() {
     const target = selectedSession
     const activeLease = mutationCoordinator.getActiveLease()
-    const canAbort = Boolean(target && isWorking && (!activeLease
-      || (activeLease.context.sessionID === target.id
-        && (activeLease.kind === "prompt" || activeLease.kind === "command" || activeLease.kind === "skill"))))
+    const abortContext = mutationCoordinator.getContext()
+    const abortKey = abortContext
+      ? `${abortContext.profileID}\u0000${abortContext.configKey}\u0000${abortContext.sessionID ?? ""}`
+      : ""
+    const canAbort = Boolean(target && isWorking && abortContext && abortContext.sessionID === target.id
+      && !abortInFlightRef.current.has(abortKey)
+      && (!activeLease
+        || (activeLease.context.profileID === abortContext.profileID
+          && activeLease.context.configKey === abortContext.configKey
+          && activeLease.context.sessionID === abortContext.sessionID
+          && activeLease.targetSessionID === target.id
+          && (activeLease.kind === "prompt" || activeLease.kind === "command" || activeLease.kind === "skill"))))
     if (!target || !canAbort) return
     // A prompt/command/skill owns the coordinator lease while it waits for the backend. Do not
     // steal or release that lease: abort is an out-of-band request and the original owner still
     // needs to finish its cleanup safely.
     const lease = activeLease ? null : acquireMutation("abort")
     if (!activeLease && !lease) return
-    const abortContext = activeLease?.context ?? mutationCoordinator.getContext()
-    if (!abortContext || abortContext.sessionID !== target.id) {
+    if (!abortContext) {
       if (lease) releaseMutation(lease)
       return
     }
-    const abortLeaseIsCurrent = () => activeLease
-      ? isLeaseContextCurrent(activeLease)
-      : lease !== null && isLeaseContextCurrent(lease)
-    try {
-      await api.abort(config, target.id, target.directory)
-      if (!abortLeaseIsCurrent()) return
-      completionShouldPlayRef.current = false
-      setAwaitingAssistantReply(false)
-      await refreshSessions()
-      if (!abortLeaseIsCurrent()) return
-      await loadSelected(target.id, target.directory)
-    } catch (err) {
-      if (abortLeaseIsCurrent()) setRuntimeError((err as Error).message)
-    } finally {
-      if (lease) releaseMutation(lease)
-    }
+    setAbortPresentationContext(abortKey)
+    bumpMutationLock((value) => value + 1)
+    let operation!: Promise<void>
+    operation = (async () => {
+      const sameContext = () => mutationCoordinator.isContextCurrent(abortContext)
+      try {
+        await api.abort(config, target.id, target.directory)
+        // The original prompt lease may have released by now. Currency is the full captured
+        // profile/config/session context, not ownership of that lease.
+        if (!sameContext()) return
+        completionShouldPlayRef.current = false
+        setAwaitingAssistantReply(false)
+        await refreshSessions()
+        if (!sameContext()) return
+        await loadSelected(target.id, target.directory)
+      } catch (err) {
+        if (sameContext()) setRuntimeError((err as Error).message)
+      } finally {
+        if (lease) releaseMutation(lease)
+        if (abortInFlightRef.current.get(abortKey) === operation) {
+          abortInFlightRef.current.delete(abortKey)
+          if (mutationCoordinator.isContextCurrent(abortContext)) setAbortPresentationContext(null)
+          bumpMutationLock((value) => value + 1)
+        }
+      }
+    })()
+    abortInFlightRef.current.set(abortKey, operation)
   }
 
   useEffect(() => {
@@ -5204,6 +5305,7 @@ function App() {
             attachments={attachments}
             supportsAttachments={capabilities.attachments}
             showStopAction={showStopAction}
+            canAbortSession={canAbortSession}
             softKeyboard={SOFT_KEYBOARD_DEVICE}
             t={t}
             composerRef={composerRef}

@@ -12,6 +12,7 @@ export function SessionComposer({
   attachments,
   supportsAttachments,
   showStopAction,
+  canAbortSession,
   mutationLocked,
   softKeyboard,
   t,
@@ -32,6 +33,7 @@ export function SessionComposer({
   attachments: AttachmentPart[]
   supportsAttachments: boolean
   showStopAction: boolean
+  canAbortSession: boolean
   mutationLocked: boolean
   softKeyboard: boolean
   t: Translator
@@ -153,7 +155,7 @@ export function SessionComposer({
             <PaperclipIcon size={18} />
           </button>
         </>}
-        <div className="composer-actions"><button onClick={showStopAction ? onAbort : sendNow} disabled={!selected || (!showStopAction && mutationLocked) || (!showStopAction && pendingPreparation > 0)} className={showStopAction ? "btn-danger composer-send" : "btn-primary composer-send"}>{showStopAction ? <StopCircleIcon size={18} /> : <SendIcon size={18} />}</button></div>
+        <div className="composer-actions"><button onClick={showStopAction ? onAbort : sendNow} disabled={!selected || (!showStopAction && mutationLocked) || (!showStopAction && pendingPreparation > 0) || (showStopAction && !canAbortSession)} className={showStopAction ? "btn-danger composer-send" : "btn-primary composer-send"}>{showStopAction ? <StopCircleIcon size={18} /> : <SendIcon size={18} />}</button></div>
       </div>
     </div>
   )
