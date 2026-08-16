@@ -402,6 +402,20 @@ const apiV1 = {
     return Promise.reject(new Error("Session forking is only supported on OpenCode 2 servers"))
   },
 
+  getSession(_config: ServerConfig, _sessionID: string) {
+    // OpenCode 1 (and the other v1-shaped backends) expose no single-session lookup endpoint —
+    // sessions are listed, not fetched. Reject honestly rather than pretending a lookup happened.
+    // Only the opencode2 client implements getSession.
+    return Promise.reject(new Error("Session lookup is only supported on OpenCode 2 servers"))
+  },
+
+  listChildSessions(_config: ServerConfig, _parentID: string) {
+    // OpenCode 1 (and the other v1-shaped backends) expose no parent-filtered child listing — fork
+    // reconciliation falls back to the global listing instead. Reject honestly rather than
+    // pretending children were enumerated. Only the opencode2 client implements listChildSessions.
+    return Promise.reject(new Error("Child session listing is only supported on OpenCode 2 servers"))
+  },
+
   cancelInboxItem(_config: ServerConfig, _sessionID: string, _inboxID: string, _directory?: string) {
     // OpenCode 1 (and the other v1-shaped backends) expose no inbox endpoint — queued delivery
     // state and cancellation exist only on the v2 server. Reject honestly rather than pretending
@@ -419,6 +433,13 @@ const apiV1 = {
     // Inbox queuing exists only on the v2 server. Reject honestly rather than pretending the item
     // was queued.
     return Promise.reject(new Error("Inbox queuing is only supported on OpenCode 2 servers"))
+  },
+
+  listInbox(_config: ServerConfig, _sessionID: string, _directory?: string) {
+    // OpenCode 1 (and the other v1-shaped backends) expose no per-session inbox — queued delivery
+    // state is a v2 concept. Degrade to an empty list instead of pretending to enumerate items.
+    // Only the opencode2 client implements listInbox.
+    return Promise.resolve([] as unknown[])
   },
 
   listSavedPermissions(_config: ServerConfig, _directory?: string) {
@@ -494,7 +515,19 @@ export const api: typeof apiV1 = new Proxy(apiV1, {
   get(target, property) {
     if (typeof property !== "string") return Reflect.get(target, property)
     const v1Method = (target as Record<string, unknown>)[property]
-    if (typeof v1Method !== "function") return v1Method
+    if (typeof v1Method !== "function") {
+      // A method that exists on the v2 client but has no v1 sentinel can never be routed by this
+      // dispatcher. Reading `api[property]` used to resolve to `undefined`, so every call site
+      // crashed with a minified "X is not a function" (the v2.12.0 regression surfaced as
+      // `Mm is not a function` for listInbox). Name the missing stub instead, so the next
+      // occurrence is diagnosable rather than a minified identifier.
+      if (typeof (opencode2Api as Record<string, unknown>)[property] === "function") {
+        return function missingV1Sentinel() {
+          throw new Error(`api.${String(property)} is missing its v1 sentinel stub in apiV1`)
+        }
+      }
+      return v1Method
+    }
     const v2Method = (opencode2Api as Record<string, unknown>)[property]
     if (typeof v2Method !== "function") return v1Method
     return function (this: unknown, config: ServerConfig, ...args: unknown[]) {

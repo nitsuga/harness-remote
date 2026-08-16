@@ -661,6 +661,66 @@ assert.ok(
   'v1 cancelInboxItem must reject honestly'
 )
 
+// --- v1 dispatcher sentinels for v2-only routes (regression: v2.12.0 session open) -----------
+
+// `api` is a Proxy that routes to the v2 client only when the v1 method exists (api.ts
+// `get`): a v2-only method with NO v1 counterpart resolves to `undefined`, so calling it throws
+// "is not a function" (minified: `Mm is not a function`) even on opencode2 backends. Every v2-only
+// method must keep a v1 stub so the route stays reachable.
+for (const [route, expected] of [
+  ['`/api/session/${encodeURIComponent(sessionID)}/inbox`', 'return Promise.resolve([] as unknown[])'],
+  ['`/api/session/${encodeURIComponent(sessionID)}`', 'return Promise.reject(new Error("Session lookup is only supported on OpenCode 2 servers"))'],
+  ['`/api/session?parentID=${encodeURIComponent(parentID)}`', 'return Promise.reject(new Error("Child session listing is only supported on OpenCode 2 servers"))']
+]) {
+  assert.ok(clientSource.includes(route), `the v2 client must keep the inbox/fetch/child listing route: ${route}`)
+}
+assert.ok(
+  apiSource.includes('listInbox(_config: ServerConfig, _sessionID: string, _directory?: string)'),
+  'v1 listInbox must exist as a dispatcher sentinel (degrade to an empty list)'
+)
+assert.ok(
+  apiSource.includes('return Promise.resolve([] as unknown[])'),
+  'v1 listInbox must degrade to an empty list on v1 backends'
+)
+assert.ok(
+  apiSource.includes('return Promise.reject(new Error("Session lookup is only supported on OpenCode 2 servers"))'),
+  'v1 getSession must reject honestly'
+)
+assert.ok(
+  apiSource.includes('return Promise.reject(new Error("Child session listing is only supported on OpenCode 2 servers"))'),
+  'v1 listChildSessions must reject honestly'
+)
+
+// --- Systematic dispatcher completeness (regression class: v2.12.0 "Mm is not a function") -------
+
+// The `api` Proxy (api.ts) routes by method name: a method on one surface without a counterpart on
+// the other either resolves to `undefined` (minified "X is not a function") or silently runs the
+// wrong implementation on opencode2 backends. The per-method pins above guard the known methods;
+// this enforces set-equality of the two API surfaces so the class cannot ship again. Both object
+// literals are method-only at two-space indent, so a line-based parse is exact (`clientSource` is
+// sliced from the `opencode2Api` object which is the file tail; `apiSource` from `apiV1` up to the
+// Proxy export).
+const v2Surface = new Set(
+  [...clientSource.slice(clientSource.indexOf('export const opencode2Api = {')).matchAll(/^  (?:async )?([A-Za-z][A-Za-z0-9]*)\(/gm)].map((m) => m[1])
+)
+const v1Surface = new Set(
+  [...apiSource.slice(apiSource.indexOf('const apiV1 = {'), apiSource.indexOf('export const api')).matchAll(/^  (?:async )?([A-Za-z][A-Za-z0-9]*)\(/gm)].map((m) => m[1])
+)
+const missingSentinel = [...v2Surface].filter((name) => !v1Surface.has(name))
+const silentFallback = [...v1Surface].filter((name) => !v2Surface.has(name))
+assert.ok(
+  missingSentinel.length === 0,
+  `every v2 client method must keep a v1 sentinel stub or the Proxy resolves it to undefined: ${missingSentinel.join(', ')}`
+)
+assert.ok(
+  silentFallback.length === 0,
+  `every v1 method must have a v2 counterpart or opencode2 backends silently run the v1 implementation: ${silentFallback.join(', ')}`
+)
+assert.ok(
+  v2Surface.size >= 30,
+  'the dispatcher surface parse must stay meaningful (sanity floor, not an exact count)'
+)
+
 // --- Feature #13 lane 1: rich structured message/tool mapping ----------------------------------
 // Synthetic fixtures only — the shapes mirror live OpenCode 2 captures, but every id/path was
 // invented here (nothing copied from a real transcript).
