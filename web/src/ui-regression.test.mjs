@@ -420,6 +420,29 @@ assert.ok(
   queuedMapClears.length >= 3,
   'every queued-op success path (panel ops + transcript cancel + transcript steer) must clear the queued map'
 )
+// The reverse stale-row direction: a PANEL op that delivered the item must also clear the
+// transcript's queued rows — otherwise the chat keeps showing the row as queued after the panel
+// steer succeeded (live report: "the button registered a press... the message still queued").
+assert.match(
+  app,
+  /const mutateQueuedPrompt = async[\s\S]*?setQueuedInboxMessages\(\(current\) => \{\s*const remaining = current\.filter\(\(candidate\) => queuedInboxItemID\(candidate\) !== inboxID\)/,
+  'panel queued ops must clear the transcript rows on definite success'
+)
+// A blocked queued op must not be silent: a held lease or a vanished session used to return
+// without feedback, which read as "the button did nothing".
+assert.match(
+  app,
+  /if \(!lease\) \{ setActionNotice\(t\('detail\.actionLocked'\)\); return \}/,
+  'a blocked queued op must announce itself instead of returning silently'
+)
+// The queued fan-out must list only still-queued prompts. A steered item remains in the server
+// inbox as `delivery: steer` until the next step boundary promotes it; re-listing it made a row
+// "come back" after Send now (live report) with Send now then 409ing on the already-steered item.
+assert.match(
+  app,
+  /const queued = items\.filter\(\(item\) => item\.delivery === "queue"\)/,
+  'the queued fan-out must filter to still-queued prompts so a steered item cannot reappear'
+)
 
 // Compaction correlates terminal state ONLY with the exact admission/request id — no baseline or
 // any-terminal heuristic — including the double-indeterminate path where the request id is the only

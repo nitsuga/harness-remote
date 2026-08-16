@@ -226,6 +226,7 @@ type TranslationKey =
   | 'inbox.cancelPrompt'
   | 'inbox.steerPrompt'
   | 'inbox.queuePrompt'
+  | 'inbox.sessionMissing'
   | 'savedPermission.title'
   | 'savedPermission.empty'
   | 'savedPermission.revoke'
@@ -603,6 +604,7 @@ export const translations: Record<LanguageCode, Partial<Record<TranslationKey, s
     'inbox.cancelPrompt': 'Cancel',
     'inbox.steerPrompt': 'Send now',
     'inbox.queuePrompt': 'Queue',
+    'inbox.sessionMissing': 'Session is no longer in the list',
     'savedPermission.title': 'Saved permissions',
     'savedPermission.empty': 'No saved permissions',
     'savedPermission.revoke': 'Revoke',
@@ -972,6 +974,7 @@ export const translations: Record<LanguageCode, Partial<Record<TranslationKey, s
     'inbox.cancelPrompt': 'Annulla',
     'inbox.steerPrompt': 'Invia ora',
     'inbox.queuePrompt': 'Metti in coda',
+    'inbox.sessionMissing': 'La sessione non è più nell\'elenco',
     'savedPermission.title': 'Permessi salvati',
     'savedPermission.empty': 'Nessun permesso salvato',
     'savedPermission.revoke': 'Revoca',
@@ -1334,6 +1337,7 @@ export const translations: Record<LanguageCode, Partial<Record<TranslationKey, s
     'inbox.cancelPrompt': '取消',
     'inbox.steerPrompt': '立即傳送',
     'inbox.queuePrompt': '排入佇列',
+    'inbox.sessionMissing': '工作階段已不在清單中',
     'savedPermission.title': '已儲存權限',
     'savedPermission.empty': '沒有已儲存權限',
     'savedPermission.revoke': '撤銷',
@@ -1645,6 +1649,7 @@ export const translations: Record<LanguageCode, Partial<Record<TranslationKey, s
     'inbox.cancelPrompt': '取消',
     'inbox.steerPrompt': '立即发送',
     'inbox.queuePrompt': '排入队列',
+    'inbox.sessionMissing': '会话已不在列表中',
     'savedPermission.title': '已保存权限',
     'savedPermission.empty': '没有已保存权限',
     'savedPermission.revoke': '撤销',
