@@ -1309,8 +1309,10 @@ assert.equal(subagentCompletionDescription([
 assert.equal(subagentCompletionDescription([]), undefined, 'an empty envelope carries no description')
 
 // --- Session todo derivation from transcript todowrite parts (issue #7) ----------------------
-// Captured-style fixture: an assistant message carrying a completed `todowrite` tool part (v2 has
-// no todo endpoint, so the session panel reconstructs the latest state from these parts).
+// Captured-style fixture: an assistant message carrying an executed `todowrite` tool part (v2 has
+// no todo endpoint, so the session panel reconstructs the latest state from these parts). The tool
+// input carries only content/status/priority — ids are invented by the app for rendering, never
+// sent, so the fixture locks the real wire contract.
 const liveTodoWrite = {
   id: 'msg_todo1',
   time: { created: 1, completed: 2 },
@@ -1320,13 +1322,13 @@ const liveTodoWrite = {
       type: 'tool',
       id: 'call_todo_1',
       name: 'todowrite',
-      executed: false,
+      executed: true,
       state: {
         status: 'completed',
         input: {
           todos: [
-            { content: 'Write tests', status: 'in_progress', priority: 'high', id: 't1' },
-            { content: 'Fix bug', status: 'pending', priority: 'medium', id: 't2' }
+            { content: 'Write tests', status: 'in_progress', priority: 'high' },
+            { content: 'Fix bug', status: 'pending', priority: 'medium' }
           ]
         }
       },
@@ -1337,13 +1339,13 @@ const liveTodoWrite = {
 const todoEnvelope = toMessageEnvelope(liveTodoWrite, 'ses_x')
 assert.equal(todoEnvelope.parts.length, 1)
 assert.equal(todoEnvelope.parts[0].tool, 'todowrite')
-// (c) status/priority/content/id pass through unchanged, exactly as the todowrite input carried them.
+// (a) status/priority/content pass through unchanged, exactly as the todowrite input carried them.
 assert.deepEqual(deriveTodosFromMessages([todoEnvelope]), [
-  { content: 'Write tests', status: 'in_progress', priority: 'high', id: 't1' },
-  { content: 'Fix bug', status: 'pending', priority: 'medium', id: 't2' }
+  { content: 'Write tests', status: 'in_progress', priority: 'high' },
+  { content: 'Fix bug', status: 'pending', priority: 'medium' }
 ])
 
-// (a) A later todowrite replaces an earlier one: latest valid list wins.
+// (b) A later completed todowrite replaces an earlier one: latest valid list wins.
 const laterTodoWrite = {
   id: 'msg_todo2',
   time: { created: 2, completed: 3 },
@@ -1353,33 +1355,72 @@ const laterTodoWrite = {
       type: 'tool',
       id: 'call_todo_2',
       name: 'todowrite',
-      state: { status: 'completed', input: { todos: [{ content: 'Ship it', status: 'completed', priority: 'high', id: 't4' }] } }
+      executed: true,
+      state: { status: 'completed', input: { todos: [{ content: 'Ship it', status: 'completed', priority: 'high' }] } }
     }
   ]
 }
 assert.deepEqual(deriveTodosFromMessages([todoEnvelope, toMessageEnvelope(laterTodoWrite, 'ses_x')]), [
-  { content: 'Ship it', status: 'completed', priority: 'high', id: 't4' }
+  { content: 'Ship it', status: 'completed', priority: 'high' }
 ])
 
-// (b) Invalid/empty lists are skipped — a string `todos`, an empty array, and items without a
-// string `.content` all count as no state — and a transcript with no valid list yields [].
-const invalidTodoWrite = {
-  id: 'msg_todo_bad',
+// (c) Only adopted (completed) writes count: a pending write was never applied by the server, so
+// it must not replace the last completed state...
+const pendingTodoWrite = {
+  id: 'msg_todo_pending',
   time: { created: 4 },
   type: 'assistant',
   content: [
-    { type: 'tool', id: 'call_todo_bad', name: 'todowrite', state: { status: 'completed', input: { todos: 'nope' } } },
-    { type: 'tool', id: 'call_todo_empty', name: 'todowrite', state: { status: 'completed', input: { todos: [] } } },
-    { type: 'tool', id: 'call_todo_noitems', name: 'todowrite', state: { status: 'completed', input: { todos: [{ status: 'pending', priority: 'low', id: 'x' }] } } }
+    { type: 'tool', id: 'call_todo_pending', name: 'todowrite', executed: false, state: { status: 'pending', input: { todos: [{ content: 'Draft', status: 'pending', priority: 'low' }] } } }
   ]
 }
-assert.deepEqual(deriveTodosFromMessages([toMessageEnvelope(invalidTodoWrite, 'ses_x')]), [])
-assert.deepEqual(deriveTodosFromMessages([todoEnvelope, toMessageEnvelope(invalidTodoWrite, 'ses_x')]), [
-  { content: 'Write tests', status: 'in_progress', priority: 'high', id: 't1' },
-  { content: 'Fix bug', status: 'pending', priority: 'medium', id: 't2' }
-], 'an invalid later todowrite must be skipped, keeping the last valid list')
+assert.deepEqual(deriveTodosFromMessages([todoEnvelope, toMessageEnvelope(pendingTodoWrite, 'ses_x')]), [
+  { content: 'Write tests', status: 'in_progress', priority: 'high' },
+  { content: 'Fix bug', status: 'pending', priority: 'medium' }
+], 'a pending todowrite must not replace the last completed state')
+// ...while a later completed write still does.
+const adoptedAfterPendingWrite = {
+  id: 'msg_todo_adopted',
+  time: { created: 5, completed: 6 },
+  type: 'assistant',
+  content: [
+    { type: 'tool', id: 'call_todo_adopted', name: 'todowrite', executed: true, state: { status: 'completed', input: { todos: [{ content: 'Adopted', status: 'completed', priority: 'high' }] } } }
+  ]
+}
+assert.deepEqual(deriveTodosFromMessages([todoEnvelope, toMessageEnvelope(pendingTodoWrite, 'ses_x'), toMessageEnvelope(adoptedAfterPendingWrite, 'ses_x')]), [
+  { content: 'Adopted', status: 'completed', priority: 'high' }
+], 'a later completed todowrite overrides an earlier pending one')
 
-// (d) Reconstructing the same transcript (reload) yields the same state, deterministically.
+// (d) A well-formed `todos: []` is an authoritative clear: the server applied it, so the panel
+// must drop its previous list rather than keep the stale one.
+const clearTodoWrite = {
+  id: 'msg_todo_clear',
+  time: { created: 7, completed: 8 },
+  type: 'assistant',
+  content: [
+    { type: 'tool', id: 'call_todo_clear', name: 'todowrite', executed: true, state: { status: 'completed', input: { todos: [] } } }
+  ]
+}
+assert.deepEqual(deriveTodosFromMessages([todoEnvelope, toMessageEnvelope(clearTodoWrite, 'ses_x')]), [], 'a later completed todos:[] must clear the panel')
+
+// (e) Malformed lists are skipped — a non-array `todos` and items without a string `.content`
+// count as no state — and a transcript with no valid list yields [].
+const malformedTodoWrite = {
+  id: 'msg_todo_bad',
+  time: { created: 9 },
+  type: 'assistant',
+  content: [
+    { type: 'tool', id: 'call_todo_bad', name: 'todowrite', executed: true, state: { status: 'completed', input: { todos: 'nope' } } },
+    { type: 'tool', id: 'call_todo_noitems', name: 'todowrite', executed: true, state: { status: 'completed', input: { todos: [{ status: 'pending', priority: 'low' }] } } }
+  ]
+}
+assert.deepEqual(deriveTodosFromMessages([toMessageEnvelope(malformedTodoWrite, 'ses_x')]), [])
+assert.deepEqual(deriveTodosFromMessages([todoEnvelope, toMessageEnvelope(malformedTodoWrite, 'ses_x')]), [
+  { content: 'Write tests', status: 'in_progress', priority: 'high' },
+  { content: 'Fix bug', status: 'pending', priority: 'medium' }
+], 'a malformed later todowrite must be skipped, keeping the last valid list')
+
+// (f) Reconstructing the same transcript (reload) yields the same state, deterministically.
 const rawTodoMessages = [liveTodoWrite, laterTodoWrite]
 const firstReconstruct = deriveTodosFromMessages(rawTodoMessages.map((message) => toMessageEnvelope(message, 'ses_x')))
 const secondReconstruct = deriveTodosFromMessages(rawTodoMessages.map((message) => toMessageEnvelope(message, 'ses_x')))

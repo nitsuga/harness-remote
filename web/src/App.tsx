@@ -4319,7 +4319,7 @@ function App() {
       && mutationCoordinator.isContextCurrent(loadContext)
     const [msg, todo, diff, questions, permissions, actions, inbox] = await Promise.all([
       api.loadMessages(config, sessionID, directory, backendClient.messageRefreshSupported && refreshHistory),
-      capabilities.todos ? api.loadTodo(config, sessionID, directory) : Promise.resolve([]),
+      capabilities.todos ? api.loadTodo(config, sessionID, directory).catch(() => []) : Promise.resolve([]),
       capabilities.diff ? api.loadDiff(config, sessionID, directory).catch(() => []) : Promise.resolve([]),
       capabilities.questions ? api.loadQuestions(config, directory).catch(() => []) : Promise.resolve([]),
       capabilities.permissions ? api.loadPermissions(config, directory).catch(() => []) : Promise.resolve([]),

@@ -129,11 +129,14 @@ export type V2ToolContent =
   | { type: "text"; text?: string }
   | { type: "file"; uri?: string; mime?: string; name?: string }
 
-/** Same shape rules the message lane applies to a `todowrite` part's `input.todos` (see App.tsx
- *  `parseTodos`): an array whose items each carry a string `.content`; empty/invalid lists are
- *  rejected. Kept here so the transcript-derived session todo panel validates identically. */
+/** Same item shape the message lane applies to a `todowrite` part's `input.todos` (see App.tsx
+ *  `parseTodos`): an array whose items each carry a string `.content`. Unlike the message lane,
+ *  a WELL-FORMED empty array is a valid state here — the v2 server treats `todos: []` as an
+ *  authoritative clear — so it is returned as `[]` rather than rejected. Non-array values and
+ *  non-empty arrays with no string-`.content` items are malformed and yield `null`. */
 function parseTodoItems(value: unknown): TodoItem[] | null {
   if (!Array.isArray(value)) return null
+  if (value.length === 0) return []
   const items = value.filter(
     (item): item is TodoItem => Boolean(item) && typeof item === "object" && typeof (item as TodoItem).content === "string"
   )
@@ -142,17 +145,22 @@ function parseTodoItems(value: unknown): TodoItem[] | null {
 
 /**
  * Reconstruct the latest session todo state from a transcript. v2 has no todo endpoint, so the
- * panel shows the most recent valid `todowrite` tool input — latest-wins, mirroring the bridge's
- * latest-plan-wins for ACP — with each part's `input.todos` validated exactly like the message lane
- * (an array of `{ content, status, priority, id }` items with a string `.content`). Invalid or
- * empty lists are skipped, and a transcript with no valid list yields `[]`. Re-deriving on every
- * load keeps the state honest across reverts, compaction and later todo updates.
+ * panel shows the most recent ADOPTED `todowrite` tool input — latest-wins, mirroring the bridge's
+ * latest-plan-wins for ACP — with each part's `input.todos` validated with the message lane's item
+ * shape (an array of `{ content, status, priority }` items with a string `.content`). Only
+ * `completed` writes are adopted: a `pending` or `error` write was never applied by the server, so
+ * it must not replace the panel state. A well-formed `todos: []` is an authoritative clear;
+ * malformed lists are skipped, and a transcript with no valid list yields `[]`. Input messages
+ * MUST be in chronological order: last-wins walks the array in order, so a future newest-first
+ * caller would silently invert the semantics. Re-deriving on every load keeps the state honest
+ * across reverts, compaction and later todo updates.
  */
 export function deriveTodosFromMessages(messages: MessageEnvelope[]): TodoItem[] {
   let latest: TodoItem[] | null = null
   for (const message of messages) {
     for (const part of message.parts) {
       if (part.type !== "tool" || part.tool !== "todowrite") continue
+      if (part.state?.status !== "completed") continue
       const parsed = parseTodoItems(part.state?.input?.todos)
       if (parsed) latest = parsed
     }
