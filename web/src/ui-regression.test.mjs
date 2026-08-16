@@ -1168,6 +1168,17 @@ assert.ok(
   /if \(part\.type === "text"\) \{\s*if \(!part\.text\) return null[\s\S]*?if \(isSubagentCompletionWrapper\(part\.text\)\) return null/.test(app),
   'a text part carrying the raw synthetic wrapper must be skipped too, so the XML stays out of the transcript'
 )
+
+// --- Degraded subagent tool row (issue #47 revisit) ---------------------------------------------
+// When the ephemeral progress event is missed (reconnect/ordering) the subagent tool part has no
+// child correlation until terminal, so it renders as the generic tool row. Its collapsed button
+// must show the human label like the legacy `task` tool — never the default, which splashes the
+// entire raw launch payload (prompt included) as button text.
+assert.match(
+  app,
+  /case "task":[\s\S]*?case "subagent":[\s\S]*?action\.ranSubagentNamed/,
+  'the degraded subagent tool row must use the human ran-subagent label, not the raw launch payload'
+)
 // The raw `<shell ...>...</shell>` envelope must never render as chat prose either: a synthetic
 // shell completion maps to a tool part in the mapper, but any cached/older envelope that lands on
 // a system or text part must be skipped too, exactly like the subagent wrapper above.

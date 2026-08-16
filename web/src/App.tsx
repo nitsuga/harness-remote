@@ -640,6 +640,11 @@ function describeToolAction(
       }
     }
     case "task":
+    // The opencode2 `subagent` tool part degrades to this generic row whenever the child session id
+    // is not correlated (ephemeral progress event missed on reconnect/ordering; durable metadata
+    // arrives only at terminal). Without its own label the default would splash the entire raw
+    // launch payload — prompt included — as the collapsed button text; keep it human like `task`.
+    case "subagent":
       return {
         label:
           typeof input.description === "string"
