@@ -1053,6 +1053,14 @@ assert.match(
   /config\.backend === "opencode2"\) \{\s*const sessionID = body\?\.sessionID[\s\S]*?reduceExecutionEvent\(executionMemoryRef\.current\.get\(sessionID\)/,
   'execution events must feed the v2 reducer only for opencode2 backends'
 )
+// `session.error` carries its message at the top level (`body.message`), unlike execution events
+// which carry a structured `error: { message }` — the reducer feed must surface whichever exists
+// so needs-attention/failed pills show the crash text.
+assert.match(
+  app,
+  /errorMessage = kind === "error"\s*\?[\s\S]*?message \?\? structuredError\?\.message/,
+  'the reducer feed must read the top-level session.error message'
+)
 // The derived status overlays the wire status map in refreshSessions, so the poll keeps the
 // derivation fresh even when the stream misses an event.
 assert.match(

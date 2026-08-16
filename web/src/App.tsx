@@ -5576,11 +5576,18 @@ function App() {
         const sessionID = body?.sessionID ?? body?.sessionId ?? body?.info?.sessionID ?? body?.info?.id
         const kind = executionEventKind(type)
         if (sessionID && kind) {
+          // `session.error` carries the message at the top level (`body.message`), while execution
+          // events carry a structured `error: { message }` — surface whichever the event provides so
+          // the needs-attention/failed status can show the crash text.
+          const structuredError = (body as { error?: { message?: string } } | undefined)?.error
+          const errorMessage = kind === "error"
+            ? (body as { message?: string } | undefined)?.message ?? structuredError?.message
+            : structuredError?.message
           executionMemoryRef.current.set(sessionID, reduceExecutionEvent(executionMemoryRef.current.get(sessionID), {
             kind,
             at: Date.now(),
             sessionID,
-            error: (body as { error?: { message?: string } } | undefined)?.error,
+            error: errorMessage ? { message: errorMessage } : undefined,
             attempt: (body as { attempt?: number } | undefined)?.attempt,
             next: typeof (body as { at?: number } | undefined)?.at === "number" ? (body as { at?: number }).at : undefined
           }))
