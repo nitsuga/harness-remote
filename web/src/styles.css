@@ -1103,6 +1103,438 @@ a:focus-visible,
   transform: translateX(-50%);
 }
 
+/* --------------------------------------------------------------------------
+   Attention inbox (issue #9, panel lane)
+   -------------------------------------------------------------------------- */
+
+/* The collapsible sidebar section sits between the toolbar and the session list, OUTSIDE the
+   list's scroll container, so the badge stays visible while the sessions scroll. */
+.attention-inbox {
+  flex: 0 0 auto;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.attention-inbox-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: 2rem;
+  padding: var(--space-2) var(--space-3);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--font-2xs);
+  font-weight: 700;
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+}
+
+.attention-inbox-toggle:hover:not(:disabled) {
+  background: var(--surface-subtle);
+  color: var(--text);
+}
+
+.attention-chevron {
+  display: inline-flex;
+  flex: 0 0 auto;
+  transition: transform var(--motion-fast) var(--ease);
+}
+
+.attention-inbox-toggle[aria-expanded="false"] .attention-chevron {
+  transform: rotate(-90deg);
+}
+
+.attention-inbox-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The body scrolls on its own and is height-capped, so a full inbox can never crowd the session
+   list out of the sidebar. */
+.attention-inbox-body {
+  max-height: min(40vh, 22rem);
+  overflow-y: auto;
+  display: grid;
+  align-content: start;
+  gap: var(--space-3);
+  padding: 0 var(--space-2) var(--space-2);
+}
+
+.attention-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  min-width: 1.15rem;
+  height: 1.15rem;
+  padding: 0 0.35rem;
+  border-radius: var(--radius-pill);
+  background: var(--danger);
+  color: var(--on-accent);
+  font-size: var(--font-2xs);
+  font-weight: 700;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.attention-inbox-toggle .attention-badge {
+  margin-left: auto;
+}
+
+/* Grouping: machine → agent → session (criterion 1). The machine level is a single caps label
+   (the active profile is the only machine); agents and sessions indent beneath it. */
+.attention-groups {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.attention-machine {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-2) var(--space-1);
+  color: var(--muted);
+  font-size: var(--font-2xs);
+  font-weight: 700;
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+}
+
+.attention-agent {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.attention-agent-label {
+  padding: var(--space-1) var(--space-2) 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted-strong);
+  font-size: var(--font-2xs);
+  font-weight: 600;
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+}
+
+.attention-session {
+  display: grid;
+  gap: var(--space-1);
+  margin-left: var(--space-2);
+  padding-left: var(--space-2);
+  border-left: 1px solid var(--border);
+}
+
+.attention-session-label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--space-1) 0;
+}
+
+.attention-session-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: var(--font-xs);
+  font-weight: 600;
+}
+
+.attention-session-count {
+  flex: 0 0 auto;
+  margin-left: auto;
+  color: var(--muted);
+  font-size: var(--font-2xs);
+  font-variant-numeric: tabular-nums;
+}
+
+/* One item card per attention fact. The kind pill reuses the session-status pill palette:
+   question/permission = waiting accent, failure = danger, completion = success. */
+.attention-item {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+  padding: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  transition: border-color var(--motion-fast) var(--ease);
+}
+
+.attention-item:hover {
+  border-color: var(--border-strong);
+}
+
+.attention-item-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.attention-item-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: var(--font-xs);
+  font-weight: 600;
+}
+
+.attention-item-message {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: var(--font-xs);
+}
+
+.attention-item-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
+  color: var(--muted);
+  font-size: var(--font-2xs);
+}
+
+.attention-item-agent {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attention-item-time {
+  flex: 0 0 auto;
+}
+
+.attention-item-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
+}
+
+/* Queued prompts (v2 only): one dashed block per session, listing the server inbox entries the
+   poll still holds, with the cancel / send-now / queue operations. v1 backends have an empty map
+   and never render this. */
+.attention-queued {
+  display: grid;
+  gap: var(--space-1);
+  padding: var(--space-2);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-subtle);
+}
+
+.attention-queued-title {
+  color: var(--muted-strong);
+}
+
+.attention-queued-count {
+  margin-left: auto;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.attention-queued-row {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.attention-queued-main {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.attention-queued-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted-strong);
+  font-size: var(--font-xs);
+}
+
+.attention-queued-type {
+  color: var(--muted);
+  font-size: var(--font-2xs);
+  font-weight: 600;
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+}
+
+.attention-queued-tag {
+  flex: 0 0 auto;
+  padding: 0.05rem 0.4rem;
+  border-radius: var(--radius-pill);
+  background: var(--warning-soft);
+  color: var(--warning);
+  font-size: var(--font-2xs);
+  font-weight: 700;
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.attention-queued-ops {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+/* Saved allow-always grants: configuration, not attention, so it sits in its own section below
+   the items with a top hairline separator. */
+.attention-saved {
+  display: grid;
+  gap: var(--space-2);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border);
+}
+
+.attention-saved-empty {
+  padding: var(--space-1) var(--space-2);
+  color: var(--muted);
+  font-size: var(--font-xs);
+}
+
+.attention-saved-list {
+  display: grid;
+  gap: 1px;
+}
+
+.attention-saved-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  border-radius: var(--radius-md);
+}
+
+.attention-saved-row:hover {
+  background: var(--surface-subtle);
+}
+
+.attention-saved-main {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.attention-saved-action {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: var(--font-xs);
+  font-weight: 600;
+}
+
+.attention-saved-resource,
+.attention-saved-project {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: var(--font-2xs);
+}
+
+/* Empty state must read as an intentional "all clear", not a broken panel. */
+.attention-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: var(--space-4) var(--space-2);
+  color: var(--muted);
+  font-size: var(--font-xs);
+  text-align: center;
+}
+
+.attention-empty svg {
+  flex: 0 0 auto;
+  color: var(--success);
+}
+
+/* Full-page mobile overlay. The sessions view's fade-in animates an ancestor's transform only for
+   its first 140ms; the overlay opens on click, long after that settles, so fixed positioning is
+   anchored to the viewport exactly like the app's other modal layers. */
+.attention-page {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+
+.attention-page-header {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-sticky);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 3.25rem;
+  padding: var(--space-2) var(--space-3);
+  padding-top: calc(var(--space-2) + env(safe-area-inset-top));
+  border-bottom: 1px solid var(--border);
+  background: var(--nav-bg);
+  backdrop-filter: var(--overlay-blur);
+  -webkit-backdrop-filter: var(--overlay-blur);
+}
+
+.attention-page-header h2 {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-lg);
+}
+
+.attention-page-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: grid;
+  align-content: start;
+  gap: var(--space-4);
+  padding: var(--space-3);
+  padding-bottom: calc(var(--space-8) + env(safe-area-inset-bottom));
+}
+
+/* Roomier cards on the full page: the compact sidebar rhythm is tuned for ~240px, the page has a
+   phone width to spend. */
+.attention-page .attention-item {
+  padding: var(--space-3);
+}
+
+.attention-page .attention-item-title {
+  font-size: var(--font-sm);
+}
+
+.attention-page .attention-machine,
+.attention-page .attention-agent-label,
+.attention-page .attention-session-label {
+  padding-left: var(--space-1);
+}
+
 /* --- Inspector (desktop right pane) --- */
 
 .inspector {

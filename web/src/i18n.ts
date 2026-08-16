@@ -215,6 +215,7 @@ type TranslationKey =
   | 'session.renameConfirm'
   | 'inbox.title'
   | 'inbox.empty'
+  | 'inbox.noAgent'
   | 'inbox.question'
   | 'inbox.permission'
   | 'inbox.failure'
@@ -591,6 +592,7 @@ export const translations: Record<LanguageCode, Partial<Record<TranslationKey, s
     'status.waiting': 'Waiting',
     'inbox.title': 'Attention',
     'inbox.empty': 'Nothing needs your attention',
+    'inbox.noAgent': 'No agent',
     'inbox.question': 'Question',
     'inbox.permission': 'Permission request',
     'inbox.failure': 'Failed',
@@ -959,6 +961,7 @@ export const translations: Record<LanguageCode, Partial<Record<TranslationKey, s
     'status.waiting': 'In attesa',
     'inbox.title': 'Attenzione',
     'inbox.empty': 'Nulla richiede la tua attenzione',
+    'inbox.noAgent': 'Nessun agente',
     'inbox.question': 'Domanda',
     'inbox.permission': 'Richiesta di permesso',
     'inbox.failure': 'Non riuscito',
@@ -1320,6 +1323,7 @@ export const translations: Record<LanguageCode, Partial<Record<TranslationKey, s
     'status.waiting': '等待中',
     'inbox.title': '關注',
     'inbox.empty': '沒有需要你關注的事項',
+    'inbox.noAgent': '無代理',
     'inbox.question': '問題',
     'inbox.permission': '權限請求',
     'inbox.failure': '失敗',
@@ -1630,6 +1634,7 @@ export const translations: Record<LanguageCode, Partial<Record<TranslationKey, s
     'status.waiting': '等待中',
     'inbox.title': '关注',
     'inbox.empty': '没有需要你关注的事项',
+    'inbox.noAgent': '无代理',
     'inbox.question': '问题',
     'inbox.permission': '权限请求',
     'inbox.failure': '失败',

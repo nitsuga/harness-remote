@@ -1,3 +1,4 @@
+import { useContext, useState } from "react"
 import type { PointerEvent as ReactPointerEvent, RefObject, ReactNode } from "react"
 import {
   CloseIcon,
@@ -13,8 +14,10 @@ import {
   SettingsIcon,
   TrashIcon
 } from "../Icons"
+import { AttentionInboxContext } from "../attentionInboxContext"
 import type { Translator } from "../i18n"
 import type { HarnessCapabilities, SessionView } from "../types"
+import { AttentionInboxButton, AttentionInboxPanel } from "./attention-inbox"
 
 export function shortDirectory(directory: string): string {
   const segments = directory.split(/[\\/]+/).filter(Boolean)
@@ -237,6 +240,7 @@ export function SessionSidebar({
   jumpControls: ReactNode
   sessionCardProps: SessionCardProps
 }) {
+  const attentionInbox = useContext(AttentionInboxContext)
   return (
     <aside className="desktop-sidebar fade-in" style={{ width, flex: `0 0 ${width}px` }}>
       <div className="resize-handle resize-handle--end" onPointerDown={onResize} role="separator" aria-orientation="vertical" aria-label="Resize panels" />
@@ -249,6 +253,10 @@ export function SessionSidebar({
           {creating ? <LoadingIcon size={16} /> : <PlusIcon size={16} />}
         </button>
       </div>
+      {/* Cross-session attention inbox (issue #9): a collapsible section pinned ABOVE the session
+          groups, outside the sessions scroll area, so the badge stays visible while the list
+          scrolls. The context provider always wraps the desktop shell. */}
+      {attentionInbox && <AttentionInboxPanel variant="sidebar" t={t} language={sessionCardProps.language} />}
       <div className="sidebar-sessions" ref={sidebarSessionsRef} onScroll={onScroll}>
         {groups.length === 0 ? <p className="subtle sidebar-empty">{offline ? t('sessions.offlineHint') : t('sessions.emptyTitle')}</p> : groups.map((group) => (
           <section key={group.directory} className="sidebar-group">
@@ -317,6 +325,8 @@ export function SessionsPanel({
   jumpControls: ReactNode
   sessionCardProps: SessionCardProps
 }) {
+  const attentionInbox = useContext(AttentionInboxContext)
+  const [attentionOpen, setAttentionOpen] = useState(false)
   return (
     <section className="panel sessions fade-in">
       <div className="section-heading">
@@ -329,6 +339,9 @@ export function SessionsPanel({
           </div>}
         </div>
         <div className="inline-actions sessions-header-actions">
+          {/* Attention inbox entry (issue #9): the badge is the mobile alert surface, so it lives
+              on this button — it must be reachable before opening the panel. */}
+          <AttentionInboxButton t={t} onClick={() => setAttentionOpen(true)} />
           <button onClick={onRefresh} className="btn-secondary" disabled={refreshing}>{refreshing ? <LoadingIcon size={18} /> : <RefreshIcon size={18} />}{t('sessions.refresh')}</button>
           <button onClick={onNewSession} className="btn-primary" disabled={creating || mutationLocked || offline} title={offline ? t('sessions.offlineHint') : mutationLocked ? t('detail.actionLocked') : t('sessions.new')}>{creating ? <LoadingIcon size={18} /> : <PlusIcon size={18} />}{creating ? t('sessions.creating') : t('sessions.new')}</button>
         </div>
@@ -343,6 +356,12 @@ export function SessionsPanel({
       {runtimeError && !(offline && filteredSessions.length === 0) && <div className="error fade-in">✗ {runtimeError}</div>}
       {actionNotice && <div className="notice info fade-in" role="status" aria-live="polite">ℹ {actionNotice}</div>}
       {jumpControls}
+      {/* Full-page attention inbox overlay (issue #9): mounted only while open, so the mobile
+          layout pays nothing when the panel is closed. Opening an item navigates away and unmounts
+          it with the sessions view. */}
+      {attentionOpen && attentionInbox && (
+        <AttentionInboxPanel variant="page" t={t} language={sessionCardProps.language} onClose={() => setAttentionOpen(false)} />
+      )}
     </section>
   )
 }

@@ -176,7 +176,7 @@ for (const language of ['en', 'it', 'zh-TW', 'zh-CN']) {
 // dedicated notification walk, so it rides here with the inbox keys it belongs to.
 const INBOX_KEYS = [
   'notification.attentionBody',
-  'inbox.title', 'inbox.empty', 'inbox.question', 'inbox.permission', 'inbox.failure',
+  'inbox.title', 'inbox.empty', 'inbox.noAgent', 'inbox.question', 'inbox.permission', 'inbox.failure',
   'inbox.completion', 'inbox.dismiss', 'inbox.open', 'inbox.queued', 'inbox.cancelPrompt',
   'inbox.steerPrompt', 'inbox.queuePrompt'
 ]

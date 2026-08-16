@@ -1,4 +1,4 @@
-import { Fragment, memo, useCallback, createContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react"
+import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react"
 import { App as CapacitorApp } from "@capacitor/app"
 import { Capacitor, type PluginListenerHandle } from "@capacitor/core"
 import ReactMarkdown from "react-markdown"
@@ -116,29 +116,10 @@ function attentionNamespaceKey(profileID: string, configKeyValue: string): strin
  *  poll cost on machines running many sessions. */
 const INBOX_QUEUED_FANOUT_CAP = 50
 
-/** Cross-session attention inbox (issue #9, Lane B). The panel lane (phase 2) consumes this
- *  context so App.tsx owns the derivation, persistence and notifications while the designer owns
- *  the presentation. Lane C adds the interaction contract: opening an item's session, the
- *  queued-prompt operations (cancel/steer/queue), and the on-demand saved-permission surface. */
-export type AttentionInboxContextValue = {
-  items: readonly AttentionItem[]
-  queuedBySession: ReadonlyMap<string, V2InboxItem[]>
-  badge: number
-  dismiss(item: AttentionItem): void
-  /** Open the item's session (navigating profiles if needed is out of scope — the item is always
-   *  from the active machine; the designer's panel shows only the active machine). */
-  open(item: AttentionItem): void
-  /** Queued-prompt operations (v2 only): cancel/steer/queue an undelivered inbox item. */
-  cancelQueued(sessionID: string, inboxID: string): void
-  steerQueued(sessionID: string, inboxID: string): void
-  queueQueued(sessionID: string, inboxID: string): void
-  /** Saved allow-always grants (v2 only); load on demand, empty until loaded. */
-  savedPermissions: readonly SavedPermission[]
-  loadSavedPermissions(): void
-  revokeSavedPermission(id: string): void
-}
-
-export const AttentionInboxContext = createContext<AttentionInboxContextValue | null>(null)
+// The attention-inbox context (type + value) lives in ./attentionInboxContext so the panel
+// components can import it without a module cycle: App.tsx imports the session list, which renders
+// the panel, which would otherwise have to import the context back from App.tsx.
+import { AttentionInboxContext } from "./attentionInboxContext"
 
 function readSessionTombstones(): Map<string, Set<string>> {
   const result = new Map<string, Set<string>>()

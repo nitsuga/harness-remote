@@ -1181,8 +1181,13 @@ assert.ok(attentionPersistence.includes('export function pruneAttentionState'), 
 
 // --- Attention inbox interaction handlers (issue #9, Lane C) -----------------------------------
 // The context contract must expose the queued-prompt operations, the open action, and the
-// on-demand saved-permission surface the panel lane consumes.
-const inboxContextRegion = app.slice(app.indexOf('export type AttentionInboxContextValue'), app.indexOf('export const AttentionInboxContext'))
+// on-demand saved-permission surface the panel lane consumes. It lives in its own module so the
+// panel components can import it without a module cycle (App → session-list → panel → App).
+const attentionInboxContext = readFileSync(new URL('./attentionInboxContext.ts', import.meta.url), 'utf8')
+const inboxContextRegion = attentionInboxContext.slice(
+  attentionInboxContext.indexOf('export type AttentionInboxContextValue'),
+  attentionInboxContext.indexOf('export const AttentionInboxContext')
+)
 for (const member of [
   'open(item: AttentionItem): void',
   'cancelQueued(sessionID: string, inboxID: string): void',
@@ -1194,6 +1199,9 @@ for (const member of [
 ]) {
   assert.ok(inboxContextRegion.includes(member), `the inbox context contract must expose ${member}`)
 }
+// The context must NOT live in App.tsx: a cycle would form because App imports the session list,
+// which renders the panel, which imports the context (App → session-list → panel → App).
+assert.ok(!app.includes('export const AttentionInboxContext'), 'the inbox context must live outside App.tsx to break the module cycle')
 // Queued-prompt operations are real server mutations: they must take the coordinator's inbox lease
 // through the component's established lease helpers (acquireMutation wraps acquireLease and keeps
 // the lock signal in step with the existing session mutations).
