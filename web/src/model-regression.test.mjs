@@ -49,6 +49,10 @@ assert.match(app, /authoritativeIDs = new Set\(hydratedItems\.map/, 'only an aut
 assert.ok(app.includes('sessionDraftsRef'), 'composer drafts must be preserved per session across navigation')
 assert.ok(app.includes('pendingForkDraftRef'), 'an unconfirmed fork must preserve its draft snapshot for a later manual open')
 assert.match(app, /sessionDraftsRef\.current\.clear\(\)[\s\S]*?pendingForkDraftRef\.current = null/, 'a profile/config transition must drop parked drafts and pending fork snapshots together')
+// PR #22: a send retires the parked draft at the commit boundary, so already-sent text can never
+// resurrect on a session round-trip; an empty outgoing composer deletes the stale entry instead.
+assert.match(app, /function clearParkedDraft\(sessionID: string\)[\s\S]*?sessionDraftsRef\.current\.delete\(sessionDraftKey\(/, 'sends must be able to retire the session\u2019s parked draft')
+assert.ok(app.includes('clearParkedDraft(selectedSession.id)') && app.includes('clearParkedDraft(session.id)'), 'prompt/command and skill sends must retire the parked draft at their commit boundary')
 assert.ok(app.includes('mergedSessionTombstones'), 'runtime and hydrated tombstones must be merged instead of shadowed')
 assert.match(app, /authoritativeGlobalListing[\s\S]*?if \(!refreshIsCurrent\(\)\) return true[\s\S]*?if \(authoritativeGlobalListing\)/, 'tombstones may retire only after an authoritative current refresh')
 assert.ok(app.includes('modelSearchText'), 'model picker should support searching models')

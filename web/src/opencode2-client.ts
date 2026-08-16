@@ -160,18 +160,21 @@ async function v2Raw(config: ServerConfig, path: string, options: RequestOptions
         readTimeout: options.readTimeout
       })
     } catch (error) {
-      // Only genuine transport loss is indeterminate for a mutation: the bridge's `timeout` and
-      // `connection` codes (or a code-less failure) mean the server may have durably admitted the
-      // request before the connection broke. A definite HTTP status — which desktopBridge carries
-      // through from the electron transport for `http`, `redirect` and `response-too-large` — means
-      // the server answered, so it surfaces as a definite error exactly like web/Capacitor, with
-      // the status preserved (409 admission conflicts keep resolving through isAdmissionConflict).
-      // The remaining bridge codes (`invalid-path`, `unknown-profile`, ...) fail before any request
-      // leaves the renderer, so nothing was admitted and they are definite too.
+      // Any non-GET mutation whose answer never made it back is indeterminate: the server may have
+      // durably admitted the request before the connection broke. The bridge's `timeout` and
+      // `connection` codes (or a code-less failure) mean the answer never arrived, and
+      // `response-too-large` means the server answered but the response body was unreadable — the
+      // electron transport attaches no status to it, so the mutation's outcome is unknowable either
+      // way. A definite HTTP status — carried through from the electron transport for `http` and
+      // `redirect` — means the server answered with a status, so it surfaces as a definite error
+      // exactly like web/Capacitor, with the status preserved (409 admission conflicts keep
+      // resolving through isAdmissionConflict). The remaining bridge codes (`invalid-path`,
+      // `unknown-profile`, ...) fail before any request leaves the renderer, so nothing was
+      // admitted and they are definite too.
       const status = (error as Error & { status?: number }).status
       const code = (error as Error & { code?: string }).code
-      const transportLoss = status === undefined && (code === undefined || code === "timeout" || code === "connection")
-      if (method === "POST" && transportLoss) throw new IndeterminateDeliveryError((error as Error).message)
+      const lostAnswer = status === undefined && (code === undefined || code === "timeout" || code === "connection" || code === "response-too-large")
+      if (method !== "GET" && lostAnswer) throw new IndeterminateDeliveryError((error as Error).message)
       throw error
     }
     return { status: response.status, body: response.data }
@@ -228,7 +231,10 @@ async function v2Raw(config: ServerConfig, path: string, options: RequestOptions
   try {
     return { status: response.status, body: await response.json() }
   } catch (error) {
-    if (method === "POST") throw new IndeterminateDeliveryError((error as Error).message)
+    // The status was 2xx, so the server answered; an unreadable body on a mutation (POST, DELETE,
+    // PATCH) leaves its exact outcome unknown — the same reasoning as the desktop
+    // `response-too-large` case.
+    if (method !== "GET") throw new IndeterminateDeliveryError((error as Error).message)
     throw error
   }
 }

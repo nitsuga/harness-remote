@@ -593,20 +593,21 @@ for (const language of ['en', 'it', 'zh-TW', 'zh-CN']) {
 // --- Desktop definite-error classification (issue #22) ---------------------------------------
 
 // The desktop bridge surfaces transport failures as thrown Errors carrying the electron transport's
-// code and (for HTTP failures) status. The v2 client must wrap only genuine transport loss — a POST
-// whose outcome the server may have durably admitted before the connection broke — as
-// IndeterminateDeliveryError. A definite HTTP status means the server answered, so 4xx/5xx on the
-// desktop build surface as definite errors exactly like web/Capacitor, with the status preserved so
-// the 409 admission-conflict signal keeps resolving through isAdmissionConflict.
+// code and (for HTTP failures) status. The v2 client must wrap only genuine answer loss on a
+// mutation — POST, DELETE, PATCH (anything but GET) — as IndeterminateDeliveryError, since the
+// server may have durably admitted the request before the answer was lost. A definite HTTP status
+// means the server answered, so 4xx/5xx on the desktop build surface as definite errors exactly
+// like web/Capacitor, with the status preserved so the 409 admission-conflict signal keeps
+// resolving through isAdmissionConflict.
 const desktopBridgeSource = readFileSync(new URL('./desktopBridge.ts', import.meta.url), 'utf8')
 assert.match(desktopBridgeSource, /\.status = result\.error\.status/, 'the desktop bridge must keep the HTTP status from the electron transport')
 assert.match(desktopBridgeSource, /\.code = result\.error\.code/, 'the desktop bridge must carry the electron transport error code onto the thrown error')
 const desktopBranch = clientSource.slice(clientSource.indexOf('  if (isDesktopPlatform()) {'), clientSource.indexOf('  const target = `${baseUrl(config)}${path}`'))
 assert.ok(
-  desktopBranch.includes('const transportLoss = status === undefined && (code === undefined || code === "timeout" || code === "connection")'),
-  'only bridge timeout/connection (or code-less) transport loss may be classified as indeterminate'
+  desktopBranch.includes('const lostAnswer = status === undefined && (code === undefined || code === "timeout" || code === "connection" || code === "response-too-large")'),
+  'only bridge timeout/connection (or code-less) transport loss and the unreadable response-too-large answer may be classified as indeterminate'
 )
-assert.match(desktopBranch, /if \(method === "POST" && transportLoss\) throw new IndeterminateDeliveryError/, 'the desktop POST wrap must apply only to genuine transport loss, never to a definite HTTP status')
+assert.match(desktopBranch, /if \(method !== "GET" && lostAnswer\) throw new IndeterminateDeliveryError/, 'the desktop wrap must cover every mutation method (POST/DELETE/PATCH), never a definite HTTP status')
 assert.ok(
   !desktopBranch.includes('if (method === "POST") throw new IndeterminateDeliveryError((error as Error).message)'),
   'the desktop branch must not blanket-wrap every POST error as indeterminate'
@@ -614,6 +615,28 @@ assert.ok(
 assert.ok(
   desktopBranch.includes('throw error') && desktopBranch.includes('const status = (error as Error & { status?: number }).status'),
   'a desktop error with a definite HTTP status must rethrow as-is, keeping its status'
+)
+
+// The DELETE mutations (deleteSession, cancelInboxItem) are idempotent and the server may have
+// committed them before the connection broke, so their lost answers must be indeterminate exactly
+// like POST — the wrap condition must be method-based, not a POST allowlist.
+assert.match(
+  desktopBranch,
+  /method !== "GET" && lostAnswer/,
+  'a lost DELETE/PATCH answer must be classified indeterminate alongside POST on the desktop transport'
+)
+// The electron transport attaches no status to `response-too-large` (see desktop-transport.test.mjs),
+// so the client cannot treat it as a definite server answer: it means the server answered but the
+// response body was unreadable, which for a mutation leaves the outcome unknowable.
+assert.ok(
+  desktopBranch.includes('code === "response-too-large"'),
+  'response-too-large must be classified as an unreadable answer (indeterminate for mutations), not a definite status-bearing error'
+)
+// The web branch applies the same non-GET rule to an unreadable 2xx body (the server answered, so
+// a mutation's exact outcome — e.g. the admitted message id — is lost).
+assert.ok(
+  clientSource.includes('if (method !== "GET") throw new IndeterminateDeliveryError((error as Error).message)'),
+  'the web branch must classify an unreadable 2xx body as indeterminate for every mutation method, not just POST'
 )
 
 // --- Queued inbox cancellation (issue #22) ---------------------------------------------------

@@ -86,6 +86,12 @@ for (const translator of [en, it, zh, zhCN]) {
   assert.notEqual(translator('detail.deliveryIndeterminate'), 'detail.deliveryIndeterminate')
 }
 
+// The queued-prompt cancel affordance must be localized in every language, so a queued row can
+// always offer a labelled way out of the queue.
+for (const translator of [en, it, zh, zhCN]) {
+  assert.notEqual(translator('detail.cancelQueuedPrompt'), 'detail.cancelQueuedPrompt')
+}
+
 assert.equal(en('settings.deleteServerTitle'), 'Delete saved server?')
 assert.equal(it('settings.deleteServerTitle'), 'Eliminare il server salvato?')
 assert.equal(zh('settings.deleteServerTitle'), '刪除已儲存的伺服器？')

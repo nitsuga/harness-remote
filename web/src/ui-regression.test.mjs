@@ -389,7 +389,7 @@ assert.match(app, /const readmission = await sendCommandV2\([\s\S]*?durableID: r
 // inbox, optimistic rows tagged with queue delivery, and inbox-only queued rows — on both layouts.
 assert.match(
   app,
-  /message\.info\.delivery === "queue" && <div className="message-delivery-notice">\{t\('detail\.queuedPrompt'\)\}/,
+  /message\.info\.delivery === "queue" && \([\s\S]*?<div className="message-delivery-notice">[\s\S]*?\{t\('detail\.queuedPrompt'\)\}/,
   'every queued row must render the localized queue status in the shared message view'
 )
 
@@ -870,8 +870,12 @@ assert.match(app, /if \(!observation\.passive\) \{[\s\S]*?sessionActionPendingRe
 assert.match(app, /const remaining = COMPACTION_PENDING_MAX_MS[\s\S]*?if \(remaining <= 0\) \{[\s\S]*?observation\.passive = true[\s\S]*?setSessionActionPending\(null\)[\s\S]*?setActionNotice\(t\('detail\.compactUnconfirmed'\)\)/, 'the deadline must resolve the pending lock while keeping the passive watch on the exact id')
 assert.match(app, /if \(observation\.passive\) return/, 'the passive watcher must not schedule a second deadline of its own')
 // M6: desktop row actions reveal when hovering the open control, never the whole card, and the
-// open control advertises hover on itself without the misleading full-card pointer.
-assert.match(styles, /\.sidebar-sessions \.session-card:has\(\.session-card-open:hover\) \.inline-actions/, 'desktop row actions must reveal when hovering the open control, not the whole card')
+// open control advertises hover on itself without the misleading full-card pointer. The actions
+// container is part of the hover match so the reveal survives the pointer's travel from the open
+// control to the icons — the hover-trap that collapsed the row mid-motion and made rename/delete
+// unreachable in one mouse movement.
+assert.match(styles, /\.sidebar-sessions \.session-card:has\(\.session-card-open:hover,\s*\.inline-actions:hover\) \.inline-actions/, 'desktop row actions must reveal when hovering the open control and stay revealed over the actions themselves')
+assert.match(styles, /\.sidebar-sessions \.session-card:has\(\.session-card-open:hover[\s\S]*?\) \.inline-actions[\s\S]*?\.sidebar-sessions \.session-card:focus-within \.inline-actions/, 'keyboard focus-within must keep revealing desktop row actions')
 assert.match(styles, /\.sidebar-sessions \.session-card-open:hover \{[^}]*background:/, 'the open control must advertise hover on itself')
 assert.equal(/\.session-card\s*\{[^}]*cursor:\s*pointer/.test(styles), false, 'the card must never reclaim the misleading full-card pointer')
 // M7: disabled session-action menu items explain themselves; the toggle has no inert aria-busy.
@@ -886,5 +890,32 @@ assert.match(app, /function hasAnyUserMessage\([\s\S]*?\[\.\.\.messages, \.\.\.o
 assert.match(app, /disabled: revertDisabled, disabledReason: revertDisabled \? t\('detail\.actionLocked'\) : undefined/, 'MessageArticle must show the revert affordance disabled, aligned with the run view')
 assert.match(styles, /\.session-action-pending \{[^}]*text-align:\s*center/, 'the pending action label must centre under its toggle on narrow appbars')
 assert.match(styles, /\.sidebar-sessions \.session-card \.session-card-directory \{[^}]*display:\s*none/, 'the sidebar must not repeat the directory already shown in its meta line')
+
+// --- Second review findings (PR #22) ------------------------------------------------------------
+// N1: a successful send must retire the session's parked draft (prompt, command, and skill —
+// including a skill activation confirmed later by poll), and an empty outgoing composer must
+// delete a stale parked entry, so already-sent text never resurfaces on a session round-trip.
+assert.match(app, /function clearParkedDraft\(sessionID: string\) \{\s*sessionDraftsRef\.current\.delete\(sessionDraftKey\(activeProfileID, configKey\(config\), sessionID\)\)\s*\}/, 'a successful dispatch must be able to retire the session\u2019s parked draft')
+assert.match(app, /if \(previousContext\.sessionID && \(composer\.trim\(\) \|\| attachments\.length > 0\)\) \{\s*sessionDraftsRef\.current\.set\([\s\S]*?\} else if \(previousContext\.sessionID\) \{[\s\S]*?sessionDraftsRef\.current\.delete\(/, 'an empty outgoing composer must delete the stale parked draft instead of leaving it to resurrect')
+assert.ok(app.includes('clearParkedDraft(session.id)') && app.includes('clearParkedDraft(selectedSession.id)'), 'prompt, command, and skill sends must all retire the parked draft at their commit boundary')
+assert.ok(app.includes('clearParkedDraft(sessionID)'), 'a skill activation confirmed later by poll must retire the parked draft too')
+// N2: the sessions list view renders action notices (fork created/unconfirmed) so the mobile
+// no-hijack fork path actually announces its result where the user is standing.
+assert.match(app, /<SessionsPanel[\s\S]*?actionNotice=\{actionNotice\}/, 'the sessions list must receive the action notice')
+assert.ok(sessionList.includes('actionNotice && <div className="notice info fade-in" role="status" aria-live="polite">'), 'the sessions list must render the action notice as visible status information')
+// N3: the MessagesPane memo must not be defeated by an inline lease-change callback.
+assert.match(app, /const handleLeaseChanged = useCallback\(\(\) => bumpMutationLock\(\(value\) => value \+ 1\), \[\]\)/, 'the lease-change signal must be identity-stable for the memoized message list')
+assert.match(app, /onLeaseChanged=\{handleLeaseChanged\}/, 'MessagesPane must receive the stable lease-change callback')
+// N4: mutation-locked Send and New buttons explain themselves, consistent with the menu items.
+assert.match(composerView, /title=\{mutationLocked \? t\('detail\.actionLocked'\) : t\('detail\.send'\)\}/, 'the composer send button must explain the mutation lock in its tooltip')
+assert.ok(sessionList.includes("title={offline ? t('sessions.offlineHint') : mutationLocked ? t('detail.actionLocked') : t('sessions.new')}"), 'both New Session buttons must explain the mutation lock in their tooltip')
+// N5: queued "waiting to send" rows get a cancel affordance (mobile and desktop share the row
+// view) that calls the client's inbox cancel, removes the row optimistically, and refreshes.
+assert.match(app, /function queuedInboxItemID\([\s\S]*?message\.info\.durableID[\s\S]*?optimistic-/, 'a queued row must be cancelable only by a real server inbox id')
+assert.match(app, /await api\.cancelInboxItem\(config, session\.id, inboxID, session\.directory\)/, 'queued cancel must call the client inbox cancel method')
+assert.match(app, /setQueuedInboxMessages\(\(current\) => \{[\s\S]*?queuedInboxItemID\(candidate\) !== inboxID[\s\S]*?setOptimisticUserMessages\(\(current\) => \{[\s\S]*?queuedInboxItemID\(candidate\) !== inboxID/, 'a cancelled queued row must be removed optimistically from both the inbox rows and any optimistic twin')
+assert.ok(app.includes('className="message-cancel-queued"'), 'the queued row must render a clearly-labelled cancel control')
+assert.match(app, /className="message-cancel-queued"[\s\S]*?disabled=\{cancellingInboxIDs\.has\(cancelableInboxID\)\}/, 'the cancel control must disable itself while its request is in flight')
+assert.match(styles, /\.message-cancel-queued\s*\{/, 'the queued cancel control needs its own styles')
 
 console.log('ui regression tests passed')

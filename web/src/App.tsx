@@ -1638,6 +1638,17 @@ function queuedInboxMessageEnvelopes(sessionID: string, inbox: V2InboxItem[], in
   return rows
 }
 
+/** The server-side inbox/message id for a queued row, when one exists and can be cancelled:
+ *  inbox-derived rows carry it as their own id, and optimistic rows carry it as the durable
+ *  admission id once the server confirmed the admission. An optimistic row still awaiting its
+ *  admission response has no server id yet — there is nothing on the server to cancel, so it is
+ *  not cancelable (its send is still being confirmed). */
+function queuedInboxItemID(message: MessageEnvelope): string | null {
+  if (message.info.delivery !== "queue") return null
+  if (message.info.durableID) return message.info.durableID
+  return message.info.id.startsWith("optimistic-") ? null : message.info.id
+}
+
 function createLocalAssistantMessage(sessionID: string, text: string): MessageEnvelope {
   const now = Date.now()
   return {
@@ -2088,7 +2099,9 @@ const MessageArticle = memo(function MessageArticle({
   actions,
   onRevertMessage,
   revertDisabled,
-  t
+  t,
+  onCancelQueuedMessage,
+  cancellingInboxIDs
 }: {
   message: MessageEnvelope & { text: string }
   config: ServerConfig
@@ -2097,7 +2110,10 @@ const MessageArticle = memo(function MessageArticle({
   onRevertMessage: (messageID: string) => void
   revertDisabled: boolean
   t: Translator
+  onCancelQueuedMessage: (message: MessageEnvelope) => void
+  cancellingInboxIDs: ReadonlySet<string>
 }) {
+  const cancelableInboxID = message.info.delivery === "queue" ? queuedInboxItemID(message) : null
   return (
     <MessageContextMenu
       text={message.text}
@@ -2128,7 +2144,22 @@ const MessageArticle = memo(function MessageArticle({
           />
         )
       )}
-      {message.info.delivery === "queue" && <div className="message-delivery-notice">{t('detail.queuedPrompt')}</div>}
+      {message.info.delivery === "queue" && (
+        <div className="message-delivery-notice">
+          <span>{t('detail.queuedPrompt')}</span>
+          {cancelableInboxID && (
+            <button
+              type="button"
+              className="message-cancel-queued"
+              onClick={() => onCancelQueuedMessage(message)}
+              disabled={cancellingInboxIDs.has(cancelableInboxID)}
+              title={t('detail.cancelQueuedPrompt')}
+            >
+              {t('detail.cancelQueuedPrompt')}
+            </button>
+          )}
+        </div>
+      )}
     </MessageContextMenu>
   )
 })
@@ -2162,7 +2193,9 @@ const MessagesPane = memo(function MessagesPane({
   onLeaseChanged,
   jumpAffordances,
   onJumpToTop,
-  onJumpToBottom
+  onJumpToBottom,
+  onCancelQueuedMessage,
+  cancellingInboxIDs
 }: {
   loadingSessionID: string | null
   loadedSessionID: string | null
@@ -2190,6 +2223,8 @@ const MessagesPane = memo(function MessagesPane({
   jumpAffordances: { top: boolean; bottom: boolean }
   onJumpToTop: () => void
   onJumpToBottom: () => void
+  onCancelQueuedMessage: (message: MessageEnvelope) => void
+  cancellingInboxIDs: ReadonlySet<string>
 }) {
   return (
     <div className="messages-wrap">
@@ -2226,7 +2261,7 @@ const MessagesPane = memo(function MessagesPane({
           <>
             {timelineGroups.map((group) =>
               group.kind === "message" ? (
-                <MessageArticle key={group.message.info.id} message={group.message} config={config} directory={directory} actions={actions} onRevertMessage={onRevertMessage} revertDisabled={revertDisabled} t={t} />
+                <MessageArticle key={group.message.info.id} message={group.message} config={config} directory={directory} actions={actions} onRevertMessage={onRevertMessage} revertDisabled={revertDisabled} t={t} onCancelQueuedMessage={onCancelQueuedMessage} cancellingInboxIDs={cancellingInboxIDs} />
               ) : (
                 <ConversationRunView
                   key={group.key}
@@ -2476,6 +2511,11 @@ function App() {
             sessionDraftKey(previousContext.profileID, previousContext.configKey, previousContext.sessionID),
             { text: composer, attachments: [...attachments] }
           )
+        } else if (previousContext.sessionID) {
+          // The outgoing composer is empty, so any parked draft for this session is stale: the
+          // user cleared it deliberately (or already sent it), and restoring the old text on the
+          // next visit would resurrect exactly what they removed.
+          sessionDraftsRef.current.delete(sessionDraftKey(previousContext.profileID, previousContext.configKey, previousContext.sessionID))
         }
         const saved = context.sessionID
           ? sessionDraftsRef.current.get(sessionDraftKey(context.profileID, context.configKey, context.sessionID))
@@ -2540,6 +2580,12 @@ function App() {
   /** Server-admitted but still queued prompts (from `GET /api/session/{id}/inbox`), rendered as
    *  transcript rows with the queued indicator so they survive reconciliation. */
   const [queuedInboxMessages, setQueuedInboxMessages] = useState<MessageEnvelope[]>([])
+  /** Inbox ids whose cancellation request is in flight, so the queued row's cancel control
+   *  disables itself instead of double-firing. A ReadonlySet keeps the reference stable across
+   *  unrelated renders, so the message-list memo is not defeated on every keystroke. */
+  const cancellingInboxIDsRef = useRef<ReadonlySet<string>>(new Set())
+  const [cancellingInboxIDs, setCancellingInboxIDs] = useState<ReadonlySet<string>>(() => new Set())
+  cancellingInboxIDsRef.current = cancellingInboxIDs
   const [todos, setTodos] = useState<TodoItem[]>([])
   const [diffFiles, setDiffFiles] = useState<DiffFile[]>([])
   const [pendingQuestions, setPendingQuestions] = useState<QuestionRequest[]>([])
@@ -2572,6 +2618,13 @@ function App() {
   } | null>(null)
   function sessionDraftKey(profileID: string, configKeyValue: string, sessionID: string | null): string {
     return `${profileID}\u0000${configKeyValue}\u0000${sessionID ?? ""}`
+  }
+  /** Retires a session's parked draft once its text has actually been sent: the composer was
+   *  flushed by the dispatch, so an older parked entry from a previous visit must not resurrect
+   *  the already-sent text on a session round-trip. Only called at commit boundaries, when the
+   *  send is confirmed (or, for skills, when the activation is later confirmed by poll). */
+  function clearParkedDraft(sessionID: string) {
+    sessionDraftsRef.current.delete(sessionDraftKey(activeProfileID, configKey(config), sessionID))
   }
   const attachmentInputRef = useRef<HTMLInputElement | null>(null)
   const [busySending, setBusySending] = useState(false)
@@ -3465,6 +3518,9 @@ function App() {
         if (entry.sessionID !== sessionID) continue
         if (transcript.some((message) => message.info.id === requestID)) {
           pendingSkillRequestsRef.current.delete(requestID)
+          // The activation is confirmed; the composer was flushed for it, so the session's
+          // parked draft must not resurrect the activation text on a later round-trip.
+          clearParkedDraft(sessionID)
           if (isCurrentLoad()) setActionNotice(t('help.skillActivated', { skill: entry.skillName }))
         }
       }
@@ -3894,6 +3950,11 @@ function App() {
     setPendingPermissions((current) => current.filter((item) => item.id !== id))
   }, [])
 
+  /** Identity-stable lease-change signal for the memoized MessagesPane: an inline arrow would be
+   *  a fresh reference every render, which defeated the memo and re-formatted every message on
+   *  every keystroke even though nothing about the lease changed. */
+  const handleLeaseChanged = useCallback(() => bumpMutationLock((value) => value + 1), [])
+
   function scrollMessagesToBottom(behavior: ScrollBehavior = "smooth") {
     requestAnimationFrame(() => {
       syncChatBottomClearance()
@@ -3948,6 +4009,56 @@ function App() {
     if (sessionActionPendingRef.current === "fork") return
     void revertToMessageRef.current(messageID)
   }, [])
+
+  /** Cancels a server-admitted queued prompt by inbox id (`DELETE /api/session/{id}/inbox/{id}`).
+   *  The row is removed optimistically and the transcript is refreshed; the server answers
+   *  definite statuses (409 — already delivered or executing; 404 — unknown session), so a
+   *  failure surfaces as a visible error instead of being retried blindly. Deliberately
+   *  out-of-band like Stop: the queued prompt's own send lease is long gone and the item is not
+   *  a coordinator mutation, so no lease is acquired — the in-flight guard is the cancelling set.
+   *  The body lives behind a ref so the identity-stable callback always calls the current one. */
+  const cancelQueuedMessageRef = useRef<(message: MessageEnvelope) => void>(() => undefined)
+  const cancelQueuedMessage = useCallback((message: MessageEnvelope) => {
+    cancelQueuedMessageRef.current(message)
+  }, [])
+  cancelQueuedMessageRef.current = (message: MessageEnvelope) => {
+    const inboxID = queuedInboxItemID(message)
+    const session = selectedSessionRef.current
+    if (!inboxID || !session || session.id !== message.info.sessionID) return
+    const cancelContext = { profileID: activeProfileID, configKey: configKey(config), sessionID: session.id }
+    if (!mutationCoordinator.isContextCurrent(cancelContext)) return
+    if (cancellingInboxIDsRef.current.has(inboxID)) return
+    cancellingInboxIDsRef.current = new Set(cancellingInboxIDsRef.current).add(inboxID)
+    setCancellingInboxIDs(cancellingInboxIDsRef.current)
+    setRuntimeError(null)
+    void (async () => {
+      try {
+        await api.cancelInboxItem(config, session.id, inboxID, session.directory)
+        if (!mutationCoordinator.isContextCurrent(cancelContext)) return
+        // Definite success (204): drop the row now — both the server-inbox row and any optimistic
+        // twin carrying the same durable id — then reconcile so the transcript converges.
+        setQueuedInboxMessages((current) => {
+          const remaining = current.filter((candidate) => queuedInboxItemID(candidate) !== inboxID)
+          return remaining.length === current.length ? current : remaining
+        })
+        setOptimisticUserMessages((current) => {
+          const remaining = current.filter((candidate) => queuedInboxItemID(candidate) !== inboxID)
+          return remaining.length === current.length ? current : remaining
+        })
+        void loadSelected(session.id, session.directory, true).catch(() => undefined)
+        void refreshSessions(false, undefined, true).catch(() => undefined)
+      } catch (err) {
+        // 409/404 and transport failures are definite: name them instead of leaving the row
+        // half-removed or pretending the cancel succeeded.
+        if (mutationCoordinator.isContextCurrent(cancelContext)) setRuntimeError((err as Error).message)
+      } finally {
+        if (cancellingInboxIDsRef.current.has(inboxID)) {
+          cancellingInboxIDsRef.current = new Set([...cancellingInboxIDsRef.current].filter((id) => id !== inboxID))
+          setCancellingInboxIDs(cancellingInboxIDsRef.current)
+        }
+      }
+    })()
+  }
 
   const openSessionRef = useRef(openSession)
   openSessionRef.current = openSession
@@ -4134,6 +4245,7 @@ function App() {
       if (!isLeaseContextCurrent(lease)) return
       // A successful 204 is the commit point. Refreshes are best-effort and must not turn a
       // completed activation into a failed command or put the slash text back in the composer.
+      clearParkedDraft(session.id)
       setOptimisticUserMessages((current) => current.filter((message) => message.info.id !== optimisticMessage.info.id))
       setActionNotice(t('help.skillActivated', { skill: skill.name }))
       let refreshFailed = false
@@ -4286,6 +4398,9 @@ function App() {
       try {
         const admission = await sendCommandV2(config, selectedSession.id, command, args, selectedSession.directory, activeModel, activeAgentID, commandRequestID)
         if (!isLeaseContextCurrent(commandLease)) return
+        // sendCommand is the commit boundary. The composer was flushed, so any parked draft for
+        // this session must not resurrect the dispatched command on a round-trip.
+        clearParkedDraft(selectedSession.id)
         // Tag the optimistic row with the durable admission metadata instead of removing it: the
         // exact message id retires the bubble by id once the resolved prompt reaches history (or the
         // inbox), and the server-recorded delivery keeps any queued status visible in the meantime.
@@ -4351,6 +4466,7 @@ function App() {
               }
             }
             if (resolved && isLeaseContextCurrent(commandLease)) {
+              clearParkedDraft(selectedSession.id)
               setActionNotice(t('detail.deliveryAdmitted'))
               void loadSelected(selectedSession.id, selectedSession.directory, true).catch(() => undefined)
               void refreshSessions(false, undefined, true).catch(() => undefined)
@@ -4406,6 +4522,9 @@ function App() {
       const admission = await sendPromptV2(config, selectedSession.id, text, selectedSession.directory, activeModel, activeAgentID, attachments, promptDelivery, promptRequestID)
       promptDispatched = true
       if (!isLeaseContextCurrent(promptLease)) return
+      // Dispatch is the commit boundary for the parked draft too: the composer was flushed, so a
+      // parked entry from a previous visit must not resurrect this prompt on a round-trip.
+      clearParkedDraft(selectedSession.id)
       // Tag the optimistic row with the durable admission metadata instead of removing it: the exact
       // message id retires the bubble by id once the prompt reaches history (or the inbox), and the
       // server-recorded delivery keeps the queued status visible until the inbox stops listing it.
@@ -4463,6 +4582,7 @@ function App() {
         }
         if (resolved && isLeaseContextCurrent(promptLease)) {
           promptDispatched = true
+          clearParkedDraft(selectedSession.id)
           setActionNotice(t('detail.deliveryAdmitted'))
           void loadSelected(selectedSession.id, selectedSession.directory, true).catch(() => undefined)
           void refreshSessions(false, undefined, true).catch(() => undefined)
@@ -5805,6 +5925,7 @@ function App() {
           eventStreamState={eventStreamState}
           eventStreamText={eventStreamText}
           runtimeError={runtimeError}
+          actionNotice={actionNotice}
           t={t}
           onQueryChange={setQuery}
           onRefresh={() => void refreshSessionsWithIndicator().catch(() => undefined)}
@@ -6004,7 +6125,9 @@ function App() {
             onQuestionResolved={handleQuestionResolved}
             onPermissionResolved={handlePermissionResolved}
             coordinator={mutationCoordinator}
-            onLeaseChanged={() => bumpMutationLock((value) => value + 1)}
+            onLeaseChanged={handleLeaseChanged}
+            onCancelQueuedMessage={cancelQueuedMessage}
+            cancellingInboxIDs={cancellingInboxIDs}
           />
           <SessionComposer
             selected={Boolean(selectedSession) && sessionActionPending !== "fork"}

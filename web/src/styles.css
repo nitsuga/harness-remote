@@ -1622,8 +1622,11 @@ a:focus-visible,
 
 /* Collapsed to zero width so the title's column reclaims the space, rather than just hiding
    still-layout-reserving buttons behind invisible pixels. The reveal is scoped to hovering the
-   open control itself (M6): hovering dead card padding must not advertise row actions. */
-.sidebar-sessions .session-card:has(.session-card-open:hover) .inline-actions,
+   open control itself (M6): hovering dead card padding must not advertise row actions. The
+   actions container is part of the match so the actions stay revealed while the pointer travels
+   from the open control to the icons — without it, the hover gap between the two collapsed the
+   row and the mouse could never reach the buttons in one motion. */
+.sidebar-sessions .session-card:has(.session-card-open:hover, .inline-actions:hover) .inline-actions,
 .sidebar-sessions .session-card:focus-within .inline-actions {
   width: auto;
   opacity: 1;
@@ -1949,6 +1952,36 @@ a:focus-visible,
   color: var(--muted);
   font-size: .75rem;
   font-style: italic;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+/* The queued row's cancel affordance reads as a text link beside the queued notice — a small,
+   clearly-labelled control that does not out-shout the row it sits on (mobile and desktop). */
+.message-cancel-queued {
+  font-style: normal;
+  font-size: .75rem;
+  line-height: 1.4;
+  color: var(--primary);
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+  text-decoration: underline;
+}
+
+.message-cancel-queued:hover:not(:disabled) {
+  color: var(--primary-strong);
+  background: transparent;
+  text-decoration: underline;
+}
+
+.message-cancel-queued:disabled {
+  opacity: .55;
+  cursor: not-allowed;
+  text-decoration: none;
 }
 
 .message.assistant {

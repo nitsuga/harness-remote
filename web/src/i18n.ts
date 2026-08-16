@@ -181,6 +181,7 @@ type TranslationKey =
   | 'detail.requiresUserMessage'
   | 'detail.actionWhileWorking'
   | 'detail.queuedPrompt'
+  | 'detail.cancelQueuedPrompt'
   | 'todo.title'
   | 'todo.hide'
   | 'todo.show'
@@ -503,6 +504,7 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.requiresUserMessage': 'Needs at least one message in this session.',
     'detail.actionWhileWorking': 'Available once the agent is idle.',
     'detail.queuedPrompt': 'Queued · waiting to send',
+    'detail.cancelQueuedPrompt': 'Cancel queued prompt',
     'todo.title': 'Todo Items',
     'todo.hide': 'Hide',
     'todo.show': 'Show',
@@ -824,6 +826,7 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.requiresUserMessage': 'Richiede almeno un messaggio in questa sessione.',
     'detail.actionWhileWorking': 'Disponibile quando l’agente è inattivo.',
     'detail.queuedPrompt': 'In coda · in attesa di invio',
+    'detail.cancelQueuedPrompt': 'Annulla il prompt in coda',
     'todo.title': 'Todo',
     'todo.hide': 'Nascondi',
     'todo.show': 'Mostra',
@@ -1138,6 +1141,7 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.requiresUserMessage': '此工作階段需要至少一則訊息。',
     'detail.actionWhileWorking': '代理程式閒置後即可使用。',
     'detail.queuedPrompt': '已排隊 · 等待傳送',
+    'detail.cancelQueuedPrompt': '取消佇列中的提示',
     'todo.title': '待辦事項',
     'todo.hide': '隱藏',
     'todo.show': '顯示',
@@ -1401,6 +1405,7 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.requiresUserMessage': '此会话至少需要一条消息。',
     'detail.actionWhileWorking': '代理空闲后即可使用。',
     'detail.queuedPrompt': '已排队 · 等待发送',
+    'detail.cancelQueuedPrompt': '取消队列中的提示',
     'todo.title': '待办事项',
     'todo.hide': '隐藏',
     'todo.show': '显示',

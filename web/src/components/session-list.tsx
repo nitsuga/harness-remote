@@ -211,7 +211,7 @@ export function SessionSidebar({
         <button onClick={onRefresh} className="btn-secondary" disabled={refreshing} aria-label={t('sessions.refresh')} title={t('sessions.refresh')}>
           {refreshing ? <LoadingIcon size={16} /> : <RefreshIcon size={16} />}
         </button>
-        <button onClick={onNewSession} className="btn-primary" disabled={creating || mutationLocked || offline} aria-label={t('sessions.new')} title={offline ? t('sessions.offlineHint') : t('sessions.new')}>
+        <button onClick={onNewSession} className="btn-primary" disabled={creating || mutationLocked || offline} aria-label={t('sessions.new')} title={offline ? t('sessions.offlineHint') : mutationLocked ? t('detail.actionLocked') : t('sessions.new')}>
           {creating ? <LoadingIcon size={16} /> : <PlusIcon size={16} />}
         </button>
       </div>
@@ -247,6 +247,7 @@ export function SessionsPanel({
   eventStreamState,
   eventStreamText,
   runtimeError,
+  actionNotice,
   t,
   onQueryChange,
   onRefresh,
@@ -271,6 +272,9 @@ export function SessionsPanel({
   eventStreamState: string
   eventStreamText: string
   runtimeError: string | null
+  /** Informational notices (fork created/unconfirmed, delivery state) — the sessions list must
+   *  announce them too, not just the detail and help views. */
+  actionNotice: string | null
   t: Translator
   onQueryChange: (value: string) => void
   onRefresh: () => void
@@ -292,7 +296,7 @@ export function SessionsPanel({
         </div>
         <div className="inline-actions sessions-header-actions">
           <button onClick={onRefresh} className="btn-secondary" disabled={refreshing}>{refreshing ? <LoadingIcon size={18} /> : <RefreshIcon size={18} />}{t('sessions.refresh')}</button>
-          <button onClick={onNewSession} className="btn-primary" disabled={creating || mutationLocked || offline} title={offline ? t('sessions.offlineHint') : undefined}>{creating ? <LoadingIcon size={18} /> : <PlusIcon size={18} />}{creating ? t('sessions.creating') : t('sessions.new')}</button>
+          <button onClick={onNewSession} className="btn-primary" disabled={creating || mutationLocked || offline} title={offline ? t('sessions.offlineHint') : mutationLocked ? t('detail.actionLocked') : t('sessions.new')}>{creating ? <LoadingIcon size={18} /> : <PlusIcon size={18} />}{creating ? t('sessions.creating') : t('sessions.new')}</button>
         </div>
       </div>
       <div className="toolbar"><input placeholder={t('sessions.searchPlaceholder')} value={query} onChange={(event) => onQueryChange(event.target.value)} className="search" /></div>
@@ -303,6 +307,7 @@ export function SessionsPanel({
           : filteredSessions.map((session) => <SessionCard key={session.id} session={session} {...sessionCardProps} />)}
       </div>
       {runtimeError && !(offline && filteredSessions.length === 0) && <div className="error fade-in">✗ {runtimeError}</div>}
+      {actionNotice && <div className="notice info fade-in" role="status" aria-live="polite">ℹ {actionNotice}</div>}
       {jumpControls}
     </section>
   )

@@ -162,7 +162,7 @@ export function SessionComposer({
               type="button"
               onClick={sendNow}
               aria-label={t('detail.send')}
-              title={t('detail.send')}
+              title={mutationLocked ? t('detail.actionLocked') : t('detail.send')}
               disabled={!selected || mutationLocked || pendingPreparation > 0}
               className="btn-primary composer-send"
             >
