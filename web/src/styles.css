@@ -536,7 +536,8 @@ a:focus-visible,
 }
 
 .pill.busy,
-.pill.retry {
+.pill.retry,
+.pill.retrying {
   color: var(--warning);
   background: var(--warning-soft);
 }
@@ -544,6 +545,27 @@ a:focus-visible,
 .pill.waiting {
   color: var(--primary);
   background: var(--primary-soft);
+}
+
+/* Completed and failed mirror the subagent status palette (issue #8) so the session list and the
+   subagent cards tell the same colour story. Needs-attention is a crash with no terminal event: it
+   borrows the amber "look here" of the live states, but the red label and hairline ring keep it
+   clearly short of the definitive failed pill. The ring is an inset shadow so the pill's box size —
+   and the stats row layout — does not change. */
+.pill.completed {
+  color: var(--success);
+  background: var(--success-soft);
+}
+
+.pill.failed {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.pill.needs-attention {
+  color: var(--danger);
+  background: var(--warning-soft);
+  box-shadow: inset 0 0 0 1px var(--danger-border);
 }
 
 .status-dot {
@@ -1527,6 +1549,7 @@ a:focus-visible,
    distinct without pretending the whole session is idle. */
 .sidebar-sessions .session-card.busy::before,
 .sidebar-sessions .session-card.retry::before,
+.sidebar-sessions .session-card.retrying::before,
 .sidebar-sessions .session-card.waiting::before {
   content: "";
   position: absolute;

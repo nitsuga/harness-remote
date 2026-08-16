@@ -10,6 +10,8 @@ const shell = readFileSync(new URL('./components/shell.tsx', import.meta.url), '
 const panels = readFileSync(new URL('./components/panels.tsx', import.meta.url), 'utf8')
 const sessionList = readFileSync(new URL('./components/session-list.tsx', import.meta.url), 'utf8')
 const composerView = readFileSync(new URL('./components/session-composer.tsx', import.meta.url), 'utf8')
+const agentRuns = readFileSync(new URL('./agentRuns.ts', import.meta.url), 'utf8')
+const sessionStatus = readFileSync(new URL('./sessionStatus.ts', import.meta.url), 'utf8')
 
 assert.match(styles, /button\s*\{[\s\S]*?cursor:\s*pointer;/, 'enabled buttons must advertise that they can be pressed')
 assert.match(styles, /button:disabled\s*\{[\s\S]*?cursor:\s*not-allowed;/, 'disabled buttons must retain the blocked cursor')
@@ -1035,5 +1037,65 @@ assert.match(styles, /\.subagent-status-failed\s*\{[^}]*color:\s*var\(--danger\)
 assert.match(styles, /\.subagent-run-error\s*\{[^}]*background:\s*var\(--danger-soft\)/, 'run errors must use the danger treatment')
 assert.match(styles, /\.subagent-run-working\s*\{[^}]*border-left-color:\s*var\(--primary\)/, 'a working run must read as active')
 assert.match(styles, /\.session-child-badge\s*\{[^}]*background:\s*var\(--secondary-soft\)/, 'the child badge must use the subagent accent')
+
+// --- Richer session activity states (issue #8) -------------------------------------------------
+// The v2 execution memory must be cleared only on a profile/config namespace change, never on a
+// mere session switch: terminal/error facts must survive browsing away and back (gate 2 decision —
+// clear-on-switch reverted failed/completed pills to idle with no superseding event).
+assert.match(
+  app,
+  /if \(namespaceChanged\) \{\s*sessionDraftsRef\.current\.clear\(\)[\s\S]*?executionMemoryRef\.current\.clear\(\)/,
+  'the v2 execution memory must be cleared on namespace change only'
+)
+assert.match(
+  app,
+  /lastEventBySessionRef\.current\.clear\(\)\s*loadAgentsRequestRef\.current \+= 1/,
+  'the last-event map may still clear on every switch, but the execution memory must not ride along'
+)
+// Execution lifecycle events feed the reducer only for opencode2 backends, right where the stream
+// has the event in hand — v1/bridge traffic must see no behavioural change.
+assert.match(
+  app,
+  /config\.backend === "opencode2"\) \{\s*const sessionID = body\?\.sessionID[\s\S]*?reduceExecutionEvent\(executionMemoryRef\.current\.get\(sessionID\)/,
+  'execution events must feed the v2 reducer only for opencode2 backends'
+)
+// `session.error` carries its message at the top level (`body.message`), unlike execution events
+// which carry a structured `error: { message }` — the reducer feed must surface whichever exists
+// so needs-attention/failed pills show the crash text.
+assert.match(
+  app,
+  /errorMessage = kind === "error"\s*\?[\s\S]*?message \?\? structuredError\?\.message/,
+  'the reducer feed must read the top-level session.error message'
+)
+// The derived status overlays the wire status map in refreshSessions, so the poll keeps the
+// derivation fresh even when the stream misses an event.
+assert.match(
+  app,
+  /Object\.assign\(\{\}, \.\.\.statusMaps\)[\s\S]*?deriveSessionStatus\(/,
+  'refreshSessions must merge derived v2 statuses after the wire status maps'
+)
+// The derivation must actually produce each of the six activity states.
+for (const word of ['"waiting"', '"completed"', '"failed"', '"retrying"', '"busy"', '"needs-attention"']) {
+  assert.ok(sessionStatus.includes(word), `sessionStatus.ts must derive the ${word} status`)
+}
+// attentionFor must honour the needsAttention signal: a crashed-but-idle session demands attention.
+assert.match(
+  agentRuns,
+  /function attentionFor[\s\S]*?if \(signals\.needsAttention\) return \{ reason: "failure" \}/,
+  'attentionFor must honour the needsAttention signal'
+)
+// The session-list pill maps status words to i18n keys — v1's `retry` and v2's `retrying` are the
+// same state and must share the label, `needs-attention` must reach the status.needsAttention key,
+// and any unknown word must fall back to the raw status rather than blanking.
+assert.match(
+  sessionList,
+  /STATUS_LABEL_KEYS[\s\S]*?retry: "status\.retrying"[\s\S]*?retrying: "status\.retrying"[\s\S]*?"needs-attention": "status\.needsAttention"/,
+  'the pill status-label map must share retry/retrying and cover needs-attention'
+)
+assert.match(
+  sessionList,
+  /function statusLabel\(status: string, t: Translator\): string \{\s*const key = STATUS_LABEL_KEYS\[status\]\s*return key \? t\(key\) : status\s*\}/,
+  'unknown status words must fall back to the raw status'
+)
 
 console.log('ui regression tests passed')

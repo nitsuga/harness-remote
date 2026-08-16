@@ -17,6 +17,7 @@ import {
   type AgentRunStatus,
   type SubagentRun
 } from "./agentRuns"
+import { deriveSessionStatus, executionEventKind, reduceExecutionEvent, type SessionExecutionMemory } from "./sessionStatus"
 import {
   createDesktopOpenCodeEventSubscription,
   desktopProfileID,
@@ -2969,6 +2970,12 @@ function App() {
         pendingForkDraftRef.current = null
         setComposer("")
         setAttachments([])
+        // Execution memory is a per-session fact store keyed by globally unique session ids and
+        // pruned against the authoritative list on every refresh, so it must survive mere session
+        // switches: a failed/completed/needs-attention pill must not revert to idle just because
+        // the user browsed away. Only a profile/config change (different namespace, possibly a
+        // different server) discards it.
+        executionMemoryRef.current.clear()
       } else {
         if (previousContext.sessionID && (composer.trim() || attachments.length > 0)) {
           sessionDraftsRef.current.set(
@@ -3270,6 +3277,9 @@ function App() {
   const eventStreamStateRef = useRef<"idle" | "connecting" | "live" | "reconnecting" | "fallback">("idle")
   /** Last time an SSE event arrived for a given session, used to spot sessions the stream isn't covering. */
   const lastEventBySessionRef = useRef(new Map<string, number>())
+  /** Per-session execution memory for the v2 status derivation (issue #8). Survives SSE reconnects;
+   *  cleared only on context/session switch, send, supersession, and authoritative-list pruning. */
+  const executionMemoryRef = useRef(new Map<string, SessionExecutionMemory>())
 
   const loadedMessagesRef = useRef<MessageEnvelope[]>([])
   const shouldAutoScrollRef = useRef(false)
@@ -3694,14 +3704,24 @@ function App() {
       const directories = isBridgeBackend(config.backend)
         ? []
         : [...new Set(items.map((session) => session.directory).filter(Boolean))]
-      const [sessionLists, statusMaps] = isBridgeBackend(config.backend)
+      const [sessionLists, statusMaps, formLists, permissionLists] = isBridgeBackend(config.backend)
         ? await Promise.all([
             api.listSessions(config).then((list) => [list]).catch(() => [[]] as Session[][]),
-            api.listStatuses(config).then((map) => [map]).catch(() => [{}] as Record<string, SessionStatus>[])
+            api.listStatuses(config).then((map) => [map]).catch(() => [{}] as Record<string, SessionStatus>[]),
+            Promise.resolve([] as QuestionRequest[][]),
+            Promise.resolve([] as PermissionRequest[][])
           ])
         : await Promise.all([
             Promise.all(directories.map((directory) => api.listSessions(config, directory).catch(() => [] as Session[]))),
-            Promise.all(directories.map((directory) => api.listStatuses(config, directory).catch(() => ({} as Record<string, SessionStatus>))))
+            Promise.all(directories.map((directory) => api.listStatuses(config, directory).catch(() => ({} as Record<string, SessionStatus>)))),
+            // The v2 status derivation (issue #8) needs the live pending forms/permissions scoped to
+            // each directory, exactly like the status fan-out above; v1 backends never fetch them here.
+            config.backend === "opencode2"
+              ? Promise.all(directories.map((directory) => api.loadQuestions(config, directory).catch(() => [] as QuestionRequest[])))
+              : Promise.resolve([] as QuestionRequest[][]),
+            config.backend === "opencode2"
+              ? Promise.all(directories.map((directory) => api.loadPermissions(config, directory).catch(() => [] as PermissionRequest[])))
+              : Promise.resolve([] as PermissionRequest[][])
           ])
       const scopedSessions = new Map(sessionLists.flat().map((session) => [session.id, session]))
       const statuses = Object.assign({}, ...statusMaps)
@@ -3716,6 +3736,17 @@ function App() {
         if (parentID) Object.defineProperty(hydrated, "parentID", { value: parentID, enumerable: false })
         return hydrated
       })
+      // v2-only (issue #8): overlay the derived activity status on the wire status map. The derived
+      // status wins because execution memory is strictly newer than the poll snapshot it overlays.
+      if (config.backend === "opencode2") {
+        const activeIDs = new Set(Object.keys(statuses))
+        const pendingForms = formLists.flat()
+        const pendingPermissions = permissionLists.flat()
+        for (const session of hydratedItems) {
+          const derived = deriveSessionStatus(session.id, { active: activeIDs, pendingForms, pendingPermissions }, executionMemoryRef.current.get(session.id))
+          if (derived) statuses[session.id] = derived
+        }
+      }
       const activityTimes = await loadSessionActivityTimes(hydratedItems)
       const tombstoneKey = refreshContext.profileID + "\u0000" + refreshContext.configKey
       const persistedTombstoneKey = tombstoneNamespaceKey(refreshContext.profileID, refreshContext.configKey)
@@ -3733,6 +3764,11 @@ function App() {
       // snapshots may hide rows, but can never erase durable deletion evidence.
       if (authoritativeGlobalListing) {
         const authoritativeIDs = new Set(hydratedItems.map((session) => session.id))
+        // Bounded-growth guard: sessions that left the authoritative list can never produce fresh
+        // execution facts, so their memory must not accumulate forever.
+        for (const key of [...executionMemoryRef.current.keys()]) {
+          if (!authoritativeIDs.has(key)) executionMemoryRef.current.delete(key)
+        }
         let tombstonesChanged = false
         for (const id of [...tombstones]) {
           if (!authoritativeIDs.has(id)) { tombstones.delete(id); tombstonesChanged = true }
@@ -4774,6 +4810,9 @@ function App() {
       if (!isLeaseContextCurrent(lease)) return
       // A successful 204 is the commit point. Refreshes are best-effort and must not turn a
       // completed activation into a failed command or put the slash text back in the composer.
+      // The user acted on this session (like a prompt send): a remembered terminal/error state
+      // must not linger for the run that is about to start.
+      executionMemoryRef.current.delete(session.id)
       clearParkedDraft(session.id)
       setOptimisticUserMessages((current) => current.filter((message) => message.info.id !== optimisticMessage.info.id))
       setActionNotice(t('help.skillActivated', { skill: skill.name }))
@@ -5050,6 +5089,8 @@ function App() {
     try {
       const admission = await sendPromptV2(config, selectedSession.id, text, selectedSession.directory, activeModel, activeAgentID, attachments, promptDelivery, promptRequestID)
       promptDispatched = true
+      // The user has acted on this session: a remembered terminal/error state must not linger.
+      executionMemoryRef.current.delete(selectedSession.id)
       if (!isLeaseContextCurrent(promptLease)) return
       // Dispatch is the commit boundary for the parked draft too: the composer was flushed, so a
       // parked entry from a previous visit must not resurrect this prompt on a round-trip.
@@ -5111,6 +5152,9 @@ function App() {
         }
         if (resolved && isLeaseContextCurrent(promptLease)) {
           promptDispatched = true
+          // The retry confirmed the admission: the user's prompt went through, so the remembered
+          // terminal/error state for this session must not linger.
+          executionMemoryRef.current.delete(selectedSession.id)
           clearParkedDraft(selectedSession.id)
           setActionNotice(t('detail.deliveryAdmitted'))
           void loadSelected(selectedSession.id, selectedSession.directory, true).catch(() => undefined)
@@ -5533,6 +5577,29 @@ function App() {
         setMessages((current) =>
           applyStreamedPartDelta(current, body.sessionID!, body.messageID!, body.partID!, body.field!, body.delta!)
         )
+      }
+      // v2-only: fold execution lifecycle events into the per-session execution memory (issue #8).
+      // The memory survives SSE reconnects, so a status derived later still knows the session crashed.
+      if (config.backend === "opencode2") {
+        const sessionID = body?.sessionID ?? body?.sessionId ?? body?.info?.sessionID ?? body?.info?.id
+        const kind = executionEventKind(type)
+        if (sessionID && kind) {
+          // `session.error` carries the message at the top level (`body.message`), while execution
+          // events carry a structured `error: { message }` — surface whichever the event provides so
+          // the needs-attention/failed status can show the crash text.
+          const structuredError = (body as { error?: { message?: string } } | undefined)?.error
+          const errorMessage = kind === "error"
+            ? (body as { message?: string } | undefined)?.message ?? structuredError?.message
+            : structuredError?.message
+          executionMemoryRef.current.set(sessionID, reduceExecutionEvent(executionMemoryRef.current.get(sessionID), {
+            kind,
+            at: Date.now(),
+            sessionID,
+            error: errorMessage ? { message: errorMessage } : undefined,
+            attempt: (body as { attempt?: number } | undefined)?.attempt,
+            next: typeof (body as { at?: number } | undefined)?.at === "number" ? (body as { at?: number }).at : undefined
+          }))
+        }
       }
       if (type.startsWith("session.") || type.startsWith("message.") || type.startsWith("todo.") || type.startsWith("question.") || type.startsWith("permission.")) {
         // `session.*` events carry the id on the session itself; `message.*`/`todo.*` use sessionID.

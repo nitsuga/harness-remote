@@ -46,6 +46,26 @@ export function formatRelativeTime(epoch: number, locale: string): string {
   return formatter.format(deltaSeconds, "second")
 }
 
+/** Raw session status words (v1/bridge vocabulary plus the v2 activity states) mapped to their
+ *  i18n labels. A word with no mapping (future or other backends) falls back to the raw word
+ *  itself, so the pill never blanks and never crashes. `retry` (v1) and `retrying` (v2) are the
+ *  same state and share the label. */
+const STATUS_LABEL_KEYS: Readonly<Record<string, string>> = {
+  busy: "status.busy",
+  waiting: "status.waiting",
+  retry: "status.retrying",
+  retrying: "status.retrying",
+  failed: "status.failed",
+  completed: "status.completed",
+  "needs-attention": "status.needsAttention",
+  idle: "status.idle"
+}
+
+function statusLabel(status: string, t: Translator): string {
+  const key = STATUS_LABEL_KEYS[status]
+  return key ? t(key) : status
+}
+
 export type SessionRenameState = {
   sessionID: string | null
   source: "list" | "header" | null
@@ -154,7 +174,7 @@ export function SessionCard({
           <span className="session-directory-compact" title={session.directory}>{shortDirectory(session.directory)}</span>
           <span title={formatTime(session.updated)}>{t('sessions.updated', { time: formatRelativeTime(session.updated, language) })}</span>
         </span>
-        <span className={`pill ${session.status}`}>{session.status}</span>
+        <span className={`pill ${session.status}`}>{statusLabel(session.status, t)}</span>
       </div>
       <div className="inline-actions">
         {capabilities.sessionRename && capabilities.sessionDelete && (
