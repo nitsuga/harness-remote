@@ -44,6 +44,23 @@ export function applyStreamedToolProgress(
   return changed ? next : messages
 }
 
+/** Normalize the `metadata` field of a v2 `session.tool.progress` event to the flat correlation
+ *  record the run derivation reads (`{ sessionID, status }`). The opencode `subagent` plugin
+ *  publishes `context.progress({ metadata: { sessionID, status: "running" } })`, so the event
+ *  nests the record: `data.metadata = { metadata: { sessionID, status } }` — unlike a shell
+ *  tool's flat `{ shellID }` update. Accept both shapes defensively (older captures used the flat
+ *  one); return undefined when neither carries a sessionID, so a non-subagent progress update is
+ *  never mistaken for a child correlation. */
+export function subagentProgressMetadata(metadata: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+  if (!metadata || typeof metadata !== "object") return undefined
+  if (typeof metadata.sessionID === "string") return metadata
+  const inner = metadata.metadata
+  if (inner && typeof inner === "object" && !Array.isArray(inner) && typeof (inner as Record<string, unknown>).sessionID === "string") {
+    return inner as Record<string, unknown>
+  }
+  return undefined
+}
+
 /** Flatten a child session's transcript into a bounded list of recent output lines for the live
  *  window. Messages arrive oldest-first (as rendered); only the tail matters, so when the cap cuts
  *  in the newest lines survive. Blank lines are dropped — the window is a few lines tall and the

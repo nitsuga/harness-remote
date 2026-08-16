@@ -51,6 +51,7 @@ import {
   extractChildOutputLines,
   liveSubagentChildIDs,
   liveSubagentChildIDsFromParts,
+  subagentProgressMetadata,
   type ChildOutput
 } from "./subagentLive"
 import { stripMarkdownDirectives } from "./markdownDirectives"
@@ -6200,15 +6201,19 @@ function App() {
         )
       }
       // v2-only (issue #47): the opencode `subagent` tool publishes `session.tool.progress` once at
-      // launch with `metadata: { sessionID: <childID>, status: "running" }` and `id` = the tool-call
-      // id. That event is the ONLY place the child session id exists while the child runs — durable
-      // transcript state carries it only after the terminal tool success lands — so inject the
-      // metadata into the matching tool part to make the run card (and its live output window)
-      // appear immediately instead of after the child finishes. The event is ephemeral by contract;
-      // `reconcileStreamedPart` keeps the injected metadata across later refetches.
+      // launch with `id` = the tool-call id and a child correlation on `metadata`. The plugin calls
+      // `context.progress({ metadata: { sessionID, status: "running" } })`, so the wire event NESTS
+      // the record (`metadata.metadata.sessionID`), unlike a shell tool's flat `{ shellID }` update —
+      // normalize both shapes before injecting, and inject only the flat `{ sessionID, status }`
+      // record so `subagentRunFromTool` can read it. That event is the ONLY place the child session
+      // id exists at launch: durable transcript state carries it only after the terminal tool
+      // success lands, so without the injection the run card could not appear until the child
+      // finished. The event is ephemeral by contract; `reconcileStreamedPart` keeps the injected
+      // metadata across later refetches.
       if (type === "session.tool.progress" && config.backend === "opencode2") {
         const progress = body as { assistantMessageID?: string; id?: string; metadata?: Record<string, unknown> } | undefined
-        const childID = typeof progress?.metadata?.sessionID === "string" ? progress.metadata.sessionID : ""
+        const effective = subagentProgressMetadata(progress?.metadata)
+        const childID = typeof effective?.sessionID === "string" ? effective.sessionID : ""
         if (
           body?.sessionID &&
           childID.length > 0 &&
@@ -6217,7 +6222,7 @@ function App() {
           typeof progress.id === "string"
         ) {
           setMessages((current) =>
-            applyStreamedToolProgress(current, body.sessionID!, progress.assistantMessageID!, progress.id!, progress.metadata!)
+            applyStreamedToolProgress(current, body.sessionID!, progress.assistantMessageID!, progress.id!, effective!)
           )
         }
       }

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { isLiveSubagentStatus, isSubagentCompletionWrapper, subagentCompletionDescription, subagentCompletionOutput, subagentRunFromCompletion, subagentRunFromTool } from './agentRuns.ts'
-import { applyStreamedToolProgress, extractChildOutputLines, liveSubagentChildIDs } from './subagentLive.ts'
+import { applyStreamedToolProgress, extractChildOutputLines, liveSubagentChildIDs, subagentProgressMetadata } from './subagentLive.ts'
 import { createTranslator } from './i18n.ts'
 import {
   applyInboxDelivery,
@@ -1342,8 +1342,10 @@ assert.equal(isSubagentCompletionWrapper(undefined), false)
 // Synthetic fixtures only — every id was invented here. The shapes mirror the opencode v2
 // `subagent` tool contract exactly as the live server publishes them: the ephemeral
 // `session.tool.progress` event carries `{ sessionID, assistantMessageID, id, metadata }` with
-// `metadata: { sessionID: <childID>, status: "running" }` and `id` = the tool-call id, while the
-// child's own transcript (GET /api/session/{child}/message) is the source of the live output.
+// the child correlation NESTED — the plugin publishes `context.progress({ metadata: {...} })`,
+// so `data.metadata = { metadata: { sessionID: <childID>, status: "running" } }` (a shell tool's
+// flat `{ shellID }` update does not nest) — while the child's own transcript
+// (GET /api/session/{child}/message) is the source of the live output.
 
 // The live status vocabulary gates both the elapsed clock and the live output window.
 assert.equal(isLiveSubagentStatus('working'), true)
@@ -1378,22 +1380,37 @@ const parentWithStreamingSubagent = toMessageEnvelope({
 assert.equal(subagentRunFromTool(parentWithStreamingSubagent.parts[0]), null,
   'a streaming subagent part without metadata.sessionID must stay a bare tool row')
 
-// The captured-shape progress event: exactly what opencode `subagent.ts` publishes at launch.
+// The captured-shape progress event: exactly what opencode `subagent.ts` publishes at launch —
+// the child correlation is nested under `metadata.metadata` because the plugin passes its record
+// to `context.progress({ metadata: ... })`. `subagentProgressMetadata` normalizes it to the flat
+// `{ sessionID, status }` record the run derivation reads; the app handler applies that.
 const subagentProgressEvent = {
   type: 'session.tool.progress',
   sessionID: 'ses_parent',
   assistantMessageID: 'msg_parent',
   id: 'call_00_sub1',
-  metadata: { sessionID: 'ses_child', status: 'running' }
+  metadata: { metadata: { sessionID: 'ses_child', status: 'running' } }
 }
+const subagentProgress = subagentProgressMetadata(subagentProgressEvent.metadata)
+assert.deepEqual(subagentProgress, { sessionID: 'ses_child', status: 'running' },
+  'the nested live-server shape must normalize to the flat correlation record')
+assert.deepEqual(subagentProgressMetadata({ sessionID: 'ses_child', status: 'running' }),
+  { sessionID: 'ses_child', status: 'running' },
+  'a flat metadata record must pass through unchanged')
+assert.equal(subagentProgressMetadata({ shellID: 'sh_1' }), undefined,
+  'a non-subagent progress update carries no sessionID')
+assert.equal(subagentProgressMetadata({ metadata: { shellID: 'sh_1' } }), undefined,
+  'a nested non-subagent progress update carries no sessionID')
+assert.equal(subagentProgressMetadata(undefined), undefined,
+  'no metadata carries no child correlation')
 
-// (a) The progress event injects its metadata onto the matching tool part, immutably.
+// (a) The progress event injects its normalized metadata onto the matching tool part, immutably.
 const injected = applyStreamedToolProgress(
   [parentWithStreamingSubagent],
   subagentProgressEvent.sessionID,
   subagentProgressEvent.assistantMessageID,
   subagentProgressEvent.id,
-  subagentProgressEvent.metadata
+  subagentProgress
 )
 assert.deepEqual(injected[0].parts[0].state.metadata, { sessionID: 'ses_child', status: 'running' },
   'the progress metadata must land on the matching tool part so the run card appears while the child runs')
@@ -1409,13 +1426,13 @@ assert.equal(subagentRunFromTool(injected[0].parts[0])?.status, 'working',
 // different message leaves the transcript untouched (same array, same part object).
 const noMatchInput = [parentWithStreamingSubagent]
 assert.equal(
-  applyStreamedToolProgress(noMatchInput, 'ses_parent', 'msg_parent', 'call_00_other', subagentProgressEvent.metadata),
+  applyStreamedToolProgress(noMatchInput, 'ses_parent', 'msg_parent', 'call_00_other', subagentProgress),
   noMatchInput,
   'a progress event for an unknown callID must not touch the transcript'
 )
 const otherSessionInput = [parentWithStreamingSubagent]
 assert.equal(
-  applyStreamedToolProgress(otherSessionInput, 'ses_other', 'msg_parent', 'call_00_sub1', subagentProgressEvent.metadata),
+  applyStreamedToolProgress(otherSessionInput, 'ses_other', 'msg_parent', 'call_00_sub1', subagentProgress),
   otherSessionInput,
   'a progress event for another session must not touch the transcript'
 )
@@ -1466,7 +1483,7 @@ const parentWithLiveChild = applyStreamedToolProgress(
   subagentProgressEvent.sessionID,
   subagentProgressEvent.assistantMessageID,
   subagentProgressEvent.id,
-  subagentProgressEvent.metadata
+  subagentProgress
 )
 assert.deepEqual(liveSubagentChildIDs(parentWithLiveChild), ['ses_child'],
   'a correlated running subagent is a live child')

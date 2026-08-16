@@ -1097,6 +1097,11 @@ assert.ok(app.includes('applyStreamedToolProgress'), 'the v2 session.tool.progre
 assert.ok(app.includes('type === "session.tool.progress"'), 'the SSE handler must recognize the ephemeral subagent progress event')
 assert.match(
   app,
+  /type === "session\.tool\.progress"[\s\S]*?subagentProgressMetadata\(progress\?\.metadata\)[\s\S]*?applyStreamedToolProgress\(/,
+  'the progress handler must normalize the nested live-server metadata before injecting it onto the tool part'
+)
+assert.match(
+  app,
   /function reconcileStreamedPart[\s\S]*?previousChildID = previous\.state\?\.metadata\?\.sessionID[\s\S]*?incomingChildID = incoming\.state\?\.metadata\?\.sessionID/,
   'a refetched tool part must not erase the ephemeral child correlation, or the run card blinks out on every poll'
 )
