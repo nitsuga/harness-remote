@@ -1179,6 +1179,8 @@ assert.ok(app.includes('api.loadMessagesTail(config, sessionID, directory)'),
   'loadSelected must fetch the cheap newest-first tail to seed the transcript (issue #52)')
 assert.ok(app.includes('mergeNewestTail(current, tail)'),
   'loadSelected must append the tail through mergeNewestTail inside the state updater, keyed on message presence')
+assert.ok(app.includes('Come-back case: the transcript for this session is already committed in state/ref'),
+  'the seed must lift the loading gate for an already-loaded session even when the merge finds nothing new')
 assert.ok(app.includes('mergeNewestTail,'),
   'the subagentLive import block must ship mergeNewestTail to loadSelected')
 

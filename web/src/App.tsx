@@ -4512,14 +4512,21 @@ function App() {
         // The full-load commit below re-checks context generation and context; the seed relies on
         // the same isCurrentLoad guard so a stale profile/session can never paint its tail page.
         if (!isCurrentLoad()) return
+        // Come-back case: the transcript for this session is already committed in state/ref (the
+        // seed finds nothing new, so the merge below no-ops) — the loading gate must still lift
+        // now instead of waiting for the full reload (~10s+ on a long transcript).
+        if (loadingSessionID === sessionID && loadedMessagesRef.current[0]?.info.sessionID === sessionID) {
+          setLoadingSessionID((activeID) => (activeID === sessionID ? null : activeID))
+          setLoadedSessionID(sessionID)
+        }
         setMessages((current) => {
           const merged = mergeNewestTail(current, tail)
           if (merged === current) return current
           // Issue #52: opening a long session must paint the newest page immediately instead of
-          // holding the empty loading state for the full reload — clear the open gate the same
-          // guarded way openSession does after a completed load (loadingSessionID is only set
-          // while a session is being opened).
-          if (loadingSessionID === sessionID) {
+          // holding the empty loading state for the full reload. Only lift the gate when the
+          // rendered content is (or starts from) THIS session — appending the tail onto another
+          // session's leftover transcript must stay hidden until the full reload replaces it.
+          if (loadingSessionID === sessionID && (current.length === 0 || current[0]?.info.sessionID === sessionID)) {
             setLoadingSessionID((activeID) => (activeID === sessionID ? null : activeID))
             setLoadedSessionID(sessionID)
           }
