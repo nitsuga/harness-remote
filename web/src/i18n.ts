@@ -346,7 +346,7 @@ type TranslationKey =
   | 'permission.allowAlways'
   | 'permission.deny'
 
-const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>> = {
+export const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>> = {
   en: {
     'app.title': 'Harness Remote',
     'notification.title': 'Harness Remote',

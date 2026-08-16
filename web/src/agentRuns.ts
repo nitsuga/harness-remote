@@ -1,4 +1,4 @@
-import type { BackendKind, PermissionRequest, QuestionRequest, SessionView } from "./types"
+import type { BackendKind, MessagePart, PermissionRequest, QuestionRequest, SessionView } from "./types"
 
 export type AgentRunStatus =
   | "idle"
@@ -131,9 +131,18 @@ function terminalSubagentStatus(status: unknown): AgentRunSignals["terminalStatu
 
 /**
  * Derive a delegated-subagent run from the parent transcript's `subagent` tool part. The child
- * session id lives on `state.metadata.sessionID` (both the running-progress and the completed
- * tool metadata carry it); agent/description come from the tool input; the terminal state comes
- * from `metadata.status` mapped onto the shared vocabulary.
+ * session id lives on `state.metadata.sessionID` (only the terminal tool metadata carries it — the
+ * streaming/running parts ship `metadata:{}`, so a run card appears exactly when the server has
+ * real correlation data). Agent/description come from the tool input.
+ *
+ * Run status is derived from the JOB signal on `state.metadata.status`, NEVER from the tool part's
+ * own terminal state alone: the part goes `completed`/`error` the moment the tool call returns,
+ * but a background launch returns with `metadata.status:"running"` (the job keeps going until the
+ * injected completion lands) and a foreground failure returns with the part `error` while the job
+ * metadata still says `running`. So the rule is: a part `error` is failed (the tool's own failure
+ * is the source of truth — foreground failures never get an injected completion), else a running
+ * job is working whatever the part says, else the metadata word maps onto the shared terminal
+ * vocabulary, else the part's own status falls through the shared normalizer.
  *
  * Returns null when the correlation data is missing — a non-subagent tool, or a subagent part
  * without a non-empty `metadata.sessionID` — the "degrades gracefully" case where the caller
@@ -155,16 +164,15 @@ export function subagentRunFromTool(part: {
   const childID = metadata?.sessionID
   if (typeof childID !== "string" || childID.length === 0) return null
 
-  const rawStatus = part.state?.status
+  const partStatus = part.state?.status
+  const jobStatus = metadata?.status
   const run: SubagentRun = {
     childID,
-    // The run is "working" while the server reports it in flight: the tool's own state is then
-    // "running" (already mapped by the shared vocabulary) or still "pending" (created, queued).
-    // A "pending" state with no running signal stays idle rather than being promoted, and a
-    // terminal state only ever comes from the server's own `metadata.status`.
-    status: rawStatus === "pending" && metadata?.status === "running"
-      ? "working"
-      : normalizeAgentRunStatus(rawStatus ?? "", terminalSubagentStatus(metadata?.status))
+    status: partStatus === "error"
+      ? "failed"
+      : jobStatus === "running"
+        ? "working"
+        : normalizeAgentRunStatus(partStatus ?? "", terminalSubagentStatus(jobStatus))
   }
 
   const input = part.state?.input
@@ -197,4 +205,29 @@ export function subagentRunFromCompletion(info: {
   }
   if (typeof completion.agent === "string") run.agent = completion.agent
   return run
+}
+
+/**
+ * The card-headline summary a synthetic completion envelope carries, read off its parts. A
+ * subagent completion always ships a `description` on the wire (opencode `subagent.ts` injects it),
+ * so the v2 mapper emits a structured `system` part with the child's short description on
+ * `description` and the model-facing `<subagent ...>` block on `text`; a completion without a
+ * description keeps the plain text part with the whole block on `text`. Either way the wrapper
+ * tags are stripped and payloads too long to read as a headline are rejected — long payloads stay
+ * in the transcript's own part, which still renders as before. Returns undefined when the envelope
+ * carries nothing usable.
+ */
+export function subagentCompletionDescription(parts: readonly MessagePart[]): string | undefined {
+  const system = parts.find((part) => part.type === "system")
+  const raw = system
+    ? (system.description ?? system.text)
+    : parts
+        .filter((part) => part.type === "text" && part.text)
+        .map((part) => part.text)
+        .join("\n")
+        .trim()
+  if (!raw) return undefined
+  const stripped = raw.replace(/^\s*<subagent\b[^>]*>/i, "").replace(/<\/subagent>\s*$/i, "").trim()
+  if (!stripped || stripped.length > 140) return undefined
+  return stripped
 }

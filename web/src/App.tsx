@@ -11,6 +11,7 @@ import {
   isIndeterminateDeliveryError
 } from "./opencode2-client"
 import {
+  subagentCompletionDescription,
   subagentRunFromCompletion,
   subagentRunFromTool,
   type AgentRunStatus,
@@ -366,10 +367,21 @@ function sameErrorRef(
   return left.type === right.type && left.message === right.message
 }
 
+/** Shallow `info.subagent` comparison: childID/agent/state arrive wholesale with each poll, like
+ *  the other assistant-level metadata above. */
+function sameSubagentRef(
+  left: MessageEnvelope["info"]["subagent"],
+  right: MessageEnvelope["info"]["subagent"]
+): boolean {
+  if (left === right) return true
+  if (!left || !right) return false
+  return left.childID === right.childID && left.agent === right.agent && left.state === right.state
+}
+
 /** Whether two envelopes carry the same OpenCode 2 assistant-level metadata (agent/model/finish/
- *  error/cost/tokens/retry). Shallow by design: these fields arrive wholesale with each poll, and a
- *  field-level comparison keeps reconciliation from churning message references — and the
- *  per-message render cache — whenever nothing a renderer could show actually changed. */
+ *  error/cost/tokens/retry/subagent). Shallow by design: these fields arrive wholesale with each
+ *  poll, and a field-level comparison keeps reconciliation from churning message references — and
+ *  the per-message render cache — whenever nothing a renderer could show actually changed. */
 export function sameEnvelopeMetadata(left: MessageEnvelope["info"], right: MessageEnvelope["info"]): boolean {
   return left.agent === right.agent
     && sameModelRef(left.model, right.model)
@@ -382,6 +394,7 @@ export function sameEnvelopeMetadata(left: MessageEnvelope["info"], right: Messa
     && left.retry?.attempt === right.retry?.attempt
     && left.retry?.at === right.retry?.at
     && sameErrorRef(left.retry?.error, right.retry?.error)
+    && sameSubagentRef(left.subagent, right.subagent)
 }
 
 function messagesHaveSameContent(left: MessageEnvelope[], right: MessageEnvelope[]): boolean {
@@ -1605,23 +1618,14 @@ function formatRunDuration(ms: number): string {
 /** Merge a synthetic terminal completion (`info.subagent`, injected by the opencode `subagent`
  *  tool when its child finishes) over a tool-derived run for the same child session id. The
  *  completion's state is the server's own terminal word and wins; the tool run keeps supplying
- *  the description/output/error/timing the completion signal does not carry. */
+ *  the description/output/error/timing the completion signal does not carry. The agent stays the
+ *  tool input's stable agent id when the tool run carries one — the completion's `agent` is only
+ *  a fallback for a run whose tool part never surfaced an id. */
 function mergeSubagentCompletion(run: SubagentRun, completion: SubagentRun | undefined): SubagentRun {
   if (!completion) return run
   const merged: SubagentRun = { ...run, status: completion.status, endedAt: completion.endedAt ?? run.endedAt }
-  if (completion.agent) merged.agent = completion.agent
+  if (!merged.agent && completion.agent) merged.agent = completion.agent
   return merged
-}
-
-/** The synthetic completion message's `<subagent ...>` text block is the only human description
- *  the terminal signal carries. Strip the wrapper tags and use the inner text as the run's
- *  description when it is short enough to read as a card headline (long payloads stay in the
- *  transcript's own text part, which still renders as before). */
-function subagentCompletionDescription(text: string | undefined): string | undefined {
-  if (!text) return undefined
-  const stripped = text.replace(/^\s*<subagent\b[^>]*>/i, "").replace(/<\/subagent>\s*$/i, "").trim()
-  if (!stripped || stripped.length > 140) return undefined
-  return stripped
 }
 
 /** Every child session id that has a tool-derived run card somewhere in the transcript. A
@@ -1648,8 +1652,14 @@ function collectSubagentCompletions(messages: readonly MessageEnvelope[]): Map<s
     const completion = subagentRunFromCompletion(message.info)
     if (!completion) continue
     const run: SubagentRun = { ...completion }
-    if (message.info.time.completed !== undefined) run.endedAt = message.info.time.completed
-    const description = subagentCompletionDescription(extractText(message))
+    // Synthetic completions carry ONLY `time.created` on the wire (opencode `message-updater.ts`
+    // never sets `time.completed` for them): the completion's creation time IS the terminal time,
+    // so the merged card shows the real elapsed instead of freezing at the launch instant.
+    run.endedAt = message.info.time.created
+    // The headline reads the completion's own parts: the v2 mapper emits a structured `system`
+    // part carrying the child's short description on `description` (and the model-facing
+    // `<subagent ...>` block on `text`), so plain text extraction alone would come back empty.
+    const description = subagentCompletionDescription(message.parts)
     if (!run.description && description) run.description = description
     completions.set(run.childID, run)
   }
@@ -1951,6 +1961,17 @@ function toSessionView(session: Session, status?: SessionStatus, activityTime = 
   // for child sessions reads it from the view, so surface it the same non-enumerable way.
   if (session.parentID) Object.defineProperty(view, "parentID", { value: session.parentID, enumerable: false })
   return view
+}
+
+/** Shallow-copy a session view with the non-enumerable `parentID` preserved. `toSessionView` is
+ *  the single definition point for that property, and it attaches it via Object.defineProperty —
+ *  a plain `{...item}` spread drops it, which would make a child session's badge vanish until
+ *  the next poll. */
+function copySessionView(view: SessionView, patch: Partial<SessionView>): SessionView {
+  const copied = { ...view, ...patch }
+  const parentID = (view as SessionView & { parentID?: string }).parentID
+  if (parentID) Object.defineProperty(copied, "parentID", { value: parentID, enumerable: false })
+  return copied
 }
 
 function formatLimit(value?: number): string {
@@ -4056,7 +4077,7 @@ function App() {
       if (config.backend === "opencode" || config.backend === "opencode2") await loadSelected(selectedSession.id, selectedSession.directory, true)
       await refreshSessions(true)
       if (revertedSession) {
-        setSessions((current) => current.map((item) => item.id === revertedSession.id ? { ...item, revertMessageID: revertedSession.revert?.messageID } : item))
+        setSessions((current) => current.map((item) => item.id === revertedSession.id ? copySessionView(item, { revertMessageID: revertedSession.revert?.messageID }) : item))
       }
     } catch (err) {
       if (isLeaseContextCurrent(lease)) setRuntimeError((err as Error).message)
@@ -4318,7 +4339,7 @@ function App() {
       const session = await api.revertMessage(config, selectedSession.id, messageID, selectedSession.directory)
       await loadSelected(selectedSession.id, selectedSession.directory, true)
       await refreshSessions(true)
-      if (isLeaseContextCurrent(lease)) setSessions((current) => current.map((item) => item.id === session.id ? { ...item, revertMessageID: session.revert?.messageID } : item))
+      if (isLeaseContextCurrent(lease)) setSessions((current) => current.map((item) => item.id === session.id ? copySessionView(item, { revertMessageID: session.revert?.messageID }) : item))
     } catch (err) {
       if (isLeaseContextCurrent(lease)) setRuntimeError((err as Error).message)
     } finally {

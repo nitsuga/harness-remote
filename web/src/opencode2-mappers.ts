@@ -408,12 +408,17 @@ export function toMessageEnvelope(message: V2Message, sessionID: string): Messag
     const subagent = message.metadata
     if (subagent?.source === "subagent" && typeof subagent.childID === "string" && subagent.childID.length > 0) {
       const state = subagent.state
-      info.subagent = {
-        childID: subagent.childID,
-        ...(typeof subagent.agent === "string" ? { agent: subagent.agent } : {}),
-        // Only the three documented completion states are valid; anything else (absent or
-        // unknown) falls back to "completed" so the envelope never fabricates an error.
-        state: state === "error" || state === "cancelled" ? state : "completed"
+      // Only the three documented completion states are valid terminal signals. An absent or
+      // unknown `state` must NOT be defaulted to a terminal state (acceptance criterion #5 — a
+      // terminal state is never invented): the envelope degrades to the old mapping with no
+      // `info.subagent`, so a run with no reliable completion signal keeps its tool-derived
+      // in-flight status instead of snapping to a fabricated "completed".
+      if (state === "completed" || state === "error" || state === "cancelled") {
+        info.subagent = {
+          childID: subagent.childID,
+          ...(typeof subagent.agent === "string" ? { agent: subagent.agent } : {}),
+          state
+        }
       }
     }
     if (message.description) {

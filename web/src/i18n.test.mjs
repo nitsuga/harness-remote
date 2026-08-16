@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { createTranslator, languageOptions, normalizeLanguage } from './i18n.ts'
+import { createTranslator, languageOptions, normalizeLanguage, translations } from './i18n.ts'
 
 assert.equal(normalizeLanguage('it'), 'it')
 assert.equal(normalizeLanguage('zh-TW'), 'zh-TW')
@@ -128,13 +128,23 @@ assert.equal(en('detail.assistantError', { message: 'aborted' }), 'Error: aborte
 
 // Delegated-subagent run cards and child-session badges (issue #10): every label must exist in
 // every language — the open-child control, the collapsible result and the list badge all sit on
-// surfaces a non-English user reaches in normal use.
+// surfaces a non-English user reaches in normal use. The raw tables are asserted directly (not via
+// the translator, whose English fallback would mask a missing locale entry).
+const SUBAGENT_KEYS = [
+  'detail.openChildSession', 'detail.openingChildSession', 'detail.subagentTask',
+  'detail.subagentResult', 'detail.showMore', 'detail.showLess', 'detail.subagentElapsed',
+  'detail.childSession', 'detail.childSessionOf'
+]
+for (const language of ['en', 'it', 'zh-TW', 'zh-CN']) {
+  for (const key of SUBAGENT_KEYS) {
+    assert.ok(
+      translations[language][key] !== undefined,
+      `${key} must exist in the ${language} table (no English fallback)`
+    )
+  }
+}
 for (const translator of [en, it, zh, zhCN]) {
-  for (const key of [
-    'detail.openChildSession', 'detail.openingChildSession', 'detail.subagentTask',
-    'detail.subagentResult', 'detail.showMore', 'detail.showLess', 'detail.subagentElapsed',
-    'detail.childSession', 'detail.childSessionOf'
-  ]) {
+  for (const key of SUBAGENT_KEYS) {
     assert.notEqual(translator(key), key, `${key} must be translated in every language`)
   }
 }
