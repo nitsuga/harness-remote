@@ -2970,6 +2970,12 @@ function App() {
         pendingForkDraftRef.current = null
         setComposer("")
         setAttachments([])
+        // Execution memory is a per-session fact store keyed by globally unique session ids and
+        // pruned against the authoritative list on every refresh, so it must survive mere session
+        // switches: a failed/completed/needs-attention pill must not revert to idle just because
+        // the user browsed away. Only a profile/config change (different namespace, possibly a
+        // different server) discards it.
+        executionMemoryRef.current.clear()
       } else {
         if (previousContext.sessionID && (composer.trim() || attachments.length > 0)) {
           sessionDraftsRef.current.set(
@@ -2992,7 +2998,6 @@ function App() {
       awaitingAssistantBaselineRef.current = ""
       latestMessageTimesRef.current.clear()
       lastEventBySessionRef.current.clear()
-      executionMemoryRef.current.clear()
       loadAgentsRequestRef.current += 1
       loadModelsRequestRef.current += 1
       refreshRequestRef.current += 1

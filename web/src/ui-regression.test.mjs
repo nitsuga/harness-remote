@@ -1039,12 +1039,18 @@ assert.match(styles, /\.subagent-run-working\s*\{[^}]*border-left-color:\s*var\(
 assert.match(styles, /\.session-child-badge\s*\{[^}]*background:\s*var\(--secondary-soft\)/, 'the child badge must use the subagent accent')
 
 // --- Richer session activity states (issue #8) -------------------------------------------------
-// The v2 execution memory must be cleared wherever the last-event map is: a context/session switch
-// must not let a remembered terminal/error state leak across sessions.
+// The v2 execution memory must be cleared only on a profile/config namespace change, never on a
+// mere session switch: terminal/error facts must survive browsing away and back (gate 2 decision —
+// clear-on-switch reverted failed/completed pills to idle with no superseding event).
 assert.match(
   app,
-  /lastEventBySessionRef\.current\.clear\(\)\s*executionMemoryRef\.current\.clear\(\)/,
-  'the v2 execution memory must be cleared on context/session switch alongside the last-event map'
+  /if \(namespaceChanged\) \{\s*sessionDraftsRef\.current\.clear\(\)[\s\S]*?executionMemoryRef\.current\.clear\(\)/,
+  'the v2 execution memory must be cleared on namespace change only'
+)
+assert.match(
+  app,
+  /lastEventBySessionRef\.current\.clear\(\)\s*loadAgentsRequestRef\.current \+= 1/,
+  'the last-event map may still clear on every switch, but the execution memory must not ride along'
 )
 // Execution lifecycle events feed the reducer only for opencode2 backends, right where the stream
 // has the event in hand — v1/bridge traffic must see no behavioural change.
@@ -1077,6 +1083,19 @@ assert.match(
   agentRuns,
   /function attentionFor[\s\S]*?if \(signals\.needsAttention\) return \{ reason: "failure" \}/,
   'attentionFor must honour the needsAttention signal'
+)
+// The session-list pill maps status words to i18n keys — v1's `retry` and v2's `retrying` are the
+// same state and must share the label, `needs-attention` must reach the status.needsAttention key,
+// and any unknown word must fall back to the raw status rather than blanking.
+assert.match(
+  sessionList,
+  /STATUS_LABEL_KEYS[\s\S]*?retry: "status\.retrying"[\s\S]*?retrying: "status\.retrying"[\s\S]*?"needs-attention": "status\.needsAttention"/,
+  'the pill status-label map must share retry/retrying and cover needs-attention'
+)
+assert.match(
+  sessionList,
+  /function statusLabel\(status: string, t: Translator\): string \{\s*const key = STATUS_LABEL_KEYS\[status\]\s*return key \? t\(key\) : status\s*\}/,
+  'unknown status words must fall back to the raw status'
 )
 
 console.log('ui regression tests passed')
