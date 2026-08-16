@@ -1179,4 +1179,28 @@ assert.ok(opencode2Client.includes('listInbox('), 'the v2 client must keep the p
 // Lane A's persistence module must keep the prune contract the poll uses to bound storage growth.
 assert.ok(attentionPersistence.includes('export function pruneAttentionState'), 'attentionPersistence.ts must expose the prune helper')
 
+// --- Attention inbox interaction handlers (issue #9, Lane C) -----------------------------------
+// The context contract must expose the queued-prompt operations, the open action, and the
+// on-demand saved-permission surface the panel lane consumes.
+const inboxContextRegion = app.slice(app.indexOf('export type AttentionInboxContextValue'), app.indexOf('export const AttentionInboxContext'))
+for (const member of [
+  'open(item: AttentionItem): void',
+  'cancelQueued(sessionID: string, inboxID: string): void',
+  'steerQueued(sessionID: string, inboxID: string): void',
+  'queueQueued(sessionID: string, inboxID: string): void',
+  'savedPermissions: readonly SavedPermission[]',
+  'loadSavedPermissions(): void',
+  'revokeSavedPermission(id: string): void'
+]) {
+  assert.ok(inboxContextRegion.includes(member), `the inbox context contract must expose ${member}`)
+}
+// Queued-prompt operations are real server mutations: they must take the coordinator's inbox lease
+// through the component's established lease helpers (acquireMutation wraps acquireLease and keeps
+// the lock signal in step with the existing session mutations).
+assert.ok(app.includes('acquireMutation("inbox"'), 'queued-prompt operations must go through the inbox lease')
+// Saved permissions load on demand only: the panel triggers the one fetch, the poll never does.
+assert.ok(app.includes('listSavedPermissions(config'), 'the saved-permission list must be fetched through the client')
+assert.ok(app.includes('loadSavedPermissions'), 'the context must expose an on-demand saved-permission loader')
+assert.ok(!refreshRegion.includes('listSavedPermissions'), 'saved permissions must never load inside the poll')
+
 console.log('ui regression tests passed')

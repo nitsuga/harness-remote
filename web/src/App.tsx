@@ -58,7 +58,7 @@ import { createSessionMutationCoordinator, type MutationKind, type MutationLease
 import { SessionSidebar, SessionsPanel, formatTime, projectLabel, shortDirectory, type SessionRenameState } from "./components/session-list"
 import { createServerProfile, loadActiveServerProfile, loadServerProfiles, persistServerProfiles, type SavedServerProfile } from "./serverProfiles"
 import type { DesktopMenuCommand, DesktopMenuTemplate } from "../electron/ipc-contract"
-import type { AgentOption, CommandInfo, DiffFile, FileEntry, FileStatusEntry, HarnessAction, HarnessCapabilities, MessageEnvelope, MessagePart, ModelOption, ModelSelection, PathInfo, PermissionRequest, ProjectDashboard, QuestionInfo, QuestionRequest, ServerConfig, Session, SessionStatus, SessionView, TodoItem } from "./types"
+import type { AgentOption, CommandInfo, DiffFile, FileEntry, FileStatusEntry, HarnessAction, HarnessCapabilities, MessageEnvelope, MessagePart, ModelOption, ModelSelection, PathInfo, PermissionRequest, ProjectDashboard, QuestionInfo, QuestionRequest, SavedPermission, ServerConfig, Session, SessionStatus, SessionView, TodoItem } from "./types"
 import {
   SettingsIcon,
   ArrowLeftIcon,
@@ -118,12 +118,24 @@ const INBOX_QUEUED_FANOUT_CAP = 50
 
 /** Cross-session attention inbox (issue #9, Lane B). The panel lane (phase 2) consumes this
  *  context so App.tsx owns the derivation, persistence and notifications while the designer owns
- *  the presentation. */
+ *  the presentation. Lane C adds the interaction contract: opening an item's session, the
+ *  queued-prompt operations (cancel/steer/queue), and the on-demand saved-permission surface. */
 export type AttentionInboxContextValue = {
   items: readonly AttentionItem[]
   queuedBySession: ReadonlyMap<string, V2InboxItem[]>
   badge: number
   dismiss(item: AttentionItem): void
+  /** Open the item's session (navigating profiles if needed is out of scope — the item is always
+   *  from the active machine; the designer's panel shows only the active machine). */
+  open(item: AttentionItem): void
+  /** Queued-prompt operations (v2 only): cancel/steer/queue an undelivered inbox item. */
+  cancelQueued(sessionID: string, inboxID: string): void
+  steerQueued(sessionID: string, inboxID: string): void
+  queueQueued(sessionID: string, inboxID: string): void
+  /** Saved allow-always grants (v2 only); load on demand, empty until loaded. */
+  savedPermissions: readonly SavedPermission[]
+  loadSavedPermissions(): void
+  revokeSavedPermission(id: string): void
 }
 
 export const AttentionInboxContext = createContext<AttentionInboxContextValue | null>(null)
@@ -3353,6 +3365,72 @@ function App() {
     setInboxItems(remaining)
     updateInboxBadge(remaining)
   }
+  /** Open the inbox item's session (issue #9, Lane C). The item is always from the active machine,
+   *  so navigating profiles is out of scope — the panel shows only the active machine. */
+  const openAttentionItem = (item: AttentionItem) => {
+    void openSession(item.sessionId, item.directory)
+  }
+  /** Shared body for the queued-prompt operations exposed through the context (cancel/steer/queue).
+   *  Each is a real server mutation, so it takes the coordinator's inbox lease targeted at the
+   *  item's session like the other session mutations, and never writes into a replaced context. On
+   *  success the item is dropped from the local queued map — for cancel the row is gone, for
+   *  steer/queue the delivery flipped and the next poll re-derives the fresh listing anyway — so
+   *  the button state never lies; the outcome is announced with an existing i18n key. */
+  const mutateQueuedPrompt = async (sessionID: string, inboxID: string, op: "cancel" | "steer" | "queue") => {
+    const lease = acquireMutation("inbox", sessionID)
+    if (!lease) return
+    try {
+      const session = sessions.find((candidate) => candidate.id === sessionID)
+      if (!session) return
+      if (op === "cancel") await api.cancelInboxItem(config, sessionID, inboxID, session.directory)
+      else if (op === "steer") await api.steerInboxItem(config, sessionID, inboxID, session.directory)
+      else await api.queueInboxItem(config, sessionID, inboxID, session.directory)
+      if (!isLeaseContextCurrent(lease)) return
+      setQueuedInboxBySession((current) => {
+        const next = new Map(current)
+        const items = (next.get(sessionID) ?? []).filter((entry) => entry.id !== inboxID)
+        if (items.length) next.set(sessionID, items); else next.delete(sessionID)
+        return next
+      })
+      setActionNotice(t(op === "cancel" ? 'inbox.cancelPrompt' : op === "steer" ? 'inbox.steerPrompt' : 'inbox.queuePrompt'))
+    } catch (err) {
+      if (isLeaseContextCurrent(lease)) setActionNotice(t('settings.connectionFailed', { message: (err as Error).message }))
+    } finally {
+      releaseMutation(lease)
+    }
+  }
+  const cancelQueued = (sessionID: string, inboxID: string) => { void mutateQueuedPrompt(sessionID, inboxID, "cancel") }
+  const steerQueued = (sessionID: string, inboxID: string) => { void mutateQueuedPrompt(sessionID, inboxID, "steer") }
+  const queueQueued = (sessionID: string, inboxID: string) => { void mutateQueuedPrompt(sessionID, inboxID, "queue") }
+  /** Saved allow-always grants (v2 only): the panel calls `loadSavedPermissions` on demand, never
+   *  the poll, so the list is empty until the first explicit load. */
+  const [savedPermissions, setSavedPermissions] = useState<SavedPermission[]>([])
+  const savedPermissionsLoadedRef = useRef(false)
+  const loadSavedPermissions = () => {
+    if (savedPermissionsLoadedRef.current) return
+    if (config.backend !== "opencode2") return
+    savedPermissionsLoadedRef.current = true
+    api.listSavedPermissions(config).then((list) => setSavedPermissions(list)).catch(() => setSavedPermissions([]))
+  }
+  /** Revoke one allow-always grant. A real server mutation with no session target, so it takes the
+   *  coordinator's inbox lease like the queued operations; the removed row is dropped
+   *  optimistically and the outcome announced with existing i18n keys. */
+  const revokeSavedPermission = (id: string) => {
+    const lease = acquireMutation("inbox")
+    if (!lease) return
+    void (async () => {
+      try {
+        await api.revokeSavedPermission(config, id)
+        if (!isLeaseContextCurrent(lease)) return
+        setSavedPermissions((current) => current.filter((entry) => entry.id !== id))
+        setActionNotice(t('savedPermission.revoke'))
+      } catch (err) {
+        if (isLeaseContextCurrent(lease)) setActionNotice(t('settings.connectionFailed', { message: (err as Error).message }))
+      } finally {
+        releaseMutation(lease)
+      }
+    })()
+  }
   const selectedSessionRef = useRef<SessionView | null>(null)
   /** The session `openSession` is currently working on, so its retry can tell it is still wanted. */
   const openingSessionRef = useRef<string | null>(null)
@@ -6395,7 +6473,14 @@ function App() {
       items: inboxItems,
       queuedBySession: queuedInboxBySession,
       badge: inboxBadge,
-      dismiss: dismissAttentionItem
+      dismiss: dismissAttentionItem,
+      open: openAttentionItem,
+      cancelQueued,
+      steerQueued,
+      queueQueued,
+      savedPermissions,
+      loadSavedPermissions,
+      revokeSavedPermission
     }}>
     <div className={`app-shell${isDesktop ? " app-shell-desktop" : ""}`}>
       {isDesktop ? (
