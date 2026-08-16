@@ -154,4 +154,20 @@ assert.equal(en('detail.childSessionOf', { parent: 'Fix the build' }), 'Child se
 assert.equal(en('detail.showMore'), 'Show more')
 assert.equal(en('detail.subagentTask'), 'Subagent task')
 
+// Richer session activity states (issue #8): every status label must exist in every language. The
+// raw tables are asserted directly (not via the translator, whose English fallback would mask a
+// missing locale entry), exactly like the SUBAGENT_KEYS walk above.
+const STATUS_KEYS = [
+  'status.idle', 'status.busy', 'status.waiting', 'status.retrying',
+  'status.failed', 'status.completed', 'status.needsAttention'
+]
+for (const language of ['en', 'it', 'zh-TW', 'zh-CN']) {
+  for (const key of STATUS_KEYS) {
+    assert.ok(
+      translations[language][key] !== undefined,
+      `${key} must exist in the ${language} table (no English fallback)`
+    )
+  }
+}
+
 console.log('i18n tests passed')

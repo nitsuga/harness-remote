@@ -87,4 +87,20 @@ const stoppedRun = toAgentRun(session({ status: 'busy' }), 'omp', { terminalStat
 assert.equal(stoppedRun.status, 'stopped')
 assert.equal(stoppedRun.attention, undefined)
 
+// The v2 derivation (issue #8) flags crashed sessions as needs-attention with a plain idle status:
+// the run must surface the attention without inventing a terminal status.
+const needsAttentionRun = toAgentRun(session({ status: 'idle' }), 'opencode2', { needsAttention: true })
+assert.equal(needsAttentionRun.status, 'idle', 'needsAttention must not change the normalized status')
+assert.deepEqual(needsAttentionRun.attention, { reason: 'failure' })
+
+const needsAttentionWithPermission = toAgentRun(session({ status: 'idle' }), 'opencode2', {
+  needsAttention: true,
+  permissions: [{ id: 'p1', sessionID: 'session-1' }]
+})
+assert.deepEqual(
+  needsAttentionWithPermission.attention,
+  { reason: 'permission', requestId: 'p1' },
+  'permissions must outrank needsAttention'
+)
+
 console.log('agent run normalization tests passed')

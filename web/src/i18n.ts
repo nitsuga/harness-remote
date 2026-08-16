@@ -212,6 +212,13 @@ type TranslationKey =
   | 'session.renameTitle'
   | 'session.renamePlaceholder'
   | 'session.renameConfirm'
+  | 'status.busy'
+  | 'status.completed'
+  | 'status.failed'
+  | 'status.idle'
+  | 'status.needsAttention'
+  | 'status.retrying'
+  | 'status.waiting'
   | 'help.title'
   | 'help.overview'
   | 'help.server'
@@ -558,6 +565,13 @@ export const translations: Record<LanguageCode, Partial<Record<TranslationKey, s
     'session.renameTitle': 'Rename session',
     'session.renamePlaceholder': 'Enter new name...',
     'session.renameConfirm': 'Rename',
+    'status.busy': 'Working',
+    'status.completed': 'Completed',
+    'status.failed': 'Failed',
+    'status.idle': 'Idle',
+    'status.needsAttention': 'Needs attention',
+    'status.retrying': 'Retrying',
+    'status.waiting': 'Waiting',
     'help.title': 'Help & Documentation',
     'help.overview': 'Overview',
     'help.server': 'Server',
@@ -903,6 +917,13 @@ export const translations: Record<LanguageCode, Partial<Record<TranslationKey, s
     'session.renameTitle': 'Rinomina sessione',
     'session.renamePlaceholder': 'Inserisci nuovo nome...',
     'session.renameConfirm': 'Rinomina',
+    'status.busy': 'Al lavoro',
+    'status.completed': 'Completato',
+    'status.failed': 'Non riuscito',
+    'status.idle': 'Inattivo',
+    'status.needsAttention': 'Richiede attenzione',
+    'status.retrying': 'Riprovando',
+    'status.waiting': 'In attesa',
     'help.title': 'Aiuto e documentazione',
     'help.overview': 'Panoramica',
     'help.server': 'Server',
@@ -1241,6 +1262,13 @@ export const translations: Record<LanguageCode, Partial<Record<TranslationKey, s
     'session.renameTitle': '重新命名工作階段',
     'session.renamePlaceholder': '輸入新名稱...',
     'session.renameConfirm': '重新命名',
+    'status.busy': '執行中',
+    'status.completed': '已完成',
+    'status.failed': '失敗',
+    'status.idle': '閒置',
+    'status.needsAttention': '需要關注',
+    'status.retrying': '重試中',
+    'status.waiting': '等待中',
     'help.title': '說明與文件',
     'help.overview': '總覽',
     'help.server': '伺服器',
@@ -1528,6 +1556,13 @@ export const translations: Record<LanguageCode, Partial<Record<TranslationKey, s
     'session.renameTitle': '重命名会话',
     'session.renamePlaceholder': '输入新名称...',
     'session.renameConfirm': '重命名',
+    'status.busy': '执行中',
+    'status.completed': '已完成',
+    'status.failed': '失败',
+    'status.idle': '空闲',
+    'status.needsAttention': '需要关注',
+    'status.retrying': '重试中',
+    'status.waiting': '等待中',
     'help.title': '帮助与文档',
     'help.overview': '概览',
     'help.server': '服务器',

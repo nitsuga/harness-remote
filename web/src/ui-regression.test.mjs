@@ -10,6 +10,8 @@ const shell = readFileSync(new URL('./components/shell.tsx', import.meta.url), '
 const panels = readFileSync(new URL('./components/panels.tsx', import.meta.url), 'utf8')
 const sessionList = readFileSync(new URL('./components/session-list.tsx', import.meta.url), 'utf8')
 const composerView = readFileSync(new URL('./components/session-composer.tsx', import.meta.url), 'utf8')
+const agentRuns = readFileSync(new URL('./agentRuns.ts', import.meta.url), 'utf8')
+const sessionStatus = readFileSync(new URL('./sessionStatus.ts', import.meta.url), 'utf8')
 
 assert.match(styles, /button\s*\{[\s\S]*?cursor:\s*pointer;/, 'enabled buttons must advertise that they can be pressed')
 assert.match(styles, /button:disabled\s*\{[\s\S]*?cursor:\s*not-allowed;/, 'disabled buttons must retain the blocked cursor')
@@ -1035,5 +1037,38 @@ assert.match(styles, /\.subagent-status-failed\s*\{[^}]*color:\s*var\(--danger\)
 assert.match(styles, /\.subagent-run-error\s*\{[^}]*background:\s*var\(--danger-soft\)/, 'run errors must use the danger treatment')
 assert.match(styles, /\.subagent-run-working\s*\{[^}]*border-left-color:\s*var\(--primary\)/, 'a working run must read as active')
 assert.match(styles, /\.session-child-badge\s*\{[^}]*background:\s*var\(--secondary-soft\)/, 'the child badge must use the subagent accent')
+
+// --- Richer session activity states (issue #8) -------------------------------------------------
+// The v2 execution memory must be cleared wherever the last-event map is: a context/session switch
+// must not let a remembered terminal/error state leak across sessions.
+assert.match(
+  app,
+  /lastEventBySessionRef\.current\.clear\(\)\s*executionMemoryRef\.current\.clear\(\)/,
+  'the v2 execution memory must be cleared on context/session switch alongside the last-event map'
+)
+// Execution lifecycle events feed the reducer only for opencode2 backends, right where the stream
+// has the event in hand — v1/bridge traffic must see no behavioural change.
+assert.match(
+  app,
+  /config\.backend === "opencode2"\) \{\s*const sessionID = body\?\.sessionID[\s\S]*?reduceExecutionEvent\(executionMemoryRef\.current\.get\(sessionID\)/,
+  'execution events must feed the v2 reducer only for opencode2 backends'
+)
+// The derived status overlays the wire status map in refreshSessions, so the poll keeps the
+// derivation fresh even when the stream misses an event.
+assert.match(
+  app,
+  /Object\.assign\(\{\}, \.\.\.statusMaps\)[\s\S]*?deriveSessionStatus\(/,
+  'refreshSessions must merge derived v2 statuses after the wire status maps'
+)
+// The derivation must actually produce each of the six activity states.
+for (const word of ['"waiting"', '"completed"', '"failed"', '"retrying"', '"busy"', '"needs-attention"']) {
+  assert.ok(sessionStatus.includes(word), `sessionStatus.ts must derive the ${word} status`)
+}
+// attentionFor must honour the needsAttention signal: a crashed-but-idle session demands attention.
+assert.match(
+  agentRuns,
+  /function attentionFor[\s\S]*?if \(signals\.needsAttention\) return \{ reason: "failure" \}/,
+  'attentionFor must honour the needsAttention signal'
+)
 
 console.log('ui regression tests passed')

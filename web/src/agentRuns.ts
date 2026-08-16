@@ -33,6 +33,9 @@ export type AgentRunSignals = {
   questions?: readonly Pick<QuestionRequest, "id" | "sessionID">[]
   permissions?: readonly Pick<PermissionRequest, "id" | "sessionID">[]
   terminalStatus?: Extract<AgentRunStatus, "completed" | "failed" | "stopped">
+  /** The v2 status derivation flagged the session as needing attention (a crash with no terminal
+   *  status), so the run should demand user attention like a failed run. */
+  needsAttention?: boolean
   projectId?: string
   machineId?: string
   startedAt?: number
@@ -69,6 +72,7 @@ function attentionFor(
   const question = signals.questions?.find((request) => request.sessionID === sessionId)
   if (question) return { reason: "question", requestId: question.id }
 
+  if (signals.needsAttention) return { reason: "failure" }
   if (status === "failed") return { reason: "failure" }
   if (status === "completed") return { reason: "completion" }
   return undefined
