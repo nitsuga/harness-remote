@@ -2356,6 +2356,219 @@ a:focus-visible,
   overflow-wrap: anywhere;
 }
 
+/* --- Delegated-subagent run cards (issue #10) ---------------------------------
+   A `subagent` tool part renders as a structured card instead of a collapsed tool row: it is a
+   parallel piece of work with its own lifecycle, so it gets the summary family's wrap-safe card
+   look plus a status-tinted left edge that reads as "a run happening over there". The card is a
+   plain div — unlike the summary rows nothing on it opens on a whole-card click; the open-child
+   control below is the explicit navigation affordance. */
+.subagent-run-card {
+  width: 100%;
+  min-width: 0;
+  margin-top: var(--space-2);
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  border-radius: var(--radius-md);
+  background: var(--surface-subtle);
+  padding: var(--space-2) var(--space-3);
+  color: var(--muted-strong);
+  font-size: var(--font-xs);
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+.message > .subagent-run-card:first-child {
+  margin-top: 0;
+}
+
+/* Separation before a following answer, matching the summary rows. */
+.subagent-run-card + .message-content {
+  margin-top: var(--space-4);
+}
+
+.subagent-run-working {
+  border-left-color: var(--primary);
+}
+
+.subagent-run-waiting {
+  border-left-color: var(--secondary);
+}
+
+.subagent-run-retrying {
+  border-left-color: var(--warning);
+}
+
+.subagent-run-completed {
+  border-left-color: var(--success);
+}
+
+.subagent-run-failed {
+  border-left-color: var(--danger);
+}
+
+.subagent-run-stopped,
+.subagent-run-idle {
+  border-left-color: var(--border-strong);
+}
+
+.subagent-run-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.subagent-run-agent {
+  flex: 0 0 auto;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0.05rem 0.4rem;
+  border-radius: var(--radius-sm);
+  background: var(--surface-strong);
+  color: var(--muted-strong);
+  font-family: var(--font-mono);
+  font-size: var(--font-2xs);
+  font-weight: 600;
+}
+
+.subagent-run-description {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.subagent-run-status {
+  flex: 0 0 auto;
+  padding: 0.05rem 0.4rem;
+  border-radius: var(--radius-pill);
+  font-size: var(--font-2xs);
+  font-weight: 700;
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+  white-space: nowrap;
+  line-height: 1.4;
+}
+
+.subagent-status-working {
+  color: var(--primary);
+  background: var(--primary-soft);
+  animation: subagent-status-pulse 1.8s ease-in-out infinite;
+}
+
+.subagent-status-waiting {
+  color: var(--secondary);
+  background: var(--secondary-soft);
+}
+
+.subagent-status-retrying {
+  color: var(--warning);
+  background: var(--warning-soft);
+}
+
+.subagent-status-completed {
+  color: var(--success);
+  background: var(--success-soft);
+}
+
+.subagent-status-failed {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.subagent-status-stopped,
+.subagent-status-idle {
+  color: var(--muted-strong);
+  background: var(--surface-strong);
+}
+
+/* A gentle background breathes on the working pill; no opacity so the pulse never dims the label. */
+@keyframes subagent-status-pulse {
+  0%,
+  100% {
+    background: var(--primary-soft);
+  }
+  50% {
+    background: var(--surface-strong);
+  }
+}
+
+.subagent-run-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+  margin-top: var(--space-1);
+  color: var(--muted);
+  font-size: var(--font-2xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.subagent-run-error {
+  margin-top: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius-sm);
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-weight: 600;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* The result block clamps to a few lines by default; long outputs expand on demand so several
+   concurrent runs stay scannable on a phone. No fixed widths anywhere in the card. */
+.subagent-run-result {
+  margin-top: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-inset);
+  max-height: 7.5rem;
+  overflow: hidden;
+}
+
+.subagent-run-result.expanded {
+  max-height: none;
+}
+
+.subagent-run-result-caption {
+  display: block;
+  margin-bottom: var(--space-1);
+  color: var(--muted);
+  font-size: var(--font-2xs);
+  font-weight: 600;
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+}
+
+.subagent-run-result-text {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+  font-size: var(--font-xs);
+}
+
+.subagent-run-result-toggle {
+  margin-top: var(--space-1);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--primary);
+  font-size: var(--font-xs);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.subagent-run-actions {
+  display: flex;
+  margin-top: var(--space-2);
+}
+
 .message-patch {
   margin-top: var(--space-2);
   display: flex;
@@ -2653,6 +2866,43 @@ a:focus-visible,
   outline: 2px solid var(--focus-ring);
   outline-offset: 3px;
   border-radius: var(--radius-sm);
+}
+
+/* A delegated run is recognizable in the list: child sessions (spawned by a subagent or fork)
+   carry a small violet-tinted badge under the title. Violet is the "waiting on a subagent" accent
+   elsewhere, so the tint already means "someone else is running this". The full explanation — the
+   parent's title when it is loaded — lives in the title/aria hint. */
+.session-child-badge {
+  display: inline-block;
+  margin-top: var(--space-1);
+  padding: 0.05rem 0.4rem;
+  border-radius: var(--radius-pill);
+  background: var(--secondary-soft);
+  color: var(--secondary);
+  font-size: var(--font-2xs);
+  font-weight: 700;
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+  white-space: nowrap;
+  line-height: 1.4;
+}
+
+/* The compact sidebar row keeps the badge on the title's line: the title truncates (min-width: 0
+   via flex) and the badge stays visible at the end of the row instead of adding a line of height. */
+.sidebar-sessions .session-card-open {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.sidebar-sessions .session-card .session-card-title {
+  flex: 1 1 auto;
+}
+
+.sidebar-sessions .session-child-badge {
+  flex: 0 0 auto;
+  margin-top: 0;
 }
 
 .composer-chip strong {

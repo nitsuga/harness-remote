@@ -193,6 +193,15 @@ type TranslationKey =
   | 'detail.fallbackTitle'
   | 'detail.assistantError'
   | 'detail.assistantInterrupted'
+  | 'detail.openChildSession'
+  | 'detail.openingChildSession'
+  | 'detail.subagentTask'
+  | 'detail.subagentResult'
+  | 'detail.showMore'
+  | 'detail.showLess'
+  | 'detail.subagentElapsed'
+  | 'detail.childSession'
+  | 'detail.childSessionOf'
   | 'todo.title'
   | 'todo.hide'
   | 'todo.show'
@@ -530,6 +539,15 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.fallbackTitle': 'Unknown message type',
     'detail.assistantError': 'Error: {message}',
     'detail.assistantInterrupted': 'Step interrupted',
+    'detail.openChildSession': 'Open child session',
+    'detail.openingChildSession': 'Opening…',
+    'detail.subagentTask': 'Subagent task',
+    'detail.subagentResult': 'Result',
+    'detail.showMore': 'Show more',
+    'detail.showLess': 'Show less',
+    'detail.subagentElapsed': 'Elapsed {time}',
+    'detail.childSession': 'Child session',
+    'detail.childSessionOf': 'Child session of {parent}',
     'todo.title': 'Todo Items',
     'todo.hide': 'Hide',
     'todo.show': 'Show',
@@ -866,6 +884,15 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.fallbackTitle': 'Tipo di messaggio sconosciuto',
     'detail.assistantError': 'Errore: {message}',
     'detail.assistantInterrupted': 'Passaggio interrotto',
+    'detail.openChildSession': 'Apri sessione figlia',
+    'detail.openingChildSession': 'Apertura…',
+    'detail.subagentTask': 'Attività subagente',
+    'detail.subagentResult': 'Risultato',
+    'detail.showMore': 'Mostra di più',
+    'detail.showLess': 'Mostra di meno',
+    'detail.subagentElapsed': 'Trascorso {time}',
+    'detail.childSession': 'Sessione figlia',
+    'detail.childSessionOf': 'Sessione figlia di {parent}',
     'todo.title': 'Todo',
     'todo.hide': 'Nascondi',
     'todo.show': 'Mostra',
@@ -1195,6 +1222,15 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.fallbackTitle': '未知的訊息類型',
     'detail.assistantError': '錯誤：{message}',
     'detail.assistantInterrupted': '步驟已中斷',
+    'detail.openChildSession': '開啟子工作階段',
+    'detail.openingChildSession': '開啟中…',
+    'detail.subagentTask': '子代理任務',
+    'detail.subagentResult': '結果',
+    'detail.showMore': '顯示更多',
+    'detail.showLess': '顯示更少',
+    'detail.subagentElapsed': '已耗時 {time}',
+    'detail.childSession': '子工作階段',
+    'detail.childSessionOf': '{parent} 的子工作階段',
     'todo.title': '待辦事項',
     'todo.hide': '隱藏',
     'todo.show': '顯示',
@@ -1473,6 +1509,15 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.fallbackTitle': '未知的消息类型',
     'detail.assistantError': '错误：{message}',
     'detail.assistantInterrupted': '步骤已中断',
+    'detail.openChildSession': '打开子会话',
+    'detail.openingChildSession': '打开中…',
+    'detail.subagentTask': '子代理任务',
+    'detail.subagentResult': '结果',
+    'detail.showMore': '显示更多',
+    'detail.showLess': '显示更少',
+    'detail.subagentElapsed': '已耗时 {time}',
+    'detail.childSession': '子会话',
+    'detail.childSessionOf': '{parent} 的子会话',
     'todo.title': '待办事项',
     'todo.hide': '隐藏',
     'todo.show': '显示',

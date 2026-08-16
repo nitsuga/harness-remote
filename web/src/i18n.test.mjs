@@ -126,4 +126,22 @@ assert.equal(en('detail.switchAgentTo', { to: 'orchestrator' }), 'Switched agent
 assert.equal(en('detail.fallbackLabel', { typeName: 'snapshot' }), 'Unknown message type (snapshot)')
 assert.equal(en('detail.assistantError', { message: 'aborted' }), 'Error: aborted')
 
+// Delegated-subagent run cards and child-session badges (issue #10): every label must exist in
+// every language — the open-child control, the collapsible result and the list badge all sit on
+// surfaces a non-English user reaches in normal use.
+for (const translator of [en, it, zh, zhCN]) {
+  for (const key of [
+    'detail.openChildSession', 'detail.openingChildSession', 'detail.subagentTask',
+    'detail.subagentResult', 'detail.showMore', 'detail.showLess', 'detail.subagentElapsed',
+    'detail.childSession', 'detail.childSessionOf'
+  ]) {
+    assert.notEqual(translator(key), key, `${key} must be translated in every language`)
+  }
+}
+assert.equal(en('detail.openChildSession'), 'Open child session')
+assert.equal(en('detail.subagentElapsed', { time: '1m 23s' }), 'Elapsed 1m 23s')
+assert.equal(en('detail.childSessionOf', { parent: 'Fix the build' }), 'Child session of Fix the build')
+assert.equal(en('detail.showMore'), 'Show more')
+assert.equal(en('detail.subagentTask'), 'Subagent task')
+
 console.log('i18n tests passed')

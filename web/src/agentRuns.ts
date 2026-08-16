@@ -103,3 +103,98 @@ export function toAgentRun(
 
   return run
 }
+
+/** Correlation data for a delegated subagent run, derived from tool metadata
+ *  and/or the child session, using the shared status vocabulary. */
+export type SubagentRun = {
+  childID: string
+  agent?: string
+  description?: string
+  status: AgentRunStatus          // from the shared vocabulary
+  startedAt?: number
+  endedAt?: number
+  output?: string
+  error?: string
+  model?: { id: string; providerID?: string; variant?: string }
+}
+
+/** Map the v2 subagent tool's completion vocabulary onto the shared terminal states:
+ *  "completed" → completed, "error" → failed, "cancelled" → stopped. Anything else (notably
+ *  the in-flight "running") yields no terminal status, so `normalizeAgentRunStatus` keeps
+ *  reporting the run as working — a terminal state is never invented from an unknown word. */
+function terminalSubagentStatus(status: unknown): AgentRunSignals["terminalStatus"] | undefined {
+  if (status === "completed") return "completed"
+  if (status === "error") return "failed"
+  if (status === "cancelled") return "stopped"
+  return undefined
+}
+
+/**
+ * Derive a delegated-subagent run from the parent transcript's `subagent` tool part. The child
+ * session id lives on `state.metadata.sessionID` (both the running-progress and the completed
+ * tool metadata carry it); agent/description come from the tool input; the terminal state comes
+ * from `metadata.status` mapped onto the shared vocabulary.
+ *
+ * Returns null when the correlation data is missing — a non-subagent tool, or a subagent part
+ * without a non-empty `metadata.sessionID` — the "degrades gracefully" case where the caller
+ * falls back to generic tool rendering instead of guessing a run identity.
+ */
+export function subagentRunFromTool(part: {
+  tool?: string
+  state?: {
+    status?: string
+    input?: Record<string, unknown>
+    output?: string
+    error?: string
+    time?: { start?: number; end?: number }
+    metadata?: Record<string, unknown>
+  }
+}): SubagentRun | null {
+  if (part.tool !== "subagent") return null
+  const metadata = part.state?.metadata
+  const childID = metadata?.sessionID
+  if (typeof childID !== "string" || childID.length === 0) return null
+
+  const rawStatus = part.state?.status
+  const run: SubagentRun = {
+    childID,
+    // The run is "working" while the server reports it in flight: the tool's own state is then
+    // "running" (already mapped by the shared vocabulary) or still "pending" (created, queued).
+    // A "pending" state with no running signal stays idle rather than being promoted, and a
+    // terminal state only ever comes from the server's own `metadata.status`.
+    status: rawStatus === "pending" && metadata?.status === "running"
+      ? "working"
+      : normalizeAgentRunStatus(rawStatus ?? "", terminalSubagentStatus(metadata?.status))
+  }
+
+  const input = part.state?.input
+  if (typeof input?.agent === "string") run.agent = input.agent
+  if (typeof input?.description === "string") run.description = input.description
+  const time = part.state?.time
+  if (time?.start !== undefined) run.startedAt = time.start
+  if (time?.end !== undefined) run.endedAt = time.end
+  if (part.state?.output) run.output = part.state.output
+  if (part.state?.error) run.error = part.state.error
+  return run
+}
+
+/**
+ * Derive a delegated-subagent run from the terminal completion signal the parent transcript
+ * carries on `info.subagent` (set by the v2 mapper from the synthetic message the opencode
+ * `subagent` tool injects when its child finishes). The completion state is the server's word
+ * and maps one-to-one onto the shared vocabulary. Returns null when the envelope carries no
+ * such signal.
+ */
+export function subagentRunFromCompletion(info: {
+  subagent?: { childID: string; agent?: string; state: "completed" | "error" | "cancelled" }
+}): SubagentRun | null {
+  const completion = info?.subagent
+  if (!completion) return null
+  const run: SubagentRun = {
+    childID: completion.childID,
+    // The synthetic mapper already normalizes the state, so this fallback is purely defensive.
+    status: terminalSubagentStatus(completion.state) ?? "completed"
+  }
+  if (typeof completion.agent === "string") run.agent = completion.agent
+  return run
+}

@@ -963,4 +963,72 @@ assert.match(styles, /\.message-switch-summary\s*\{[^}]*cursor:\s*default/, 'the
 assert.match(styles, /\.message-fallback-summary[\s\S]*?cursor:\s*pointer/, 'the fallback summary button must advertise that it can be pressed')
 assert.match(styles, /\.message-error-row\s*\{[^}]*background:\s*var\(--danger-soft\)/, 'assistant error rows must use the danger treatment')
 
+// --- Delegated-subagent run cards and child-session badges (issue #10) ------------------------
+// A correlated subagent tool part renders as its own run card and escapes the action-group
+// collapse: a delegated run has its own lifecycle and a live card, and the group summary (whose
+// modal only opens on demand) would bury it.
+assert.ok(app.includes('subagentRunFromTool'), 'the transcript must derive subagent runs from the tool part')
+assert.ok(app.includes('subagentRunFromCompletion'), 'the transcript must consume the synthetic completion signal')
+assert.match(
+  app,
+  /if \(part\.type === "tool" && subagentRunFromTool\(part\)\) \{\s*flush\(\)[\s\S]*?items\.push\(\{ kind: "part", part \}\)/,
+  'correlated subagent tool parts must escape the action-group collapse'
+)
+assert.match(app, /function SubagentRunCard/, 'subagent runs need their own card renderer')
+assert.match(
+  app,
+  /<div className=\{`subagent-run-card subagent-run-\$\{run\.status\}`\}>/,
+  'the run card must be a plain div, not a whole-card button'
+)
+assert.match(
+  app,
+  /className=\{`subagent-run-status subagent-status-\$\{run\.status\}`\}[\s\S]*?\{run\.status\}/,
+  'the card must show the shared status vocabulary in its pill'
+)
+assert.match(
+  app,
+  /t\('detail\.subagentElapsed', \{ time: formatRunDuration/,
+  'a run with a start time must show its elapsed duration'
+)
+assert.match(
+  app,
+  /if \(!live\) return[\s\S]*?setInterval\(\(\) => setNow\(Date\.now\(\)\), 1000\)/,
+  'the live elapsed clock must tick locally without adding a server poll'
+)
+assert.match(app, /subagent-run-error[\s\S]*?\{run\.error\}/, 'a failed run must render its error danger-toned')
+assert.ok(app.includes("expanded ? t('detail.showLess') : t('detail.showMore')"), 'long results must be collapsible')
+assert.match(
+  app,
+  /onClick=\{\(\) => onOpenChildSession\(run\.childID\)\}[\s\S]*?t\('detail\.openChildSession'\)/,
+  'the card must offer an explicit open-child control'
+)
+assert.ok(app.includes('getSessionV2(config, childID)'), 'the open-child action must fetch the child directory lazily when the list lacks it')
+assert.ok(app.includes('mergeSubagentCompletion'), 'a terminal completion must merge over its matching tool card')
+assert.match(
+  app,
+  /const subagentRun = subagentRunFromTool\(part\)[\s\S]*?return <ToolPartView part=\{part\}/,
+  'uncorrelated subagent parts must fall back to the generic tool row exactly as before'
+)
+assert.match(
+  app,
+  /orphanCompletion = message\.info\.subagent && !subagentContext\.toolChildIDs\.has\(message\.info\.subagent\.childID\)/,
+  'a completion with no matching tool card must render as its own compact card'
+)
+assert.ok(app.includes('subagentContext'), 'transcript-wide subagent correlation must be computed once per message change')
+assert.ok(app.includes('onOpenChildSession={handleOpenChildSession}'), 'the memoized transcript must receive the identity-stable open-child callback')
+assert.match(
+  app,
+  /function toSessionView[\s\S]*?Object\.defineProperty\(view, "parentID"/,
+  'the view model must carry the non-enumerable parent id for the list badge'
+)
+assert.ok(sessionList.includes('session-child-badge'), 'child sessions must get a badge in the session list')
+assert.ok(app.includes('parentInfo,'), 'the session list must receive the child-session badge data')
+assert.ok(sessionList.includes("t('detail.childSessionOf'"), 'the child badge must explain itself with the parent title when available')
+assert.match(styles, /\.subagent-run-card\s*\{[^}]*min-width:\s*0;/, 'run cards must be allowed to shrink in narrow layouts')
+assert.match(styles, /\.subagent-run-result\s*\{[^}]*max-height:\s*7\.5rem;/, 'run results must clamp to a few lines by default')
+assert.match(styles, /\.subagent-status-failed\s*\{[^}]*color:\s*var\(--danger\)/, 'a failed run status must use the danger treatment')
+assert.match(styles, /\.subagent-run-error\s*\{[^}]*background:\s*var\(--danger-soft\)/, 'run errors must use the danger treatment')
+assert.match(styles, /\.subagent-run-working\s*\{[^}]*border-left-color:\s*var\(--primary\)/, 'a working run must read as active')
+assert.match(styles, /\.session-child-badge\s*\{[^}]*background:\s*var\(--secondary-soft\)/, 'the child badge must use the subagent accent')
+
 console.log('ui regression tests passed')
