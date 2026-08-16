@@ -126,6 +126,13 @@ export type SubagentRun = {
   model?: { id: string; providerID?: string; variant?: string }
 }
 
+/** Whether a delegated run is still in flight. Only these statuses keep the live elapsed clock
+ *  ticking and the live output window following the child; terminal runs (completed/failed/stopped)
+ *  and idle freeze at their own timestamps. */
+export function isLiveSubagentStatus(status: AgentRunStatus): boolean {
+  return status === "working" || status === "waiting" || status === "retrying"
+}
+
 /** Map the v2 subagent tool's completion vocabulary onto the shared terminal states:
  *  "completed" → completed, "error" → failed, "cancelled" → stopped. Anything else (notably
  *  the in-flight "running") yields no terminal status, so `normalizeAgentRunStatus` keeps
@@ -238,4 +245,40 @@ export function subagentCompletionDescription(parts: readonly MessagePart[]): st
   const stripped = raw.replace(/^\s*<subagent\b[^>]*>/i, "").replace(/<\/subagent>\s*$/i, "").trim()
   if (!stripped || stripped.length > 140) return undefined
   return stripped
+}
+
+/** Whether a text string is exactly the synthetic completion block the opencode `subagent` tool
+ *  injects when a child finishes: an opening `<subagent ...>` tag through a closing `</subagent>`
+ *  with nothing else around it. Only such complete wrappers are the injected payload — any other
+ *  occurrence of the tags is ordinary content and must keep rendering as before. */
+export function isSubagentCompletionWrapper(text: string | undefined | null): boolean {
+  if (!text) return false
+  return /^\s*<subagent\b[^>]*>[\s\S]*<\/subagent>\s*$/i.test(text)
+}
+
+/** The wrapper text a synthetic completion message carries, read off its parts. The v2 mapper
+ *  emits the block on a structured `system` part's `text` when the completion has a description,
+ *  and on a plain `text` part otherwise — the same shapes `subagentCompletionDescription` reads. */
+function subagentCompletionBlock(parts: readonly MessagePart[]): string | undefined {
+  const system = parts.find((part) => part.type === "system")
+  const raw = system
+    ? (system.text ?? "")
+    : parts
+        .filter((part) => part.type === "text" && part.text)
+        .map((part) => part.text)
+        .join("\n")
+        .trim()
+  return raw.length > 0 ? raw : undefined
+}
+
+/** The child's actual final output inside a synthetic subagent completion wrapper (issue #47):
+ *  only the outer `<subagent ...>`/`</subagent>` tags are stripped, so the run card can show the
+ *  real result instead of the launch notice a background tool part carries. Returns undefined when
+ *  the parts carry no complete wrapper, or the wrapper is empty — those parts are ordinary content
+ *  and stay untouched. */
+export function subagentCompletionOutput(parts: readonly MessagePart[]): string | undefined {
+  const raw = subagentCompletionBlock(parts)
+  if (!raw || !isSubagentCompletionWrapper(raw)) return undefined
+  const inner = raw.replace(/^\s*<subagent\b[^>]*>/i, "").replace(/<\/subagent>\s*$/i, "").trim()
+  return inner.length > 0 ? inner : undefined
 }

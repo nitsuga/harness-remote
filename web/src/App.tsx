@@ -11,12 +11,14 @@ import {
   isIndeterminateDeliveryError
 } from "./opencode2-client"
 import {
+  isLiveSubagentStatus,
+  isSubagentCompletionWrapper,
   subagentCompletionDescription,
+  subagentCompletionOutput,
   subagentRunFromCompletion,
   subagentRunFromTool,
   toAgentRun,
   type AgentRunSignals,
-  type AgentRunStatus,
   type SubagentRun
 } from "./agentRuns"
 import { collectAttentionItems, filterDismissed, itemGeneration, type AttentionItem } from "./attentionInbox"
@@ -44,7 +46,16 @@ import {
   type EventStreamStatus
 } from "./opencode-events"
 import { createTranslator, languageOptions, normalizeLanguage, type LanguageCode } from "./i18n"
+import {
+  applyStreamedToolProgress,
+  extractChildOutputLines,
+  liveSubagentChildIDs,
+  liveSubagentChildIDsFromParts,
+  subagentProgressMetadata,
+  type ChildOutput
+} from "./subagentLive"
 import { stripMarkdownDirectives } from "./markdownDirectives"
+import { createRefreshCoalescer } from "./refresh-coalescer"
 import { isQuestionActive, applyInboxDelivery, type V2InboxItem } from "./opencode2-mappers"
 import { DEFAULT_HARNESS_CAPABILITIES } from "./backendCapabilities"
 import { BACKEND_CLIENTS } from "./backendClient"
@@ -465,6 +476,12 @@ const MODAL_TITLE_MAX_LENGTH = 80
  * mistaken for a broken one the instant it stops streaming.
  */
 const SESSION_STREAM_QUIET_MS = 12_000
+
+/** Consecutive failed child-transcript fetches after which the live-output capture gives up on a
+ *  child (issue #47): a deleted/pruned child session keeps failing forever while its tool part still
+ *  reads live, and by then the last captured lines are stale anyway. A 404 counts as terminal
+ *  immediately (the child session is gone for good). */
+const CHILD_FETCH_MAX_CONSECUTIVE_FAILURES = 3
 
 function truncateForTitle(text: string, maxLength: number = MODAL_TITLE_MAX_LENGTH): string {
   const singleLine = text.replace(/\s+/g, " ").trim()
@@ -1304,7 +1321,7 @@ function ToolPartView({
           {todos ? (
             <TodoListView items={todos} />
           ) : questions ? (
-            <QuestionListView questions={questions} answers={part.state?.metadata?.answers} />
+            <QuestionListView questions={questions} answers={part.state?.metadata?.answers as string[][] | undefined} />
           ) : (
             <>
               <pre className="message-tool-command">{command}</pre>
@@ -1424,23 +1441,39 @@ function FallbackPartView({ part, timestamp, t }: { part: MessagePart; timestamp
 /** A delegated-subagent run rendered as its own structured card in the transcript (issue #10):
  *  agent + description headline, a status pill from the shared run vocabulary, a live elapsed
  *  clock while the run is in flight, the terminal result (collapsible) or a danger-toned error,
- *  and an explicit "open child session" control. The card itself is deliberately NOT a button —
- *  unlike the collapsed tool rows, nothing about the run opens on a whole-card click; navigation
- *  is the small labelled control below. Status/elapsed freshness rides the existing poll and
- *  event cadence; the only timer here is a local one-second clock for the live elapsed label. */
+ *  and an explicit "open child session" control. While the child works (issue #47), a monospace
+ *  window below the headline follows the child's latest output — the child session id exists only
+ *  on the ephemeral progress event, so the live area degrades to a quiet placeholder until the
+ *  first output arrives, and to the result view the moment the run turns terminal. The result
+ *  block is gated on the run being terminal: a background launch's tool output is only the launch
+ *  notice ("The subagent is working in the background..."), which must never render as a second
+ *  RESULT window under the live area — once the synthetic completion lands, its extracted output
+ *  replaces the notice. While the run
+ *  is live, a status row under the live area keeps the shared typing-dot working animation
+ *  right-aligned on the same line as the Show more/Show less toggle, so a run with no output yet
+ *  still reads as in flight at a glance. The card itself is deliberately NOT a button — unlike the
+ *  collapsed tool rows, nothing about the run opens on a whole-card click; navigation is the small
+ *  labelled control below. Status/elapsed freshness rides the existing poll and event cadence; the
+ *  only timer here is a local one-second clock for the live elapsed label. */
 function SubagentRunCard({
   run,
+  output,
   onOpenChildSession,
   openingChildID,
   t
 }: {
   run: SubagentRun
+  /** Live output captured for the child while it runs (issue #47); undefined while the run has no
+   *  captured output yet, and irrelevant once the run turns terminal (the result takes over). */
+  output?: ChildOutput
   onOpenChildSession: (childID: string) => void
   openingChildID: string | null
   t: Translator
 }) {
   const [expanded, setExpanded] = useState(false)
+  const [liveExpanded, setLiveExpanded] = useState(false)
   const live = isLiveSubagentStatus(run.status) && run.startedAt !== undefined
+  const liveRun = isLiveSubagentStatus(run.status)
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
     if (!live) return
@@ -1452,6 +1485,22 @@ function SubagentRunCard({
     : null
   const headline = run.description ?? run.agent ?? t('detail.subagentTask')
   const longOutput = (run.output?.length ?? 0) > 240
+  // The live window keeps itself pinned to the newest lines while new output lands, but only while
+  // the user is already at the bottom of it — scrolling up to read history must not be yanked back.
+  // The first follow is instant (no flash of older lines on mount); later updates scroll smoothly.
+  const liveRegionRef = useRef<HTMLDivElement | null>(null)
+  const stickToLiveBottomRef = useRef(true)
+  const liveFollowedOnceRef = useRef(false)
+  useEffect(() => {
+    const region = liveRegionRef.current
+    if (!liveRun || !output || !region) {
+      liveFollowedOnceRef.current = false
+      return
+    }
+    if (!stickToLiveBottomRef.current) return
+    region.scrollTo({ top: region.scrollHeight, behavior: liveFollowedOnceRef.current ? "smooth" : "auto" })
+    liveFollowedOnceRef.current = true
+  }, [liveRun, output])
   return (
     <div className={`subagent-run-card subagent-run-${run.status}`}>
       <div className="subagent-run-head">
@@ -1464,10 +1513,40 @@ function SubagentRunCard({
           <span className="subagent-run-elapsed">{elapsed}</span>
         </div>
       )}
+      {liveRun && output && (
+        <div
+          className={`subagent-run-live${liveExpanded ? " expanded" : ""}`}
+          ref={liveRegionRef}
+          onScroll={(event) => {
+            const region = event.currentTarget
+            stickToLiveBottomRef.current = region.scrollHeight - region.scrollTop - region.clientHeight < 12
+          }}
+        >
+          <span className="subagent-run-live-caption">{t('detail.subagentLiveOutput')}</span>
+          <pre className="subagent-run-live-text">{output.lines.join("\n")}</pre>
+        </div>
+      )}
+      {liveRun && !output && (
+        <div className="subagent-run-live-placeholder">{t('detail.subagentLivePlaceholder')}</div>
+      )}
+      {liveRun && (
+        <div className="subagent-run-live-status">
+          {output && output.lines.length > 5 && (
+            <button type="button" className="subagent-run-live-toggle" onClick={() => setLiveExpanded((value) => !value)}>
+              {liveExpanded ? t('detail.showLess') : t('detail.showMore')}
+            </button>
+          )}
+          <div className="typing-dots" aria-hidden="true">
+            <span className="typing-dot" />
+            <span className="typing-dot" />
+            <span className="typing-dot" />
+          </div>
+        </div>
+      )}
       {run.error && (
         <div className="subagent-run-error">{run.error}</div>
       )}
-      {run.output && run.status !== "failed" && (
+      {!liveRun && run.output && run.status !== "failed" && (
         <>
           <div className={`subagent-run-result${expanded ? " expanded" : ""}`}>
             <span className="subagent-run-result-caption">{t('detail.subagentResult')}</span>
@@ -1503,6 +1582,7 @@ function MessagePartView({
   timestamp,
   t,
   subagentContext,
+  childOutput,
   onOpenChildSession,
   openingChildID
 }: {
@@ -1516,11 +1596,19 @@ function MessagePartView({
    *  modal reuse stays untouched — subagent run parts escape action groups, so the modal never
    *  actually hosts one. */
   subagentContext?: SubagentContext
+  /** Live output captured for running children (issue #47), keyed by child session id — only a
+   *  live subagent card reads its own entry. Optional like subagentContext: the action-group modal
+   *  reuse passes neither. */
+  childOutput?: Readonly<Record<string, ChildOutput>>
   onOpenChildSession?: (childID: string) => void
   openingChildID?: string | null
 }) {
   if (part.type === "text") {
     if (!part.text) return null
+    // A synthetic subagent completion without a description maps to a plain text part whose text is
+    // exactly the raw `<subagent ...>...</subagent>` wrapper (issue #47); the run card renders the
+    // actual result, so the XML itself must never surface as chat prose.
+    if (isSubagentCompletionWrapper(part.text)) return null
     return (
       <div className="message-content">
         <ReactMarkdown remarkPlugins={REMARK_PLUGINS}>{normalizeMessageMarkdown(part.text)}</ReactMarkdown>
@@ -1553,6 +1641,7 @@ function MessagePartView({
       return (
         <SubagentRunCard
           run={mergeSubagentCompletion(subagentRun, completion)}
+          output={childOutput?.[subagentRun.childID]}
           onOpenChildSession={onOpenChildSession ?? (() => undefined)}
           openingChildID={openingChildID ?? null}
           t={t}
@@ -1581,6 +1670,11 @@ function MessagePartView({
   }
 
   if (part.type === "system") {
+    // A synthetic subagent completion's system part carries the raw `<subagent ...>` wrapper on
+    // `text` (with the child's short description on `description`); the run card owns the result,
+    // so the wrapper must never render as XML in the transcript (issue #47). Normal system messages
+    // are not complete wrappers and render exactly as before.
+    if (isSubagentCompletionWrapper(part.text)) return null
     return (
       <div className="message-system-row">
         {part.text && <span className="message-system-text">{part.text}</span>}
@@ -1619,12 +1713,6 @@ type TimelineItem = { kind: "action-group"; parts: MessagePart[] } | { kind: "pa
    its own run card instead of being collapsed into the "thought for Xs, ran N tools" row. The
    helpers below assemble the run data; the renderers live near MessagePartView. */
 
-/** Whether a run is still in flight. Only these statuses keep the live elapsed clock ticking;
- *  terminal runs (completed/failed/stopped) and idle freeze at their own timestamps. */
-function isLiveSubagentStatus(status: AgentRunStatus): boolean {
-  return status === "working" || status === "waiting" || status === "retrying"
-}
-
 /** Compact "1m 23s" style duration for run cards — plain digits, no locale inflection, matching
  *  the raw timing the transcript already shows for tool durations. */
 function formatRunDuration(ms: number): string {
@@ -1640,13 +1728,16 @@ function formatRunDuration(ms: number): string {
 /** Merge a synthetic terminal completion (`info.subagent`, injected by the opencode `subagent`
  *  tool when its child finishes) over a tool-derived run for the same child session id. The
  *  completion's state is the server's own terminal word and wins; the tool run keeps supplying
- *  the description/output/error/timing the completion signal does not carry. The agent stays the
+ *  the description/error/timing the completion signal does not carry. The agent stays the
  *  tool input's stable agent id when the tool run carries one — the completion's `agent` is only
- *  a fallback for a run whose tool part never surfaced an id. */
+ *  a fallback for a run whose tool part never surfaced an id. The completion's extracted output —
+ *  the child's actual final result — replaces the tool part's launch notice for a background
+ *  launch, so the terminal card shows the real output (issue #47). */
 function mergeSubagentCompletion(run: SubagentRun, completion: SubagentRun | undefined): SubagentRun {
   if (!completion) return run
   const merged: SubagentRun = { ...run, status: completion.status, endedAt: completion.endedAt ?? run.endedAt }
   if (!merged.agent && completion.agent) merged.agent = completion.agent
+  if (completion.output) merged.output = completion.output
   return merged
 }
 
@@ -1683,15 +1774,27 @@ function collectSubagentCompletions(messages: readonly MessageEnvelope[]): Map<s
     // `<subagent ...>` block on `text`), so plain text extraction alone would come back empty.
     const description = subagentCompletionDescription(message.parts)
     if (!run.description && description) run.description = description
+    // The completion's own text carries the child's actual final output inside the
+    // `<subagent ...>` wrapper; a background launch's tool output is only the launch notice, so
+    // the extracted payload keeps the terminal card (merged or orphan) showing the real result.
+    const output = subagentCompletionOutput(message.parts)
+    if (output) run.output = output
     completions.set(run.childID, run)
   }
   return completions
 }
 
+/** Referentially stable stand-in for bubbles that host no live subagent tool part: passing this
+ *  instead of the live `childOutput` record keeps the memoized bubble renderers from re-running on
+ *  child-output updates that cannot affect them (issue #47). */
+const EMPTY_CHILD_OUTPUT: Readonly<Record<string, ChildOutput>> = {}
+
 /** Transcript-wide subagent correlation, computed once per rendered-message change and handed down
  *  to the memoized bubble renderers: `completions` lets a working tool card go terminal the moment
  *  the synthetic completion lands (no refetch), and `toolChildIDs` decides whether a completion
- *  still needs its own compact card. */
+ *  still needs its own compact card. The live output captured for running children (issue #47)
+ *  travels as a separate `childOutput` prop so the memoized renderers stay put when only that
+ *  record changes. */
 type SubagentContext = {
   completions: Map<string, SubagentRun>
   toolChildIDs: Set<string>
@@ -2089,7 +2192,28 @@ function createLocalAssistantMessage(sessionID: string, text: string): MessageEn
  *  than by rejecting the whole snapshot, so a lean refetch can still deliver the messages that came with it. */
 function reconcileStreamedPart(previous: MessagePart | undefined, incoming: MessagePart): MessagePart {
   if (!previous || previous.type !== incoming.type) return incoming
-  if (incoming.type !== "reasoning" && incoming.type !== "text") return incoming
+  if (incoming.type !== "reasoning" && incoming.type !== "text") {
+    // The v2 `session.tool.progress` event injects the subagent child session id onto the tool
+    // part's `state.metadata` while the child runs (issue #47) — ephemeral by contract: durable
+    // transcript state carries it only after the terminal tool success lands. A refetched snapshot
+    // (or later part update) that carries the part without it must not erase the correlation,
+    // or the run card would blink out on every poll until the child finished. Only the metadata
+    // is preserved; everything else stays the fresher incoming part.
+    if (incoming.type === "tool") {
+      const previousChildID = previous.state?.metadata?.sessionID
+      const incomingChildID = incoming.state?.metadata?.sessionID
+      if (typeof previousChildID === "string" && previousChildID.length > 0 && typeof incomingChildID !== "string") {
+        return {
+          ...incoming,
+          state: {
+            ...(incoming.state ?? { status: "pending" }),
+            metadata: { ...previous.state?.metadata, ...incoming.state?.metadata }
+          }
+        }
+      }
+    }
+    return incoming
+  }
   const previousText = previous.text ?? ""
   const incomingText = incoming.text ?? ""
   return incomingText.length >= previousText.length ? incoming : { ...incoming, text: previousText }
@@ -2441,8 +2565,9 @@ function MessageContextMenu({
 }
 
 /** Renders one run's continuous timeline (see groupRenderedMessages) as a single message bubble, resolving
- *  each item's timestamp to the specific message that produced it. */
-function ConversationRunView({
+ *  each item's timestamp to the specific message that produced it. Memoized like MessageArticle: the bubble
+ *  never re-renders for a live child-output update unless it actually hosts a live subagent tool part. */
+const ConversationRunView = memo(function ConversationRunView({
   items,
   messagesByID,
   sessionID,
@@ -2453,6 +2578,7 @@ function ConversationRunView({
   revertDisabled,
   t,
   subagentContext,
+  childOutput,
   onOpenChildSession,
   openingChildID
 }: {
@@ -2466,6 +2592,7 @@ function ConversationRunView({
   revertDisabled: boolean
   t: Translator
   subagentContext: SubagentContext
+  childOutput: Readonly<Record<string, ChildOutput>>
   onOpenChildSession: (childID: string) => void
   openingChildID: string | null
 }) {
@@ -2520,6 +2647,7 @@ function ConversationRunView({
             timestamp={timestampFor(item.part)}
             t={t}
             subagentContext={subagentContext}
+            childOutput={childOutput}
             onOpenChildSession={onOpenChildSession}
             openingChildID={openingChildID}
           />
@@ -2536,7 +2664,7 @@ function ConversationRunView({
       ))}
     </MessageContextMenu>
   )
-}
+})
 
 /** One message's parts. Memoized on the message object identity so that streaming a token into one message
  *  (which necessarily re-renders MessagesPane) doesn't re-run timeline/diff formatting for every other message
@@ -2554,6 +2682,7 @@ const MessageArticle = memo(function MessageArticle({
   cancellingInboxIDs,
   sendingInboxIDs,
   subagentContext,
+  childOutput,
   onOpenChildSession,
   openingChildID
 }: {
@@ -2569,6 +2698,7 @@ const MessageArticle = memo(function MessageArticle({
   cancellingInboxIDs: ReadonlySet<string>
   sendingInboxIDs: ReadonlySet<string>
   subagentContext: SubagentContext
+  childOutput: Readonly<Record<string, ChildOutput>>
   onOpenChildSession: (childID: string) => void
   openingChildID: string | null
 }) {
@@ -2608,6 +2738,7 @@ const MessageArticle = memo(function MessageArticle({
             timestamp={formatTime(message.info.time.created)}
             t={t}
             subagentContext={subagentContext}
+            childOutput={childOutput}
             onOpenChildSession={onOpenChildSession}
             openingChildID={openingChildID}
           />
@@ -2694,6 +2825,7 @@ const MessagesPane = memo(function MessagesPane({
   cancellingInboxIDs,
   sendingInboxIDs,
   subagentContext,
+  childOutput,
   onOpenChildSession,
   openingChildID
 }: {
@@ -2728,6 +2860,7 @@ const MessagesPane = memo(function MessagesPane({
   cancellingInboxIDs: ReadonlySet<string>
   sendingInboxIDs: ReadonlySet<string>
   subagentContext: SubagentContext
+  childOutput: Readonly<Record<string, ChildOutput>>
   onOpenChildSession: (childID: string) => void
   openingChildID: string | null
 }) {
@@ -2764,9 +2897,18 @@ const MessagesPane = memo(function MessagesPane({
           </div>
         ) : (
           <>
-            {timelineGroups.map((group) =>
-              group.kind === "message" ? (
-                <MessageArticle key={group.message.info.id} message={group.message} config={config} directory={directory} actions={actions} onRevertMessage={onRevertMessage} revertDisabled={revertDisabled} t={t} onCancelQueuedMessage={onCancelQueuedMessage} onSendQueuedMessage={onSendQueuedMessage} cancellingInboxIDs={cancellingInboxIDs} sendingInboxIDs={sendingInboxIDs} subagentContext={subagentContext} onOpenChildSession={onOpenChildSession} openingChildID={openingChildID} />
+            {timelineGroups.map((group) => {
+              // Only bubbles hosting a live subagent tool part can be affected by the captured
+              // child output: they get the live record, everyone else the stable EMPTY_CHILD_OUTPUT
+              // stand-in, so a child-output update re-renders exactly the bubbles that own a live
+              // card and nothing else (issue #47). The scan is the same liveSubagentChildIDs logic
+              // the refresh path uses.
+              const liveChildIDs = group.kind === "message"
+                ? liveSubagentChildIDsFromParts(group.message.parts)
+                : liveSubagentChildIDs([...group.messagesByID.values()])
+              const liveOutput = liveChildIDs.length === 0 ? EMPTY_CHILD_OUTPUT : childOutput
+              return group.kind === "message" ? (
+                <MessageArticle key={group.message.info.id} message={group.message} config={config} directory={directory} actions={actions} onRevertMessage={onRevertMessage} revertDisabled={revertDisabled} t={t} onCancelQueuedMessage={onCancelQueuedMessage} onSendQueuedMessage={onSendQueuedMessage} cancellingInboxIDs={cancellingInboxIDs} sendingInboxIDs={sendingInboxIDs} subagentContext={subagentContext} childOutput={liveOutput} onOpenChildSession={onOpenChildSession} openingChildID={openingChildID} />
               ) : (
                 <ConversationRunView
                   key={group.key}
@@ -2780,11 +2922,12 @@ const MessagesPane = memo(function MessagesPane({
                   revertDisabled={revertDisabled}
                   t={t}
                   subagentContext={subagentContext}
+                  childOutput={liveOutput}
                   onOpenChildSession={onOpenChildSession}
                   openingChildID={openingChildID}
                 />
               )
-            )}
+            })}
             {directory !== undefined &&
               pendingQuestions.map((request) => (
                 <QuestionCard
@@ -3316,6 +3459,7 @@ function App() {
   const wasRunningRef = useRef(false)
   const awaitingAssistantBaselineRef = useRef("")
   const loadSelectedRequestRef = useRef(0)
+  const refreshCoalescerRef = useRef(createRefreshCoalescer())
   const loadCommandsRequestRef = useRef(0)
   const loadAgentsRequestRef = useRef(0)
   const loadModelsRequestRef = useRef(0)
@@ -3474,6 +3618,19 @@ function App() {
   const executionMemoryRef = useRef(new Map<string, SessionExecutionMemory>())
 
   const loadedMessagesRef = useRef<MessageEnvelope[]>([])
+  /** Live output captured for running delegated-subagent children (issue #47), keyed by child
+   *  session id and scoped to the selected session's transcript. Updated on the poll cadence and
+   *  on SSE refreshes, bounded per child, and cleared once a child's run turns terminal. */
+  const [childOutput, setChildOutput] = useState<Readonly<Record<string, ChildOutput>>>({})
+  /** When the live child-output fetch last ran. The 2s throttle applies to BOTH the poll and the
+   *  SSE path (a poll tick within 2s of an SSE fetch is skipped), so a busy parent stream cannot
+   *  turn into a per-refresh child fetch storm while a subagent runs alongside it. */
+  const lastChildOutputRefreshRef = useRef(0)
+  /** Consecutive failed child-transcript fetches per child session id (issue #47): a child that
+   *  has disappeared keeps failing forever while its tool part still reads live, so after
+   *  CHILD_FETCH_MAX_CONSECUTIVE_FAILURES the fetch loop gives up and drops the stale output.
+   *  Entries are cleared once the child leaves the live set. */
+  const childFetchFailuresRef = useRef(new Map<string, number>())
   const shouldAutoScrollRef = useRef(false)
   const selectedSession = useMemo(
     () => sessions.find((session) => session.id === selectedID) ?? null,
@@ -3622,10 +3779,11 @@ function App() {
       .filter((message) => message.text || message.parts.some((part) => part.type !== "step-start" && part.type !== "step-finish"))
   }, [config.backend, messages, optimisticUserMessages, queuedInboxMessages, selectedSession?.revertMessageID])
 
-  // Transcript-wide subagent correlation (issue #10): terminal completions carried on
-  // info.subagent and the set of child ids that have a run card. Recomputes only when the rendered
-  // transcript actually changes, so the memoized bubble renderers below keep their referential
-  // stability across polls that change nothing.
+  // Transcript-wide subagent correlation (issues #10/#47): terminal completions carried on
+  // info.subagent and the set of child ids that have a run card. Recomputed only when the rendered
+  // transcript changes — the live child output travels as a separate `childOutput` prop, so a
+  // child-output update alone never moves this object and the memoized bubble renderers below keep
+  // their referential stability across polls that change nothing.
   const subagentContext = useMemo<SubagentContext>(() => ({
     completions: collectSubagentCompletions(renderedMessages),
     toolChildIDs: collectSubagentToolChildIDs(renderedMessages)
@@ -4310,6 +4468,29 @@ function App() {
     releaseMutation(lease)
   }
 
+  /** Event-driven transcript refresh (scheduleRefresh + poll): coalesced so a session.* event flood
+   *  cannot starve the reload of a long transcript (each in-flight load is currently aborted by the
+   *  next event's request-id bump, so nothing ever renders until the flood stops). Explicit callers
+   *  (open session, send/command flows) keep the eager `loadSelected` so their await semantics are
+   *  unchanged. The hold is bounded: a wedged loadSelected (a hung fetch has no request timeout on
+   *  the web path) must not freeze the slot forever, or the transcript would stay blank until a
+   *  session switch or restart — the timeout rejects the coalesced run, the slot clears, and the
+   *  next poll starts a fresh attempt. The threshold sits well above the measured ~14s reload of a
+   *  150-message transcript and the Android per-request 30s read timeout; the late fetch's commit
+   *  stays guarded by its request-id check. */
+  const REFRESH_HOLD_TIMEOUT_MS = 60_000
+  const refreshSelectedSession = (sessionID: string, directory: string | undefined) => {
+    const key = `${activeProfileID}\u0000${configKey(config)}\u0000${sessionID}\u0000${directory ?? ""}`
+    return refreshCoalescerRef.current.run(key, () =>
+      Promise.race([
+        loadSelected(sessionID, directory ?? ""),
+        new Promise<never>((_, reject) => {
+          setTimeout(() => reject(new Error("Transcript reload held the refresh slot for 60s")), REFRESH_HOLD_TIMEOUT_MS)
+        })
+      ])
+    )
+  }
+
   async function loadSelected(sessionID: string, directory: string, refreshHistory = false, replaceMessages = false) {
     const requestID = ++loadSelectedRequestRef.current
     const loadContext = { profileID: activeProfileID, configKey: configKey(config), sessionID }
@@ -4353,8 +4534,14 @@ function App() {
     // instead, which keeps the streamed text without ever dropping the messages that came with it.
     if (!messagesHaveSameContent(current, transcript)) {
       shouldAutoScrollRef.current = messagesExtendContent(current, transcript) && isNearMessagesBottom()
-      loadedMessagesRef.current = transcript
-      setMessages((prev) => replaceMessages ? transcript : mergeFetchedMessages(prev, transcript))
+      // Commit ONE snapshot to both state and the ref. The ref is what an SSE-debounced live
+      // refresh reads while this window is open, and it must see the same merged transcript state
+      // will render — the raw fetch lacks the streamed-in reasoning parts and the ephemeral child
+      // session ids that mergeFetchedMessages preserves, so a refresh firing in this window used
+      // to prune the live child's output and skip its fetch (issue #47 placeholder blink).
+      const merged = replaceMessages ? transcript : mergeFetchedMessages(current, transcript)
+      loadedMessagesRef.current = merged
+      setMessages(merged)
     }
     // A prompt the server has durably admitted (in history or still queued in the inbox) retires the
     // app's own optimistic bubble for the same text.
@@ -5014,6 +5201,77 @@ function App() {
         }
       }
     })()
+  }
+
+  /** Refresh the live output captured for running delegated-subagent children (issue #47). The
+   *  child session id is ephemeral while the child runs (it lives only on the progress event and
+   *  the tool part's injected metadata), so the child's own transcript is fetched directly — same
+   *  project directory as the parent — via a bounded tail request, and its newest text lines stored
+   *  per child. Runs whose status is no longer live drop their entry here too, which retires the
+   *  stored output the moment a child finishes (its result card takes over) or its run card
+   *  disappears from the transcript. The fetch is throttled to at most one per 2s for BOTH callers —
+   *  a poll tick landing within 2s of an SSE fetch is skipped, so the net cadence stays between 2s
+   *  and the poll's 3.5s — which keeps a busy parent stream from turning into a per-refresh child
+   *  fetch storm while a subagent runs alongside it. */
+  const refreshLiveSubagentOutput = async () => {
+    const liveIDs = liveSubagentChildIDs(loadedMessagesRef.current)
+    // A child that left the live set no longer needs its failure ledger; drop it so the map cannot
+    // grow with the transcript's history of delegated runs.
+    for (const childID of childFetchFailuresRef.current.keys()) {
+      if (!liveIDs.includes(childID)) childFetchFailuresRef.current.delete(childID)
+    }
+    setChildOutput((current) => {
+      const next: Record<string, ChildOutput> = {}
+      for (const id of liveIDs) {
+        const entry = current[id]
+        if (entry) next[id] = entry
+      }
+      // Filtering can only remove keys, so equal length means nothing changed: keep the same
+      // reference so the memoized transcript renderers stay stable across the poll.
+      return Object.keys(next).length === Object.keys(current).length ? current : next
+    })
+    if (liveIDs.length === 0) return
+    if (Date.now() - lastChildOutputRefreshRef.current < 2000) return
+    lastChildOutputRefreshRef.current = Date.now()
+    const directory = selectedSessionRef.current?.directory
+    const fetched = await Promise.all(liveIDs.map(async (childID): Promise<{ childID: string; lines: string[] } | { childID: string; giveUp: true } | null> => {
+      // A child that already burned its consecutive-failure budget is skipped entirely: the fetch
+      // loop must not keep hammering a session the server keeps rejecting.
+      if ((childFetchFailuresRef.current.get(childID) ?? 0) >= CHILD_FETCH_MAX_CONSECUTIVE_FAILURES) return null
+      try {
+        const childMessages = await api.loadMessagesTail(config, childID, directory)
+        childFetchFailuresRef.current.delete(childID)
+        return { childID, lines: extractChildOutputLines(childMessages) }
+      } catch (error) {
+        const failures = (childFetchFailuresRef.current.get(childID) ?? 0) + 1
+        // A 404 means the child session is gone for good (deleted/pruned) — treat it as terminal
+        // immediately. Any other failure gets CHILD_FETCH_MAX_CONSECUTIVE_FAILURES chances; past
+        // that the loop stops fetching and the stale output is dropped, so a disappeared child
+        // cannot keep the live window retrying forever (the run card's own status stays honest,
+        // and a child that leaves the live set clears the ledger above).
+        const terminal = (error as { status?: number } | undefined)?.status === 404
+        childFetchFailuresRef.current.set(childID, terminal || failures >= CHILD_FETCH_MAX_CONSECUTIVE_FAILURES ? CHILD_FETCH_MAX_CONSECUTIVE_FAILURES : failures)
+        return terminal || failures >= CHILD_FETCH_MAX_CONSECUTIVE_FAILURES ? { childID, giveUp: true } : null
+      }
+    }))
+    setChildOutput((current) => {
+      let next: Record<string, ChildOutput> = current
+      for (const result of fetched) {
+        if (!result) continue
+        if ("giveUp" in result) {
+          if (!current[result.childID]) continue
+          next = { ...next }
+          delete next[result.childID]
+          continue
+        }
+        const existing = current[result.childID]
+        if (existing && existing.lines.length === result.lines.length && existing.lines.every((line, index) => line === result.lines[index])) {
+          continue
+        }
+        next = { ...next, [result.childID]: { lines: result.lines } }
+      }
+      return next
+    })
   }
 
   const handleSessionsJumpToTop = useCallback(() => {
@@ -5860,8 +6118,9 @@ function App() {
       }
       refreshSessions(true).catch(() => undefined)
       if (selectedSession) {
-        loadSelected(selectedSession.id, selectedSession.directory).catch(() => undefined)
+        refreshSelectedSession(selectedSession.id, selectedSession.directory).catch(() => undefined)
       }
+      refreshLiveSubagentOutput().catch(() => undefined)
     }, 3500)
     return () => clearInterval(timer)
   }, [capabilities.agents, capabilities.models, config.backend, config.host, config.port, config.username, config.password, selectedSession?.id, selectedNewSessionDirectory])
@@ -5905,7 +6164,11 @@ function App() {
         refreshTimer = undefined
         refreshSessions(true).catch(() => undefined)
         const selected = selectedSessionRef.current
-        if (selected) loadSelected(selected.id, selected.directory).catch(() => undefined)
+        if (selected) refreshSelectedSession(selected.id, selected.directory).catch(() => undefined)
+        // Issue #47: events that touch the selected session are exactly when a running child's
+        // output is likely to have moved (the child's own events arrive on this global stream),
+        // so refresh the live output on the same cadence — cheap, and throttled inside.
+        refreshLiveSubagentOutput().catch(() => undefined)
       }, 250)
     }
     const onEvent = (event: { data: unknown; name: string }) => {
@@ -5962,6 +6225,32 @@ function App() {
           applyStreamedPartDelta(current, body.sessionID!, body.messageID!, body.partID!, body.field!, body.delta!)
         )
       }
+      // v2-only (issue #47): the opencode `subagent` tool publishes `session.tool.progress` once at
+      // launch with `id` = the tool-call id and a child correlation on `metadata`. The plugin calls
+      // `context.progress({ metadata: { sessionID, status: "running" } })`, so the wire event NESTS
+      // the record (`metadata.metadata.sessionID`), unlike a shell tool's flat `{ shellID }` update —
+      // normalize both shapes before injecting, and inject only the flat `{ sessionID, status }`
+      // record so `subagentRunFromTool` can read it. That event is the ONLY place the child session
+      // id exists at launch: durable transcript state carries it only after the terminal tool
+      // success lands, so without the injection the run card could not appear until the child
+      // finished. The event is ephemeral by contract; `reconcileStreamedPart` keeps the injected
+      // metadata across later refetches.
+      if (type === "session.tool.progress" && config.backend === "opencode2") {
+        const progress = body as { assistantMessageID?: string; id?: string; metadata?: Record<string, unknown> } | undefined
+        const effective = subagentProgressMetadata(progress?.metadata)
+        const childID = typeof effective?.sessionID === "string" ? effective.sessionID : ""
+        if (
+          body?.sessionID &&
+          childID.length > 0 &&
+          body.sessionID === selectedSessionRef.current?.id &&
+          typeof progress?.assistantMessageID === "string" &&
+          typeof progress.id === "string"
+        ) {
+          setMessages((current) =>
+            applyStreamedToolProgress(current, body.sessionID!, progress.assistantMessageID!, progress.id!, effective!)
+          )
+        }
+      }
       // v2-only: fold execution lifecycle events into the per-session execution memory (issue #8).
       // The memory survives SSE reconnects, so a status derived later still knows the session crashed.
       if (config.backend === "opencode2") {
@@ -5990,7 +6279,16 @@ function App() {
         const sessionID = body?.sessionID ?? body?.sessionId ?? body?.info?.sessionID ?? body?.info?.id
         if (sessionID) lastEventBySessionRef.current.set(sessionID, Date.now())
         setLiveEventCount((count) => count + 1)
-        scheduleRefresh()
+        if (sessionID && sessionID !== selectedSessionRef.current?.id) {
+          // Foreign-session activity (a running child subagent's events arrive on this same global
+          // stream): the child's transcript cannot change the selected session's, and while the
+          // child runs its event flood used to abort every in-flight reload (request-id bump), so
+          // the selected session stayed blank until the flood stopped. Refresh only the live child
+          // output — exactly what these events DO move — and leave the coalesced reload alone.
+          refreshLiveSubagentOutput().catch(() => undefined)
+        } else {
+          scheduleRefresh()
+        }
       }
     }
     const onStatus = (status: EventStreamStatus) => {
@@ -7130,6 +7428,7 @@ function App() {
             onSendQueuedMessage={steerQueuedMessage}
             sendingInboxIDs={steeringInboxIDs}
             subagentContext={subagentContext}
+            childOutput={childOutput}
             onOpenChildSession={handleOpenChildSession}
             openingChildID={openingChildID}
           />

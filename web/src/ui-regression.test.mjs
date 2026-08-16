@@ -773,7 +773,7 @@ assert.ok(api.includes('`/session/${sessionID}/action`'), 'session action discov
 assert.ok(api.includes('`/session/${sessionID}/action/${encodeURIComponent(actionID)}`'), 'action execution should use a structured endpoint rather than a chat prompt')
 assert.ok(app.includes('capabilities.actions ? api.listActions'), 'the selected session should discover actions only when the bridge supports them')
 assert.ok(app.includes('api.invokeAction(config, selectedSession.id, command, selectedSession.directory)'), 'OMP Undo/Redo should execute through the action API')
-assert.ok(app.includes('replaceMessages ? transcript : mergeFetchedMessages(prev, transcript)'), 'a successful Undo must be allowed to shrink the rendered conversation')
+assert.ok(app.includes('const merged = replaceMessages ? transcript : mergeFetchedMessages(current, transcript)'), 'a successful Undo must be allowed to shrink the rendered conversation')
 assert.ok(app.includes('setExtensionActions(result.actions)'), 'action execution should apply the returned session-specific enabled state immediately')
 assert.ok(app.includes("if (result.applied === false)"), 'only an authoritative no-op result should show no-op feedback')
 assert.ok(app.includes('result.applied !== false'), 'unknown results should still refresh the active ACP context without being called no-ops')
@@ -1087,6 +1087,88 @@ assert.match(styles, /\.subagent-run-error\s*\{[^}]*background:\s*var\(--danger-
 assert.match(styles, /\.subagent-run-working\s*\{[^}]*border-left-color:\s*var\(--primary\)/, 'a working run must read as active')
 assert.match(styles, /\.session-child-badge\s*\{[^}]*background:\s*var\(--secondary-soft\)/, 'the child badge must use the subagent accent')
 
+// --- Live running-subagent summary (issue #47) ---------------------------------------------------
+// The child session id exists ONLY on the ephemeral `session.tool.progress` event while the child
+// runs (durable transcript state carries it only after the terminal tool success lands), so the
+// run card must appear via that event and keep a live output window fed from the child's own
+// transcript. These guards pin the wiring: the event handler, the refetch preservation (or the
+// card blinks out on every poll), the poll/SSE refresh, and the card's live window itself.
+assert.ok(app.includes('applyStreamedToolProgress'), 'the v2 session.tool.progress event must inject the child session id onto the running tool part')
+assert.ok(app.includes('type === "session.tool.progress"'), 'the SSE handler must recognize the ephemeral subagent progress event')
+assert.match(
+  app,
+  /type === "session\.tool\.progress"[\s\S]*?subagentProgressMetadata\(progress\?\.metadata\)[\s\S]*?applyStreamedToolProgress\(/,
+  'the progress handler must normalize the nested live-server metadata before injecting it onto the tool part'
+)
+assert.match(
+  app,
+  /function reconcileStreamedPart[\s\S]*?previousChildID = previous\.state\?\.metadata\?\.sessionID[\s\S]*?incomingChildID = incoming\.state\?\.metadata\?\.sessionID/,
+  'a refetched tool part must not erase the ephemeral child correlation, or the run card blinks out on every poll'
+)
+assert.ok(app.includes('refreshLiveSubagentOutput'), 'the live child-output capture must run on the poll and SSE refresh cadence')
+assert.ok(app.includes('liveSubagentChildIDs'), 'the live-output capture must be scoped to runs that are actually in flight')
+assert.ok(app.includes('extractChildOutputLines'), 'the live-output capture must read the child transcript tail')
+assert.ok(app.includes("t('detail.subagentLivePlaceholder')"), 'a live run without output yet must show the quiet placeholder')
+assert.match(
+  app,
+  /liveRun && output[\s\S]*?subagent-run-live/,
+  'a live run with captured output must render the monospace live window'
+)
+assert.match(
+  app,
+  /liveRun && !output[\s\S]*?subagent-run-live-placeholder/,
+  'a live run without captured output must render the placeholder, not an empty window'
+)
+assert.ok(styles.includes('.subagent-run-live'), 'the live window needs its fixed-height clamped region')
+assert.ok(styles.includes('.subagent-run-live.expanded'), 'the live window needs the expanded bounded region')
+assert.ok(styles.includes('.subagent-run-live-placeholder'), 'the no-output placeholder needs its quiet treatment')
+assert.match(
+  app,
+  /liveRun && \([\s\S]*?subagent-run-live-status[\s\S]*?typing-dots/,
+  'a live run must get the working-dots status row whether or not output has landed'
+)
+assert.match(
+  app,
+  /subagent-run-live-toggle[\s\S]*?typing-dots/,
+  'the Show more toggle and the working dots must share the same status row'
+)
+assert.ok(styles.includes('.subagent-run-live-status'), 'the live status row needs its flex treatment')
+
+// --- PR #47 fixes: launch notice vs live output, and synthetic wrapper suppression -------------
+// A background launch's tool output is OpenCode's launch notice ("The subagent is working in the
+// background..."). While the run is live the card must show only the live window/placeholder, so
+// the RESULT block — which would render that notice — is gated on the run being terminal.
+assert.match(
+  app,
+  /\{!liveRun && run\.output && run\.status !== "failed" && \(/,
+  'the terminal result block must not render while the run is live, or the launch notice shows as a second RESULT window'
+)
+// When the run turns terminal, the child's actual final output comes from the synthetic completion
+// payload: completion collection keeps it on the completion run, and the merge prefers it over the
+// tool part's launch notice — including orphan completion cards, which read the same completions.
+assert.match(
+  app,
+  /const output = subagentCompletionOutput\(message\.parts\)[\s\S]*?if \(output\) run\.output = output/,
+  'completion collection must keep the child\u2019s actual final output on the completion run'
+)
+assert.match(
+  app,
+  /if \(completion\.output\) merged\.output = completion\.output/,
+  'the synthetic completion\u2019s actual output must win over the tool part\u2019s launch notice'
+)
+// The raw `<subagent ...>...</subagent>` wrapper must never render as chat prose: MessagePartView
+// skips a system (and text) part whose payload is exactly a complete wrapper. Normal system
+// messages are not complete wrappers and keep rendering as before.
+assert.match(
+  app,
+  /if \(part\.type === "system"\) \{[\s\S]*?if \(isSubagentCompletionWrapper\(part\.text\)\) return null/,
+  'a system part carrying the raw synthetic wrapper must be skipped, not rendered as XML'
+)
+assert.ok(
+  /if \(part\.type === "text"\) \{\s*if \(!part\.text\) return null[\s\S]*?if \(isSubagentCompletionWrapper\(part\.text\)\) return null/.test(app),
+  'a text part carrying the raw synthetic wrapper must be skipped too, so the XML stays out of the transcript'
+)
+
 // --- Richer session activity states (issue #8) -------------------------------------------------
 // The v2 execution memory must be cleared only on a profile/config namespace change, never on a
 // mere session switch: terminal/error facts must survive browsing away and back (gate 2 decision —
@@ -1302,5 +1384,39 @@ assert.ok(app.includes('acquireMutation("inbox"'), 'queued-prompt operations mus
 assert.ok(app.includes('listSavedPermissions(config'), 'the saved-permission list must be fetched through the client')
 assert.ok(app.includes('loadSavedPermissions'), 'the context must expose an on-demand saved-permission loader')
 assert.ok(!refreshRegion.includes('listSavedPermissions'), 'saved permissions must never load inside the poll')
+
+// --- Event-flood coalescing and foreign-session gating ------------------------------------------
+// A long-transcript session takes seconds to reload, and the global v2 stream floods with
+// session.* events while anything runs (child subagent sessions included). Each event used to
+// abort the in-flight reload via the request-id bump, so the selected transcript stayed blank
+// until the flood stopped. The event-driven reload is now coalesced (one in flight + exactly one
+// trailing rerun) and foreign-session events only refresh the live child output.
+assert.ok(app.includes('import { createRefreshCoalescer } from "./refresh-coalescer"'), 'App must import the refresh coalescer')
+assert.ok(app.includes('const refreshCoalescerRef = useRef(createRefreshCoalescer())'), 'the coalescer must live in a stable ref')
+assert.ok(app.includes('const refreshSelectedSession = (sessionID: string, directory: string | undefined) => {'), 'the coalesced wrapper must take the session identity next to loadSelected')
+assert.ok(app.includes('refreshCoalescerRef.current.run(key, () =>'), 'the wrapper must route the event-driven reload through the coalescer')
+assert.ok(app.includes('REFRESH_HOLD_TIMEOUT_MS'), 'the coalesced reload must bound its hold so a wedged fetch cannot freeze the slot')
+assert.ok(app.includes('refreshSelectedSession(selected.id, selected.directory).catch(() => undefined)'), 'the SSE debounced refresh must run through the coalescer')
+assert.ok(app.includes('refreshSelectedSession(selectedSession.id, selectedSession.directory).catch(() => undefined)'), 'the 3.5s poll must run through the coalescer')
+// onEvent tail: selected-session or session-less (global) events keep scheduling the full refresh;
+// foreign-session events (a running child's stream) must NOT — they only refresh the live output,
+// which is exactly what those events move.
+const refreshGateTail = app.slice(app.indexOf('lastEventBySessionRef.current.set(sessionID, Date.now())'), app.indexOf('const onStatus = (status: EventStreamStatus) => {'))
+assert.ok(refreshGateTail, 'the onEvent refresh tail should be findable for the foreign-session gate check')
+assert.match(
+  refreshGateTail,
+  /if \(sessionID && sessionID !== selectedSessionRef\.current\?\.id\) \{/,
+  'foreign-session events must be told apart from selected-session and global events'
+)
+assert.match(
+  refreshGateTail,
+  /refreshLiveSubagentOutput\(\)\.catch\(\(\) => undefined\)/,
+  'foreign-session events must refresh only the live child output'
+)
+assert.match(
+  refreshGateTail,
+  /else \{\s*scheduleRefresh\(\)/,
+  'selected-session and global events must keep scheduling the full refresh'
+)
 
 console.log('ui regression tests passed')

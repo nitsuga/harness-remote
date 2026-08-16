@@ -394,6 +394,16 @@ export const opencode2Api = {
     return [...messages].reverse().map((message) => toMessageEnvelope(message, sessionID))
   },
 
+  /** Bounded tail of a session transcript for live child-output capture (issue #47): one
+   *  newest-first page (`?limit=20&order=desc`) with no cursor loop, reversed to the chronological
+   *  order loadMessages returns. The live window only ever shows the newest lines, so refetching
+   *  the child's whole paginated transcript on every refresh would grow with the child's length for
+   *  nothing. */
+  async loadMessagesTail(config: ServerConfig, sessionID: string, directory?: string) {
+    const messages = await v2Request<V2Message[]>(config, withLocation(`/api/session/${encodeURIComponent(sessionID)}/message?limit=20&order=desc`, directory))
+    return [...(messages ?? [])].reverse().map((message) => toMessageEnvelope(message, sessionID))
+  },
+
   async loadLatestMessage(config: ServerConfig, sessionID: string, directory?: string) {
     const messages = await v2Request<V2Message[]>(config, withLocation(`/api/session/${encodeURIComponent(sessionID)}/message?limit=1&order=desc`, directory))
     return (messages ?? []).map((message) => toMessageEnvelope(message, sessionID))

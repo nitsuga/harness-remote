@@ -135,7 +135,10 @@ export type ToolState = {
   output?: string
   error?: string
   time?: { start: number; end?: number }
-  metadata?: { answers?: string[][] }
+  /** Opaque provider/job metadata. The v2 mapper copies the wire record verbatim (subagent runs
+   *  carry `{ sessionID, status }` here; shell runs carry `exit`/`timeout`), so it is a plain
+   *  record rather than the v1-only `answers` shape the field used to promise. */
+  metadata?: Record<string, unknown>
   /** Exit code of a finished shell tool (v2 shell messages; `state.metadata.exit` on v1 shells). */
   exitCode?: number
   /** Files a tool produced (`type:"file"` v2 tool content), kept with the tool part so the rendered

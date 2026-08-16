@@ -201,6 +201,8 @@ type TranslationKey =
   | 'detail.showMore'
   | 'detail.showLess'
   | 'detail.subagentElapsed'
+  | 'detail.subagentLiveOutput'
+  | 'detail.subagentLivePlaceholder'
   | 'detail.childSession'
   | 'detail.childSessionOf'
   | 'todo.title'
@@ -573,6 +575,8 @@ export const translations: Record<LanguageCode, Partial<Record<TranslationKey, s
     'detail.showMore': 'Show more',
     'detail.showLess': 'Show less',
     'detail.subagentElapsed': 'Elapsed {time}',
+    'detail.subagentLiveOutput': 'Live output',
+    'detail.subagentLivePlaceholder': 'No output yet.',
     'detail.childSession': 'Child session',
     'detail.childSessionOf': 'Child session of {parent}',
     'todo.title': 'Todo Items',
@@ -944,6 +948,8 @@ export const translations: Record<LanguageCode, Partial<Record<TranslationKey, s
     'detail.showMore': 'Mostra di più',
     'detail.showLess': 'Mostra di meno',
     'detail.subagentElapsed': 'Trascorso {time}',
+    'detail.subagentLiveOutput': 'Output in tempo reale',
+    'detail.subagentLivePlaceholder': 'Nessun output per ora.',
     'detail.childSession': 'Sessione figlia',
     'detail.childSessionOf': 'Sessione figlia di {parent}',
     'todo.title': 'Todo',
@@ -1308,6 +1314,8 @@ export const translations: Record<LanguageCode, Partial<Record<TranslationKey, s
     'detail.showMore': '顯示更多',
     'detail.showLess': '顯示更少',
     'detail.subagentElapsed': '已耗時 {time}',
+    'detail.subagentLiveOutput': '即時輸出',
+    'detail.subagentLivePlaceholder': '尚無輸出。',
     'detail.childSession': '子工作階段',
     'detail.childSessionOf': '{parent} 的子工作階段',
     'todo.title': '待辦事項',
@@ -1621,6 +1629,8 @@ export const translations: Record<LanguageCode, Partial<Record<TranslationKey, s
     'detail.showMore': '显示更多',
     'detail.showLess': '显示更少',
     'detail.subagentElapsed': '已耗时 {time}',
+    'detail.subagentLiveOutput': '实时输出',
+    'detail.subagentLivePlaceholder': '暂无输出。',
     'detail.childSession': '子会话',
     'detail.childSessionOf': '{parent} 的子会话',
     'todo.title': '待办事项',
