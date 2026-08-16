@@ -4810,6 +4810,9 @@ function App() {
       if (!isLeaseContextCurrent(lease)) return
       // A successful 204 is the commit point. Refreshes are best-effort and must not turn a
       // completed activation into a failed command or put the slash text back in the composer.
+      // The user acted on this session (like a prompt send): a remembered terminal/error state
+      // must not linger for the run that is about to start.
+      executionMemoryRef.current.delete(session.id)
       clearParkedDraft(session.id)
       setOptimisticUserMessages((current) => current.filter((message) => message.info.id !== optimisticMessage.info.id))
       setActionNotice(t('help.skillActivated', { skill: skill.name }))
