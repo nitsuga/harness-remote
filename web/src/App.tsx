@@ -3972,9 +3972,10 @@ function App() {
       if (isDesktopPlatform()) {
         // Focused-session q/p items are already on screen in the transcript: on a focused desktop
         // window they count as delivered (mark them so the badge does not double-count the form
-        // the user is looking at); on an unfocused window the fresh filter above still alerts for
-        // them via the next poll's fire block below. Web/mobile keep the badge semantics — the
-        // badge IS the alert surface there, so nothing is marked for the focused session either.
+        // the user is looking at). `fresh` above EXCLUDES the focused session, so on an unfocused
+        // window these items never reach the fire path — the badge carries them there, exactly like
+        // web/mobile, where the badge is the alert surface (nothing is marked for the focused
+        // session either).
         if (windowFocused) {
           for (const item of filteredItems) {
             if ((item.kind === "question" || item.kind === "permission") && item.sessionId === selectedID) {
