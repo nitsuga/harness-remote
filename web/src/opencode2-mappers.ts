@@ -9,6 +9,7 @@ import type {
   QuestionRequest,
   SavedPermission,
   Session,
+  TodoItem,
   ToolState
 } from "./types"
 
@@ -127,6 +128,37 @@ export type V2SessionError = {
 export type V2ToolContent =
   | { type: "text"; text?: string }
   | { type: "file"; uri?: string; mime?: string; name?: string }
+
+/** Same shape rules the message lane applies to a `todowrite` part's `input.todos` (see App.tsx
+ *  `parseTodos`): an array whose items each carry a string `.content`; empty/invalid lists are
+ *  rejected. Kept here so the transcript-derived session todo panel validates identically. */
+function parseTodoItems(value: unknown): TodoItem[] | null {
+  if (!Array.isArray(value)) return null
+  const items = value.filter(
+    (item): item is TodoItem => Boolean(item) && typeof item === "object" && typeof (item as TodoItem).content === "string"
+  )
+  return items.length > 0 ? items : null
+}
+
+/**
+ * Reconstruct the latest session todo state from a transcript. v2 has no todo endpoint, so the
+ * panel shows the most recent valid `todowrite` tool input — latest-wins, mirroring the bridge's
+ * latest-plan-wins for ACP — with each part's `input.todos` validated exactly like the message lane
+ * (an array of `{ content, status, priority, id }` items with a string `.content`). Invalid or
+ * empty lists are skipped, and a transcript with no valid list yields `[]`. Re-deriving on every
+ * load keeps the state honest across reverts, compaction and later todo updates.
+ */
+export function deriveTodosFromMessages(messages: MessageEnvelope[]): TodoItem[] {
+  let latest: TodoItem[] | null = null
+  for (const message of messages) {
+    for (const part of message.parts) {
+      if (part.type !== "tool" || part.tool !== "todowrite") continue
+      const parsed = parseTodoItems(part.state?.input?.todos)
+      if (parsed) latest = parsed
+    }
+  }
+  return latest ?? []
+}
 
 /** One v2 `Session.Message.ToolState`: `streaming` carries a STRING input, every other state a
  *  record. `completed`/`error` may carry `content`; `error` also carries a structured error. */

@@ -31,6 +31,7 @@ import {
   toSession,
   toSkillActivationBody,
   toSkillCommand,
+  deriveTodosFromMessages,
   type V2Form,
   type V2InboxItem,
   type V2Message,
@@ -452,8 +453,13 @@ export const opencode2Api = {
     return toSession(session)
   },
 
-  async loadTodo(_config: ServerConfig, _sessionID: string, _directory?: string): Promise<TodoItem[]> {
-    return []
+  async loadTodo(config: ServerConfig, sessionID: string, directory?: string): Promise<TodoItem[]> {
+    // v2 has no todo endpoint; the session todo panel shows transcript-derived state instead. Fetch
+    // the same transcript as loadMessages (newest-first, paginated, reversed to chronological) and
+    // keep the latest valid `todowrite` tool input — re-derived on every load so reverts and later
+    // todo updates never leave stale state.
+    const messages = await v2ListAll<V2Message>(config, withLocation(`/api/session/${encodeURIComponent(sessionID)}/message?limit=100`, directory))
+    return deriveTodosFromMessages([...messages].reverse().map((message) => toMessageEnvelope(message, sessionID)))
   },
 
   async loadDiff(config: ServerConfig, _sessionID: string, directory?: string) {

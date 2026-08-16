@@ -3122,6 +3122,9 @@ function App() {
   const [steeringInboxIDs, setSteeringInboxIDs] = useState<ReadonlySet<string>>(() => new Set())
   steeringInboxIDsRef.current = steeringInboxIDs
   const [todos, setTodos] = useState<TodoItem[]>([])
+  /** OpenCode 2 has no todo endpoint: the panel shows state derived from `todowrite` parts in the
+   *  transcript, so it cannot guarantee completeness (e.g. after compaction). The UI labels that. */
+  const [todosDerived, setTodosDerived] = useState(false)
   const [diffFiles, setDiffFiles] = useState<DiffFile[]>([])
   const [pendingQuestions, setPendingQuestions] = useState<QuestionRequest[]>([])
   const [pendingPermissions, setPendingPermissions] = useState<PermissionRequest[]>([])
@@ -4328,6 +4331,9 @@ function App() {
     if (requestID !== loadSelectedRequestRef.current) return
     if (!isCurrentLoad()) return
     setLoadedSessionID(sessionID)
+    // Reset per session: only the v2 backend derives todos from the transcript (every load re-derives,
+    // so reverts and later todo updates never leave stale state).
+    setTodosDerived(config.backend === "opencode2")
     // Background polling keeps running after a failed open, so a session that only failed once must
     // not stay stuck on the failure state once its history does arrive.
     setLoadFailure((failure) => (failure?.sessionID === sessionID ? null : failure))
@@ -7085,6 +7091,9 @@ function App() {
                     </div>
                   ))}
                 </div>
+              )}
+              {todosDerived && (
+                <p className="subtle" style={{ marginTop: 'var(--space-2)' }}>{t('todo.derivedNote')}</p>
               )}
             </div>
           )}

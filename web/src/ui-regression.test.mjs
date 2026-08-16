@@ -1228,6 +1228,15 @@ assert.match(
 assert.ok(mutationCoordinator.includes('"inbox"'), 'the mutation coordinator must have an inbox lease kind')
 // The v2 client surface the wiring depends on must keep its inbox routes.
 assert.ok(opencode2Client.includes('listInbox('), 'the v2 client must keep the per-session inbox listing route')
+
+// --- Session todos for OpenCode 2 (issue #7) --------------------------------------------------
+// v2 has no todo endpoint: the panel must derive the latest todowrite state from the transcript.
+assert.match(opencode2Client, /async loadTodo\([\s\S]*?deriveTodosFromMessages\(/, 'the v2 loadTodo must derive todos from transcript todowrite parts')
+assert.match(opencode2Mappers, /export function deriveTodosFromMessages/, 'the v2 mapper must expose the transcript todo derivation')
+assert.match(opencode2Mappers, /part\.tool !== "todowrite"/, 'the derivation must scan only todowrite tool parts')
+// The UI must identify the panel as derived (completeness cannot be guaranteed from a transcript).
+assert.ok(app.includes('setTodosDerived(config.backend === "opencode2")'), 'the derived flag must be set only for the opencode2 backend')
+assert.ok(app.includes("t('todo.derivedNote')"), 'the derived-state note must render through i18n inside the todo panel')
 // Lane A's persistence module must keep the prune contract the poll uses to bound storage growth.
 assert.ok(attentionPersistence.includes('export function pruneAttentionState'), 'attentionPersistence.ts must expose the prune helper')
 

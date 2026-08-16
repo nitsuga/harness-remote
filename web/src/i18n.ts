@@ -206,6 +206,7 @@ type TranslationKey =
   | 'todo.title'
   | 'todo.hide'
   | 'todo.show'
+  | 'todo.derivedNote'
   | 'session.deleteTitle'
   | 'session.deleteBodyPrefix'
   | 'session.cancel'
@@ -577,6 +578,7 @@ export const translations: Record<LanguageCode, Partial<Record<TranslationKey, s
     'todo.title': 'Todo Items',
     'todo.hide': 'Hide',
     'todo.show': 'Show',
+    'todo.derivedNote': 'Derived from transcript — may be incomplete after compaction.',
     'session.deleteTitle': 'Delete session?',
     'session.deleteBodyPrefix': 'This will permanently delete',
     'session.cancel': 'Cancel',
@@ -947,6 +949,7 @@ export const translations: Record<LanguageCode, Partial<Record<TranslationKey, s
     'todo.title': 'Todo',
     'todo.hide': 'Nascondi',
     'todo.show': 'Mostra',
+    'todo.derivedNote': 'Derivato dalla trascrizione — potrebbe essere incompleto dopo la compattazione.',
     'session.deleteTitle': 'Eliminare la sessione?',
     'session.deleteBodyPrefix': 'Questo eliminerà definitivamente',
     'session.cancel': 'Annulla',
@@ -1310,6 +1313,7 @@ export const translations: Record<LanguageCode, Partial<Record<TranslationKey, s
     'todo.title': '待辦事項',
     'todo.hide': '隱藏',
     'todo.show': '顯示',
+    'todo.derivedNote': '從轉錄內容推導 — 壓縮後可能不完整。',
     'session.deleteTitle': '刪除工作階段？',
     'session.deleteBodyPrefix': '這會永久刪除',
     'session.cancel': '取消',
@@ -1622,6 +1626,7 @@ export const translations: Record<LanguageCode, Partial<Record<TranslationKey, s
     'todo.title': '待办事项',
     'todo.hide': '隐藏',
     'todo.show': '显示',
+    'todo.derivedNote': '从转录内容推导 — 压缩后可能不完整。',
     'session.deleteTitle': '删除会话？',
     'session.deleteBodyPrefix': '这将永久删除',
     'session.cancel': '取消',
