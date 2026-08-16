@@ -3343,12 +3343,15 @@ function App() {
   }
   /** Dismiss one inbox item. f:/c: items are dismissed by generation (a re-failure gets a new `at`
    *  and re-alerts); q:/p: items are dismissed by bare id (their `at` is session.updated, which
-   *  churns on unrelated activity) — filterDismissed applies the right semantics. */
+   *  churns on unrelated activity) — write exactly the key form filterDismissed honors, or the
+   *  dismissal silently no-ops. */
   const dismissAttentionItem = (item: AttentionItem) => {
-    dismissedRef.current.add(itemGeneration(item))
+    const dismissalKey = item.kind === "question" || item.kind === "permission" ? item.id : itemGeneration(item)
+    dismissedRef.current.add(dismissalKey)
     persistAttentionState()
-    setInboxItems((current) => filterDismissed(current, dismissedRef.current))
-    updateInboxBadge(filterDismissed(inboxItems, dismissedRef.current))
+    const remaining = filterDismissed(inboxItems, dismissedRef.current)
+    setInboxItems(remaining)
+    updateInboxBadge(remaining)
   }
   const selectedSessionRef = useRef<SessionView | null>(null)
   /** The session `openSession` is currently working on, so its retry can tell it is still wanted. */
@@ -3851,17 +3854,24 @@ function App() {
       const pendingPermissionsAll = permissionLists.flat()
       const runs = mapped.map((session) => {
         const derivedStatus = statuses[session.id]
-        const terminalStatus = derivedStatus?.type === "failed"
-          ? "failed"
-          : derivedStatus?.type === "completed"
-            ? "completed"
-            : undefined
+        // Terminal signals are v2-only by design (settled decision 7): v2 wire statuses are
+        // busy-only, so the derived failed/completed/needs-attention words below are the ONLY
+        // terminal vocabulary that reaches the inbox. v1/bridge wire statuses (busy/retry/waiting,
+        // and any backend-specific words) carry no terminal attention — their runs only surface
+        // the questions/permissions signals, exactly as before this issue.
+        const terminalStatus = config.backend === "opencode2"
+          ? derivedStatus?.type === "failed"
+            ? "failed"
+            : derivedStatus?.type === "completed"
+              ? "completed"
+              : undefined
+          : undefined
         const signals: AgentRunSignals = {
           machineId: activeProfileID,
           questions: pendingQuestionsAll,
           permissions: pendingPermissionsAll,
           ...(terminalStatus ? { terminalStatus } : {}),
-          ...(derivedStatus?.type === "needs-attention" ? { needsAttention: true } : {})
+          ...(config.backend === "opencode2" && derivedStatus?.type === "needs-attention" ? { needsAttention: true } : {})
         }
         return toAgentRun(session, config.backend, signals)
       })
@@ -3879,26 +3889,28 @@ function App() {
       // A focused-session question/permission is already visible in the transcript, so it stays in
       // the inbox (cross-session view) but must not fire a second demand for attention.
       setInboxItems(filteredItems)
-      // Notifications (desktop) / badge (web, mobile): fire once per generation for question,
-      // permission and failure items of sessions OTHER than the focused one. Completions never
-      // notify — the completion chime covers the focused session and the inbox lists the rest.
-      // Every fired generation is persisted so a reconnect/restart cannot re-fire a
-      // server-reconciled q/p item. The dismissed set is applied FIRST: a dismissed item (the user
-      // has seen it) must never re-fire just because its generation was never notified.
+      // Notifications (desktop) / badge (web, mobile): an item demands attention once per
+      // generation for question, permission and failure of sessions OTHER than the focused one.
+      // Completions never notify — the completion chime covers the focused session and the inbox
+      // lists the rest. The dismissed set is applied FIRST: a dismissed item (the user has seen
+      // it) must never fire just because its generation was never notified.
       const fresh = filteredItems.filter((item) =>
         item.kind !== "completion" && item.sessionId !== selectedID && !notifiedRef.current.has(itemGeneration(item)))
-      if (fresh.length > 0) {
+      // A generation is marked notified ONLY where an alert was actually delivered. Desktop fires
+      // the OS notification (marking everything fresh, one alert for the newest); on web/mobile
+      // the badge IS the alert surface, so nothing is marked and every actionable item stays
+      // counted until dismissed or resolved. Marking without delivery would zero the badge and
+      // silently drop cross-session items on platforms with no notification surface.
+      if (fresh.length > 0 && isDesktopPlatform()) {
+        const newest = fresh[0]
         for (const item of fresh) notifiedRef.current.add(itemGeneration(item))
         persistAttentionState()
-        if (isDesktopPlatform()) {
-          const newest = fresh[0]
-          const sessionLabel = truncateForTitle(newest.sessionTitle)
-          notifyDesktopNotification({
-            title: t("inbox.title"),
-            body: t("notification.attentionBody", { kind: t(`inbox.${newest.kind}`), session: sessionLabel }),
-            overlayDescription: sessionLabel
-          })
-        }
+        const sessionLabel = truncateForTitle(newest.sessionTitle)
+        notifyDesktopNotification({
+          title: t("inbox.title"),
+          body: t("notification.attentionBody", { kind: t(`inbox.${newest.kind}`), session: sessionLabel }),
+          overlayDescription: sessionLabel
+        })
       }
       updateInboxBadge(filteredItems)
       // Bounded-growth guard: drop persisted dismissed/notified entries whose id no longer has a

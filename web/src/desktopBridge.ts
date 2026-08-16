@@ -162,6 +162,19 @@ export function notifyDesktopCompletion(notification: DesktopCompletionNotificat
   void bridge()?.notifyCompletion(notification).catch(() => undefined)
 }
 
+/** Generic attention notification (issue #9): the completion IPC channel's payload is already
+ *  generic `{ title, body, overlayDescription }` and the main-process handler shows any such
+ *  notification, so attention items reuse it with their own copy instead of adding a sibling
+ *  channel. `overlayDescription` is required by the contract (Windows overlay tooltip); it falls
+ *  back to the title. Electron behavior for the existing completion call is unchanged. */
+export function notifyDesktopNotification(notification: { title: string; body: string; overlayDescription?: string }): void {
+  void bridge()?.notifyCompletion({
+    title: notification.title,
+    body: notification.body,
+    overlayDescription: notification.overlayDescription ?? notification.title
+  }).catch(() => undefined)
+}
+
 export function openDesktopExternalUrl(url: string): void {
   void bridge()?.openExternal(url).catch(() => undefined)
 }

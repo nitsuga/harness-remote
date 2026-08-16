@@ -1150,6 +1150,28 @@ assert.match(
   /const fresh = filteredItems\.filter/,
   'attention notifications must only fire for items not dismissed by the user'
 )
+// A generation is marked notified ONLY where an alert was actually delivered: desktop fires the OS
+// notification, web/mobile keep the badge as their alert surface (marking without delivery would
+// zero the badge and silently drop cross-session items).
+assert.match(
+  app,
+  /if \(fresh\.length > 0 && isDesktopPlatform\(\)\) \{\s*const newest = fresh\[0\]/,
+  'attention generations must be marked notified only where the alert was delivered (desktop)'
+)
+// Dismissal must write the key form filterDismissed honors: bare id for q/p (their at churns with
+// session.updated), generation for f/c — a wrong key silently no-ops the dismissal.
+assert.match(
+  app,
+  /const dismissalKey = item\.kind === "question" \|\| item\.kind === "permission" \? item\.id : itemGeneration\(item\)/,
+  'dismissal must write bare ids for q/p and generations for f/c'
+)
+// Terminal signals (failed/completed/needs-attention) reach the inbox for v2 only: v1/bridge wire
+// statuses carry no terminal attention, so their runs surface only the questions/permissions.
+assert.match(
+  app,
+  /const terminalStatus = config\.backend === "opencode2"/,
+  'terminal inbox signals must be v2-only'
+)
 // The queued-prompt operations need an inbox lease kind in the coordinator.
 assert.ok(mutationCoordinator.includes('"inbox"'), 'the mutation coordinator must have an inbox lease kind')
 // The v2 client surface the wiring depends on must keep its inbox routes.

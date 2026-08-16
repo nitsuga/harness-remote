@@ -64,9 +64,11 @@ export function toSession(session: V2Session): Session {
 
 /**
  * One saved allow-always grant from `GET /api/permission/saved`. The resource is usually a
- * permission pattern (`/home/*`) that the revoke UI needs verbatim to stay usable, so only a
- * resource that ITSELF looks like a credential (e.g. a stored API-token string) is masked — a
- * `/secrets/*`-style path pattern stays visible.
+ * permission pattern (`/home/*`) that the revoke UI needs verbatim to stay usable, so it is kept
+ * as-is unless it matches the credential heuristic — any resource containing a key/token/secret/
+ * password/credential segment (e.g. a stored API-token string, or a path into a `secrets/` tree)
+ * is masked WHOLE rather than segment-wise: a partially masked path still leaks structure, and the
+ * revoke UI remains usable through action + project id alone for the rare masked grant.
  */
 export function toSavedPermission(raw: { id?: string; projectID?: string; action?: string; resource?: string }): SavedPermission {
   return {
