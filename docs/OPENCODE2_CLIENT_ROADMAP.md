@@ -42,10 +42,11 @@ The remaining work is primarily richer visibility and control. Model execution a
 | 3 | [#10](https://github.com/nitsuga/harness-remote/issues/10) | Visualize background subagents and delegated tasks | Shipped | - |
 | 3 | [#13](https://github.com/nitsuga/harness-remote/issues/13) | Render structured message and tool parts richly | Shipped | - |
 | 3 | [#14](https://github.com/nitsuga/harness-remote/issues/14) | Research and provide accurate per-message diffs | Planned | #13 |
+| 3 | [#47](https://github.com/nitsuga/harness-remote/issues/47) | Show live running-subagent summary with output window | Shipped | #10 |
 | 4 | [#11](https://github.com/nitsuga/harness-remote/issues/11) | Add an authenticated remote PTY terminal | Planned | - |
 | 4 | [#12](https://github.com/nitsuga/harness-remote/issues/12) | Expose task and worktree workflows in the client | Planned | #8, #9 |
 
-Progress: **7 of 15 shipped**.
+Progress: **8 of 16 shipped**.
 
 ### Reconciliation notes (Aug 16, 2026)
 
@@ -54,6 +55,8 @@ Statuses and issue states were cross-checked against the fork's issue tracker; t
 - **#4 stays `Shipped`** because the compact/fork flow merged in [PR #22](https://github.com/nitsuga/harness-remote/pull/22). The issue itself remains open because one acceptance criterion — actions exposed only for backends that support them — is not met: capabilities are still hardcoded. That gap is tracked by #23, and the dropped fork-result-after-navigation gap by #24.
 - **#9 shipped with a re-scoped criterion 1.** [PR #36](https://github.com/nitsuga/harness-remote/pull/36) delivered the machine → agent → session grouping structure with the single active profile populated. Populating it from multiple machines is a connection-management architecture change tracked by #37 and gated on fleet work ([#146](https://github.com/nitsuga/harness-remote/issues/146)).
 - **Queued-prompt surfacing shipped without a tracked issue:** [PR #40](https://github.com/nitsuga/harness-remote/pull/40) (badge, auto-open, inline "Send now") plus regression fixes #41 and #42 landed after the last status update. It is not in the table because no issue tracks it; if it should be tracked, file an issue and add a row.
+- **#47 shipped after the last update via [PR #48](https://github.com/nitsuga/harness-remote/pull/48)** — the live running-subagent summary row above was added. The issue was closed after independent acceptance verification: all six criteria met on current main (oracle review + green suite), with the first-render gap (running card appears only after a full transcript reload) filed as #52 during live validation and fixed by PRs #53 and #54.
+- **Backlog additions:** #44 (todo-panel keying) and #49/#50/#51 (filed from the PR #47 review round) are open bugs filed since the last reconciliation and were added to the maintenance table below.
 
 ### Open maintenance and security backlog (not feature-tracked)
 
@@ -69,6 +72,10 @@ Filed separately during feature reviews; these are bugs and hygiene items, not r
 | [#31](https://github.com/nitsuga/harness-remote/issues/31) | v2 fix | `file://` content should degrade gracefully in the file-content renderer |
 | [#35](https://github.com/nitsuga/harness-remote/issues/35) | chore | Remove write-only `wasRunningRef` dead state |
 | [#38](https://github.com/nitsuga/harness-remote/issues/38) | security | PermissionCard renders raw permission patterns (last raw credential-like surface) |
+| [#44](https://github.com/nitsuga/harness-remote/issues/44) | web | Todo panel rows key on required `TodoItem.id` but real todo items have no id |
+| [#49](https://github.com/nitsuga/harness-remote/issues/49) | v2 fix | 3.5s poll effect deps omit `activeProfileID`, so profile-only switches carry stale state |
+| [#50](https://github.com/nitsuga/harness-remote/issues/50) | v2 fix | Eager awaited `loadSelected` can be silently discarded by event-driven refreshes |
+| [#51](https://github.com/nitsuga/harness-remote/issues/51) | v2 fix | `refreshSessions` has the same request-id starvation the transcript reload fix addresses |
 
 ## Delivery Phases
 
