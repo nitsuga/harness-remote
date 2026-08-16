@@ -65,7 +65,8 @@ export function SessionCard({
   onRename,
   onCancelRename,
   onStartRename,
-  onDelete
+  onDelete,
+  mutationLocked
 }: {
   session: SessionView
   selectedID: string | null
@@ -80,20 +81,12 @@ export function SessionCard({
   onCancelRename: () => void
   onStartRename: (session: SessionView) => void
   onDelete: (session: SessionView) => void
+  mutationLocked: boolean
 }) {
   const isRenaming = rename.sessionID === session.id && rename.source === "list"
   return (
     <article
       className={`session-card ${session.status} ${selectedID === session.id ? "active" : ""} ${isRenaming ? "renaming" : ""} fade-in`}
-      onClick={() => onOpen(session)}
-      role="button"
-      tabIndex={0}
-      onKeyDown={(event) => {
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault()
-          onOpen(session)
-        }
-      }}
     >
       <div className="session-card-main">
         <div>
@@ -122,7 +115,7 @@ export function SessionCard({
                 className="rename-input"
                 autoComplete="off"
               />
-              <button className="btn-primary compact" onClick={(event) => { event.stopPropagation(); onRename(session) }} onMouseDown={(event) => event.preventDefault()} title={t('session.renameConfirm')}>
+               <button className="btn-primary compact" disabled={mutationLocked} onClick={(event) => { event.stopPropagation(); onRename(session) }} onMouseDown={(event) => event.preventDefault()} title={t('session.renameConfirm')}>
                 <SaveIcon size={16} />
               </button>
               <button className="btn-secondary compact" onClick={(event) => { event.stopPropagation(); onCancelRename() }} title={t('session.cancel')}>
@@ -130,9 +123,13 @@ export function SessionCard({
               </button>
             </div>
           ) : (
-            <h3 title={session.title}>{session.title}</h3>
+            <button type="button" className="session-card-open" onClick={() => onOpen(session)} title={t('sessions.open')}>
+              {/* Flow content inside a button is invalid; the title and directory are styled spans. */}
+              <span className="session-card-title" title={session.title}>{session.title}</span>
+              <span className="session-card-directory" title={session.directory}>{shortDirectory(session.directory)}</span>
+            </button>
           )}
-          <p title={session.directory}>{shortDirectory(session.directory)}</p>
+          {isRenaming && <p title={session.directory}>{shortDirectory(session.directory)}</p>}
         </div>
       </div>
       <div className="session-stats">
@@ -148,10 +145,10 @@ export function SessionCard({
       <div className="inline-actions">
         {capabilities.sessionRename && capabilities.sessionDelete && (
           <>
-            <button className="btn-secondary" onClick={(event) => { event.stopPropagation(); onStartRename(session) }} title={t('session.renameTitle')} aria-label={t('session.renameTitle')}>
+            <button className="btn-secondary" disabled={mutationLocked} onClick={(event) => { event.stopPropagation(); onStartRename(session) }} title={t('session.renameTitle')} aria-label={t('session.renameTitle')}>
               <PencilIcon size={16} />{t('session.renameConfirm')}
             </button>
-            <button className="btn-danger" onClick={(event) => { event.stopPropagation(); onDelete(session) }} title={t('sessions.delete')}>
+            <button className="btn-danger" disabled={mutationLocked} onClick={(event) => { event.stopPropagation(); onDelete(session) }} title={t('sessions.delete')}>
               <TrashIcon size={16} />{t('sessions.delete')}
             </button>
           </>
@@ -170,6 +167,7 @@ export function SessionSidebar({
   sidebarSessionsRef,
   refreshing,
   creating,
+  mutationLocked,
   offline,
   width,
   t,
@@ -188,7 +186,10 @@ export function SessionSidebar({
   searchInputRef: RefObject<HTMLInputElement>
   sidebarSessionsRef: RefObject<HTMLDivElement>
   refreshing: boolean
+  /** True only while a session is actually being created; the spinner/label must not claim
+   *  creation while the button is merely disabled by the shared mutation lock (H2). */
   creating: boolean
+  mutationLocked: boolean
   offline: boolean
   width: number
   t: Translator
@@ -210,7 +211,7 @@ export function SessionSidebar({
         <button onClick={onRefresh} className="btn-secondary" disabled={refreshing} aria-label={t('sessions.refresh')} title={t('sessions.refresh')}>
           {refreshing ? <LoadingIcon size={16} /> : <RefreshIcon size={16} />}
         </button>
-        <button onClick={onNewSession} className="btn-primary" disabled={creating || offline} aria-label={t('sessions.new')} title={offline ? t('sessions.offlineHint') : t('sessions.new')}>
+        <button onClick={onNewSession} className="btn-primary" disabled={creating || mutationLocked || offline} aria-label={t('sessions.new')} title={offline ? t('sessions.offlineHint') : mutationLocked ? t('detail.actionLocked') : t('sessions.new')}>
           {creating ? <LoadingIcon size={16} /> : <PlusIcon size={16} />}
         </button>
       </div>
@@ -239,12 +240,14 @@ export function SessionsPanel({
   query,
   refreshing,
   creating,
+  mutationLocked,
   offline,
   connectionState,
   connectionStatusText,
   eventStreamState,
   eventStreamText,
   runtimeError,
+  actionNotice,
   t,
   onQueryChange,
   onRefresh,
@@ -259,13 +262,19 @@ export function SessionsPanel({
   changedSessions: number
   query: string
   refreshing: boolean
+  /** True only while a session is actually being created; the spinner/label must not claim
+   *  creation while the button is merely disabled by the shared mutation lock (H2). */
   creating: boolean
+  mutationLocked: boolean
   offline: boolean
   connectionState: string
   connectionStatusText: string
   eventStreamState: string
   eventStreamText: string
   runtimeError: string | null
+  /** Informational notices (fork created/unconfirmed, delivery state) — the sessions list must
+   *  announce them too, not just the detail and help views. */
+  actionNotice: string | null
   t: Translator
   onQueryChange: (value: string) => void
   onRefresh: () => void
@@ -287,7 +296,7 @@ export function SessionsPanel({
         </div>
         <div className="inline-actions sessions-header-actions">
           <button onClick={onRefresh} className="btn-secondary" disabled={refreshing}>{refreshing ? <LoadingIcon size={18} /> : <RefreshIcon size={18} />}{t('sessions.refresh')}</button>
-          <button onClick={onNewSession} className="btn-primary" disabled={creating || offline} title={offline ? t('sessions.offlineHint') : undefined}>{creating ? <LoadingIcon size={18} /> : <PlusIcon size={18} />}{creating ? t('sessions.creating') : t('sessions.new')}</button>
+          <button onClick={onNewSession} className="btn-primary" disabled={creating || mutationLocked || offline} title={offline ? t('sessions.offlineHint') : mutationLocked ? t('detail.actionLocked') : t('sessions.new')}>{creating ? <LoadingIcon size={18} /> : <PlusIcon size={18} />}{creating ? t('sessions.creating') : t('sessions.new')}</button>
         </div>
       </div>
       <div className="toolbar"><input placeholder={t('sessions.searchPlaceholder')} value={query} onChange={(event) => onQueryChange(event.target.value)} className="search" /></div>
@@ -298,6 +307,7 @@ export function SessionsPanel({
           : filteredSessions.map((session) => <SessionCard key={session.id} session={session} {...sessionCardProps} />)}
       </div>
       {runtimeError && !(offline && filteredSessions.length === 0) && <div className="error fade-in">✗ {runtimeError}</div>}
+      {actionNotice && <div className="notice info fade-in" role="status" aria-live="polite">ℹ {actionNotice}</div>}
       {jumpControls}
     </section>
   )

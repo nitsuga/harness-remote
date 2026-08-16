@@ -1424,14 +1424,8 @@ a:focus-visible,
   border-radius: var(--radius-lg);
   background: var(--surface);
   padding: var(--space-3) var(--space-4);
-  cursor: pointer;
   transition: border-color var(--motion-fast) var(--ease), background var(--motion-fast) var(--ease),
     box-shadow var(--motion-fast) var(--ease);
-}
-
-.session-card:focus-visible {
-  outline: 2px solid var(--primary);
-  outline-offset: 2px;
 }
 
 .session-card.active {
@@ -1451,15 +1445,19 @@ a:focus-visible,
    with the min-width above. Breaking it contains it and keeps the wrapped two-line titles the
    cards have always shown; nowrap plus an ellipsis contains it just as well but collapses every
    one of them to a single truncated line, which costs real information on a phone. The desktop
-   sidebar overrides this back to one ellipsised line on purpose. */
-.session-card h3 {
+   sidebar overrides this back to one ellipsised line on purpose. The title and directory are
+   spans — a <button> may not contain heading/paragraph flow content — so block layout is explicit. */
+.session-card .session-card-title {
+  display: block;
   overflow-wrap: break-word;
   font-size: var(--font-md);
   font-weight: 600;
 }
 
 .session-card-main p,
-.session-card > p {
+.session-card > p,
+.session-card .session-card-directory {
+  display: block;
   margin-top: var(--space-1);
   overflow-wrap: anywhere;
   color: var(--muted);
@@ -1558,7 +1556,7 @@ a:focus-visible,
   min-width: 0;
 }
 
-.sidebar-sessions .session-card h3 {
+.sidebar-sessions .session-card .session-card-title {
   margin: 0;
   font-size: var(--font-sm);
   font-weight: 550;
@@ -1567,12 +1565,16 @@ a:focus-visible,
   white-space: nowrap;
 }
 
-.sidebar-sessions .session-card.active h3 {
+.sidebar-sessions .session-card.active .session-card-title {
   font-weight: 650;
 }
 
+/* The sidebar's meta line surfaces the shortened directory next to the timestamp; the open
+   button's own copy would repeat it, so it is hidden here (M8 parity: exactly one directory
+   per card per layout). */
 .sidebar-sessions .session-card-main p,
-.sidebar-sessions .session-card > p {
+.sidebar-sessions .session-card > p,
+.sidebar-sessions .session-card .session-card-directory {
   display: none;
 }
 
@@ -1619,8 +1621,12 @@ a:focus-visible,
 }
 
 /* Collapsed to zero width so the title's column reclaims the space, rather than just hiding
-   still-layout-reserving buttons behind invisible pixels. */
-.sidebar-sessions .session-card:hover .inline-actions,
+   still-layout-reserving buttons behind invisible pixels. The reveal is scoped to hovering the
+   open control itself (M6): hovering dead card padding must not advertise row actions. The
+   actions container is part of the match so the actions stay revealed while the pointer travels
+   from the open control to the icons — without it, the hover gap between the two collapsed the
+   row and the mouse could never reach the buttons in one motion. */
+.sidebar-sessions .session-card:has(.session-card-open:hover, .inline-actions:hover) .inline-actions,
 .sidebar-sessions .session-card:focus-within .inline-actions {
   width: auto;
   opacity: 1;
@@ -1939,6 +1945,43 @@ a:focus-visible,
   border-color: var(--primary-border);
   background: var(--primary-soft);
   padding: var(--space-3) var(--space-4);
+}
+
+.message-delivery-notice {
+  margin-top: .45rem;
+  color: var(--muted);
+  font-size: .75rem;
+  font-style: italic;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+/* The queued row's cancel affordance reads as a text link beside the queued notice — a small,
+   clearly-labelled control that does not out-shout the row it sits on (mobile and desktop). */
+.message-cancel-queued {
+  font-style: normal;
+  font-size: .75rem;
+  line-height: 1.4;
+  color: var(--primary);
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+  text-decoration: underline;
+}
+
+.message-cancel-queued:hover:not(:disabled) {
+  color: var(--primary-strong);
+  background: transparent;
+  text-decoration: underline;
+}
+
+.message-cancel-queued:disabled {
+  opacity: .55;
+  cursor: not-allowed;
+  text-decoration: none;
 }
 
 .message.assistant {
@@ -2497,7 +2540,11 @@ a:focus-visible,
   align-items: center;
   gap: var(--space-1);
   min-width: 0;
-  overflow: hidden;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 2px;
+  scrollbar-width: thin;
 }
 
 .composer-chip {
@@ -2512,6 +2559,25 @@ a:focus-visible,
   background: var(--surface-subtle);
   color: var(--muted-strong);
   font-size: var(--font-xs);
+  flex: 0 0 auto;
+}
+
+.session-card-open {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.session-card-open:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 3px;
+  border-radius: var(--radius-sm);
 }
 
 .composer-chip strong {
@@ -2698,28 +2764,23 @@ a:focus-visible,
   text-align: left;
 }
 
+.session-action-pending {
+  display: block;
+  margin-top: var(--space-1);
+  color: var(--muted-strong);
+  font-size: var(--font-xs);
+  white-space: nowrap;
+  /* The pending label hangs under the ⋯ control; centering keeps it readable on narrow
+     appbars where it is wider than the toggle that hosts it (M8). */
+  text-align: center;
+}
+
 @media (hover: hover) {
   .message-context-menu button:hover,
-  .session-actions-menu button:hover,
+  .session-actions-menu button:hover:not(:disabled),
   .menu-item:hover:not(:disabled),
   .server-option:hover {
     background: var(--surface-strong);
-  }
-
-  .session-card:hover {
-    border-color: var(--border-strong);
-    box-shadow: var(--shadow-sm);
-  }
-
-  .sidebar-sessions .session-card:hover {
-    background: var(--surface-subtle);
-    border-color: transparent;
-    box-shadow: none;
-  }
-
-  .sidebar-sessions .session-card.active:hover {
-    background: var(--primary-soft);
-    border-color: var(--primary-border);
   }
 
   .sidebar-sessions .inline-actions button:hover:not(:disabled),
@@ -2731,6 +2792,13 @@ a:focus-visible,
   .session-actions-toggle:hover:not(:disabled) {
     color: var(--text);
     background: var(--surface-strong);
+  }
+
+  /* M6: the open control answers to the pointer itself — a soft highlight that says "this row
+     opens", without the misleading full-card pointer (the article must not look clickable). */
+  .sidebar-sessions .session-card-open:hover {
+    background: var(--surface-strong);
+    border-radius: var(--radius-sm);
   }
 
   .message-reasoning-summary:hover,

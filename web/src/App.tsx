@@ -1,9 +1,15 @@
-import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react"
+import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react"
 import { App as CapacitorApp } from "@capacitor/app"
 import { Capacitor, type PluginListenerHandle } from "@capacitor/core"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { api, isValidServerConfig } from "./api"
+import {
+  createMessageRequestID,
+  createSessionRequestID,
+  isAdmissionConflict,
+  isIndeterminateDeliveryError
+} from "./opencode2-client"
 import {
   createDesktopOpenCodeEventSubscription,
   desktopProfileID,
@@ -26,7 +32,7 @@ import {
 } from "./opencode-events"
 import { createTranslator, languageOptions, normalizeLanguage, type LanguageCode } from "./i18n"
 import { stripMarkdownDirectives } from "./markdownDirectives"
-import { isQuestionActive } from "./opencode2-mappers"
+import { isQuestionActive, applyInboxDelivery, type V2InboxItem } from "./opencode2-mappers"
 import { DEFAULT_HARNESS_CAPABILITIES } from "./backendCapabilities"
 import { BACKEND_CLIENTS } from "./backendClient"
 import { copyToClipboard } from "./clipboard"
@@ -35,6 +41,7 @@ import { type AttachmentPart } from "./attachments"
 import { CommandPalette, MenuBar, ServerSwitcher, type MenuDefinition, type MenuEntry, type PaletteCommand } from "./components/shell"
 import { ConnectServerWizard, NewSessionDialog } from "./components/panels"
 import { SessionComposer } from "./components/session-composer"
+import { createSessionMutationCoordinator, type MutationKind, type MutationLease, type SessionMutationCoordinator } from "./session-mutation-coordinator"
 import { SessionSidebar, SessionsPanel, formatTime, projectLabel, shortDirectory, type SessionRenameState } from "./components/session-list"
 import { createServerProfile, loadActiveServerProfile, loadServerProfiles, persistServerProfiles, type SavedServerProfile } from "./serverProfiles"
 import type { DesktopMenuCommand, DesktopMenuTemplate } from "../electron/ipc-contract"
@@ -76,6 +83,55 @@ const SIDEBAR_WIDTH_STORAGE_KEY = "opencode.remote.desktopSidebarWidth.v4"
 const INSPECTOR_WIDTH_STORAGE_KEY = "opencode.remote.desktopInspectorWidth"
 const INSPECTOR_OPEN_STORAGE_KEY = "opencode.remote.desktopInspectorOpen"
 const NEW_SESSION_DIRECTORY_STORAGE_KEY = "opencode.remote.newSessionDirectory"
+const REMOVED_SESSION_STORAGE_KEY = "opencode.remote.sessionTombstones.v1"
+
+function tombstoneNamespaceKey(profileID: string, namespace: string): string {
+  // Do not put server credentials (which are part of configKey) in localStorage keys.
+  let hash = 2166136261
+  for (const char of `${profileID}\u0000${namespace}`) hash = Math.imul(hash ^ char.charCodeAt(0), 16777619)
+  return (hash >>> 0).toString(16)
+}
+
+function readSessionTombstones(): Map<string, Set<string>> {
+  const result = new Map<string, Set<string>>()
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(REMOVED_SESSION_STORAGE_KEY) ?? "null")
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return result
+    const namespaces = (parsed as { namespaces?: unknown }).namespaces
+    if (!namespaces || typeof namespaces !== "object" || Array.isArray(namespaces)) return result
+    for (const [key, value] of Object.entries(namespaces)) {
+      if (!/^[0-9a-f]+$/.test(key) || !Array.isArray(value)) continue
+      const ids = value.filter((id): id is string => typeof id === "string" && id.length > 0 && id.length < 512)
+      if (ids.length) result.set(key, new Set(ids))
+    }
+  } catch { /* Corrupt or unavailable storage is treated as empty. */ }
+  return result
+}
+
+function persistSessionTombstones(tombstones: Map<string, Set<string>>): void {
+  try {
+    const namespaces: Record<string, string[]> = {}
+    // Raw in-memory namespace keys are retained for ABA checks, but never written: configKey
+    // includes credentials. Persisted keys are the opaque hashes populated by this module.
+    for (const [key, ids] of tombstones) if (!key.includes("\u0000") && ids.size) namespaces[key] = [...ids]
+    localStorage.setItem(REMOVED_SESSION_STORAGE_KEY, JSON.stringify({ version: 1, namespaces }))
+  } catch { /* Storage can be disabled or full; memory protections still apply. */ }
+}
+
+function mergedSessionTombstones(
+  tombstones: Map<string, Set<string>>,
+  runtimeKey: string,
+  persistedKey: string
+): Set<string> {
+  // Hydrated state uses opaque keys while live ABA checks use the raw namespace key. They are
+  // two representations of one namespace, never alternatives where one can shadow the other.
+  const merged = new Set([...(tombstones.get(runtimeKey) ?? []), ...(tombstones.get(persistedKey) ?? [])])
+  if (merged.size) {
+    tombstones.set(runtimeKey, merged)
+    tombstones.set(persistedKey, merged)
+  }
+  return merged
+}
 
 type Translator = ReturnType<typeof createTranslator>
 
@@ -99,6 +155,44 @@ const MAIN_WIDTH_MIN = 420
 /** Below this the inspector is folded away automatically: three panes in less room than this turns
  *  the conversation into a gutter, and the same content is one click away in the context chips. */
 const INSPECTOR_MIN_WINDOW_WIDTH = 1180
+
+/** How long a compaction whose admission (or terminal message) could not be confirmed may keep its
+ *  pending state before resolving with a retryable notice. Bounded so the menu never blocks forever. */
+const COMPACTION_PENDING_MAX_MS = 45_000
+
+/** Fork reconciliation after a lost acknowledgement: how many authoritative child listings to try,
+ *  and how long to wait between them, before giving up on confirming the child. */
+const FORK_RECONCILE_MAX_ATTEMPTS = 5
+const FORK_RECONCILE_ATTEMPT_DELAY_MS = 800
+
+// The shared `api` proxy is typed to the v1 clients' surface; the v2 client implements richer
+// signatures (stable request ids, admission ids, child listings). These casts expose only the
+// extra parameters/returns the call sites below need, never the transport itself.
+const compactSessionV2 = api.compactSession as unknown as (
+  config: ServerConfig, sessionID: string, directory: string, requestID: string
+) => Promise<{ id?: string; requestID?: string }>
+const sendPromptV2 = api.sendPrompt as unknown as (
+  config: ServerConfig, sessionID: string, text: string, directory: string | undefined,
+  model: ModelSelection | undefined, agentID: string | undefined,
+  attachments: AttachmentPart[], delivery: "steer" | "queue", requestID: string
+) => Promise<{ admitted: boolean; requestID?: string; messageID?: string; delivery?: "steer" | "queue" }>
+const sendCommandV2 = api.sendCommand as unknown as (
+  config: ServerConfig, sessionID: string, command: string, argumentsText: string,
+  directory: string | undefined, model: ModelSelection | undefined, agentID: string | undefined,
+  requestID: string
+) => Promise<{ admitted: boolean; requestID?: string; messageID?: string; delivery?: "steer" | "queue" }>
+const sendSkillV2 = api.sendSkill as unknown as (
+  config: ServerConfig, sessionID: string, skill: string, directory: string | undefined, requestID: string
+) => Promise<unknown>
+const listChildSessionsV2 = (api as unknown as {
+  listChildSessions(config: ServerConfig, parentID: string): Promise<Session[]>
+}).listChildSessions
+const getSessionV2 = (api as unknown as {
+  getSession(config: ServerConfig, sessionID: string): Promise<Session>
+}).getSession
+const listInboxV2 = (api as unknown as {
+  listInbox(config: ServerConfig, sessionID: string, directory?: string): Promise<V2InboxItem[]>
+}).listInbox
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value))
@@ -251,7 +345,8 @@ function toRenderedMessage(message: MessageEnvelope): MessageEnvelope & { text: 
 function messagesHaveSameContent(left: MessageEnvelope[], right: MessageEnvelope[]): boolean {
   return left.length === right.length && left.every((message, index) => {
     const candidate = right[index]
-    return candidate?.info.role === message.info.role && extractText(candidate) === extractText(message)
+    return candidate?.info.role === message.info.role && candidate?.info.type === message.info.type
+      && candidate?.info.compactionStatus === message.info.compactionStatus && extractText(candidate) === extractText(message)
   })
 }
 
@@ -823,13 +918,17 @@ function QuestionCard({
   directory,
   request,
   onResolved,
-  t
+  t,
+  coordinator,
+  onLeaseChanged
 }: {
   config: ServerConfig
   directory: string
   request: QuestionRequest
   onResolved: (id: string) => void
   t: Translator
+  coordinator: SessionMutationCoordinator
+  onLeaseChanged: () => void
 }) {
   const [selections, setSelections] = useState<string[][]>(() => request.questions.map(() => []))
   const [customValues, setCustomValues] = useState<string[]>(() => request.questions.map(() => ""))
@@ -885,26 +984,40 @@ function QuestionCard({
   })
 
   async function submit() {
+    const lease = coordinator.acquireLease("question")
+    if (!lease) return
+    onLeaseChanged()
     setSubmitting(true)
     setError(null)
     try {
       await api.replyQuestion(config, request.id, answers, directory)
-      onResolved(request.id)
+      if (coordinator.isLeaseCurrent(lease) && coordinator.isContextGenerationCurrent(lease.contextGeneration) && coordinator.isContextCurrent(lease.context)) onResolved(request.id)
     } catch (err) {
-      setError((err as Error).message)
-      setSubmitting(false)
+      if (coordinator.isLeaseCurrent(lease) && coordinator.isContextGenerationCurrent(lease.contextGeneration) && coordinator.isContextCurrent(lease.context)) {
+        setError((err as Error).message)
+        setSubmitting(false)
+      }
+    } finally {
+      if (coordinator.releaseLease(lease)) onLeaseChanged()
     }
   }
 
   async function reject() {
+    const lease = coordinator.acquireLease("question")
+    if (!lease) return
+    onLeaseChanged()
     setSubmitting(true)
     setError(null)
     try {
       await api.rejectQuestion(config, request.id, directory)
-      onResolved(request.id)
+      if (coordinator.isLeaseCurrent(lease) && coordinator.isContextGenerationCurrent(lease.contextGeneration) && coordinator.isContextCurrent(lease.context)) onResolved(request.id)
     } catch (err) {
-      setError((err as Error).message)
-      setSubmitting(false)
+      if (coordinator.isLeaseCurrent(lease) && coordinator.isContextGenerationCurrent(lease.contextGeneration) && coordinator.isContextCurrent(lease.context)) {
+        setError((err as Error).message)
+        setSubmitting(false)
+      }
+    } finally {
+      if (coordinator.releaseLease(lease)) onLeaseChanged()
     }
   }
 
@@ -921,7 +1034,7 @@ function QuestionCard({
                 type="button"
                 className={`question-option ${selections[index].includes(option.label) ? "selected" : ""}`}
                 onClick={() => toggleOption(index, option.label, Boolean(question.multiple))}
-                disabled={submitting}
+                 disabled={submitting || coordinator.getActiveLease() !== null}
               >
                 <span className="question-option-label">{option.label}</span>
                 {option.description && <span className="question-option-description">{option.description}</span>}
@@ -946,7 +1059,7 @@ function QuestionCard({
                 type="button"
                 className={`question-option ${selections[index].includes("true") ? "selected" : ""}`}
                 onClick={() => toggleOption(index, "true", false)}
-                disabled={submitting}
+                 disabled={submitting || coordinator.getActiveLease() !== null}
               >
                 <span className="question-option-label">{t('question.externalComplete')}</span>
               </button>
@@ -959,17 +1072,17 @@ function QuestionCard({
               placeholder={t('question.otherPlaceholder')}
               value={customValues[index]}
               onChange={(event) => setCustomValue(index, event.target.value, Boolean(question.multiple))}
-              disabled={submitting}
+               disabled={submitting || coordinator.getActiveLease() !== null}
             />
           )}
         </div>
       ) : null)}
       {error && <p className="question-error">{error}</p>}
       <div className="question-actions">
-        <button type="button" className="btn-secondary" onClick={reject} disabled={submitting}>
+        <button type="button" className="btn-secondary" onClick={reject} disabled={submitting || coordinator.getActiveLease() !== null}>
           {t('question.skip')}
         </button>
-        <button type="button" className="btn-primary" onClick={submit} disabled={submitting || !canSubmit}>
+        <button type="button" className="btn-primary" onClick={submit} disabled={submitting || coordinator.getActiveLease() !== null || !canSubmit}>
           {t('question.sendAnswer')}
         </button>
       </div>
@@ -982,26 +1095,37 @@ function PermissionCard({
   directory,
   request,
   onResolved,
-  t
+  t,
+  coordinator,
+  onLeaseChanged
 }: {
   config: ServerConfig
   directory: string
   request: PermissionRequest
   onResolved: (id: string) => void
   t: Translator
+  coordinator: SessionMutationCoordinator
+  onLeaseChanged: () => void
 }) {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   async function reply(response: "once" | "always" | "reject") {
+    const lease = coordinator.acquireLease("permission")
+    if (!lease) return
+    onLeaseChanged()
     setSubmitting(true)
     setError(null)
     try {
       await api.replyPermission(config, request.id, response, directory)
-      onResolved(request.id)
+      if (coordinator.isLeaseCurrent(lease) && coordinator.isContextGenerationCurrent(lease.contextGeneration) && coordinator.isContextCurrent(lease.context)) onResolved(request.id)
     } catch (err) {
-      setError((err as Error).message)
-      setSubmitting(false)
+      if (coordinator.isLeaseCurrent(lease) && coordinator.isContextGenerationCurrent(lease.contextGeneration) && coordinator.isContextCurrent(lease.context)) {
+        setError((err as Error).message)
+        setSubmitting(false)
+      }
+    } finally {
+      if (coordinator.releaseLease(lease)) onLeaseChanged()
     }
   }
 
@@ -1015,14 +1139,14 @@ function PermissionCard({
       </div>
       {error && <p className="question-error">{error}</p>}
       <div className="question-actions">
-        <button type="button" className="btn-danger" onClick={() => void reply("reject")} disabled={submitting}>
+         <button type="button" className="btn-danger" onClick={() => void reply("reject")} disabled={submitting || coordinator.getActiveLease() !== null}>
           {t('permission.deny')}
         </button>
-        <button type="button" className="btn-secondary" onClick={() => void reply("once")} disabled={submitting}>
+         <button type="button" className="btn-secondary" onClick={() => void reply("once")} disabled={submitting || coordinator.getActiveLease() !== null}>
           {t('permission.allowOnce')}
         </button>
         {request.always.length > 0 && (
-          <button type="button" className="btn-primary" onClick={() => void reply("always")} disabled={submitting}>
+            <button type="button" className="btn-primary" onClick={() => void reply("always")} disabled={submitting || coordinator.getActiveLease() !== null}>
             {t('permission.allowAlways')}
           </button>
         )}
@@ -1466,14 +1590,18 @@ function formatLimit(value?: number): string {
   return String(value)
 }
 
-function createOptimisticUserMessage(sessionID: string, text: string): MessageEnvelope {
+function createOptimisticUserMessage(sessionID: string, text: string, delivery?: "queue" | "steer", durableID?: string): MessageEnvelope {
   const now = Date.now()
   return {
     info: {
       id: `optimistic-${now}`,
       role: "user",
       sessionID,
-      time: { created: now }
+        time: { created: now },
+        delivery,
+        // The server-confirmed durable message id, once the admission response returns it. Rows
+        // without one (still awaiting the response, or a response that was lost) retire by text.
+        durableID
     },
     parts: [
       {
@@ -1483,6 +1611,42 @@ function createOptimisticUserMessage(sessionID: string, text: string): MessageEn
       }
     ]
   }
+}
+
+/** Build transcript rows for inbox entries the server still holds as queued user input. The message
+ *  list drops undelivered items, so without these rows a queued prompt would silently disappear
+ *  after any reconciliation (app restart, poll, session reopen) even though the server still holds
+ *  it durably. Rows use the server's own message id so they stay stable across polls and disappear
+ *  the moment the item is delivered (it leaves the inbox and enters history). */
+function queuedInboxMessageEnvelopes(sessionID: string, inbox: V2InboxItem[], inHistoryIDs: Set<string>): MessageEnvelope[] {
+  const rows: MessageEnvelope[] = []
+  for (const item of inbox) {
+    if (item.type !== "user" || item.delivery !== "queue" || inHistoryIDs.has(item.id)) continue
+    const text = typeof item.payload?.text === "string" ? item.payload.text : ""
+    rows.push({
+      info: {
+        id: item.id,
+        role: "user",
+        sessionID,
+        time: { created: item.timeCreated },
+        delivery: "queue",
+        type: "user"
+      },
+      parts: text ? [{ id: `${item.id}:text`, type: "text", text }] : []
+    })
+  }
+  return rows
+}
+
+/** The server-side inbox/message id for a queued row, when one exists and can be cancelled:
+ *  inbox-derived rows carry it as their own id, and optimistic rows carry it as the durable
+ *  admission id once the server confirmed the admission. An optimistic row still awaiting its
+ *  admission response has no server id yet — there is nothing on the server to cancel, so it is
+ *  not cancelable (its send is still being confirmed). */
+function queuedInboxItemID(message: MessageEnvelope): string | null {
+  if (message.info.delivery !== "queue") return null
+  if (message.info.durableID) return message.info.durableID
+  return message.info.id.startsWith("optimistic-") ? null : message.info.id
 }
 
 function createLocalAssistantMessage(sessionID: string, text: string): MessageEnvelope {
@@ -1534,7 +1698,11 @@ function mergeFetchedMessages(current: MessageEnvelope[], fetched: MessageEnvelo
     const fetchedPartIDs = new Set(message.parts.map((part) => part.id))
     const missingReasoning = previous.parts.filter((part) => part.type === "reasoning" && !fetchedPartIDs.has(part.id))
     const mergedParts = missingReasoning.length === 0 ? parts : [...missingReasoning, ...parts]
-    return partsEqual(previous.parts, mergedParts) ? previous : { ...message, parts: mergedParts }
+    const metadataChanged = previous.info.type !== message.info.type
+      || previous.info.compactionStatus !== message.info.compactionStatus
+      || previous.info.time.completed !== message.info.time.completed
+      || previous.info.delivery !== message.info.delivery
+    return !metadataChanged && partsEqual(previous.parts, mergedParts) ? previous : { ...message, parts: mergedParts }
   })
 }
 
@@ -1575,13 +1743,34 @@ function applyStreamedPartDelta(
   return changed ? next : messages
 }
 
+/** Whether a fetched transcript or inbox row proves an optimistic bubble is now server-admitted.
+ *  Rows tagged with the admission response's durable message id retire by that EXACT id — the same
+ *  id the message carries in history (and in the inbox while it is still queued) — which is immune
+ *  to identical text sent twice. Rows still awaiting their admission response (or whose response was
+ *  lost) fall back to matching the same user text, guarded so only messages created after this row
+ *  was sent can retire it, never a pre-existing identical message. */
 function hasMatchingUserMessage(messages: MessageEnvelope[], optimistic: MessageEnvelope): boolean {
+  if (optimistic.info.durableID) {
+    return messages.some((message) => message.info.id === optimistic.info.durableID)
+  }
   const text = extractText(optimistic)
   return messages.some((message) => (
     message.info.sessionID === optimistic.info.sessionID &&
     message.info.role === "user" &&
-    extractText(message) === text
+    extractText(message) === text &&
+    message.info.time.created >= optimistic.info.time.created
   ))
+}
+
+/** M8: transcript-dependent availability must count every visible user row — fetched history,
+ *  optimistic bubbles, and server-admitted queued inbox rows. A just-sent or queued prompt
+ *  keeps Compact/Fork reachable instead of flashing them disabled until the next refresh. */
+function hasAnyUserMessage(
+  messages: MessageEnvelope[],
+  optimisticUserMessages: MessageEnvelope[],
+  queuedInboxMessages: MessageEnvelope[]
+): boolean {
+  return [...messages, ...optimisticUserMessages, ...queuedInboxMessages].some((message) => message.info.role === "user")
 }
 
 type RenderGroup =
@@ -1639,6 +1828,10 @@ type MessageMenuAction = {
   id: string
   label: string
   onSelect: () => void
+  disabled?: boolean
+  /** Tooltip text for a disabled item, so users understand why the action is unavailable
+   *  instead of staring at an unexplained greyed-out row. Never announced separately. */
+  disabledReason?: string
 }
 
 /** A ⋯ control in the conversation header exposing session-level actions from the connected
@@ -1648,10 +1841,12 @@ type MessageMenuAction = {
  *  contents. Availability still comes from the harness via the caller. */
 function SessionActionsMenu({
   actions,
-  t
+  t,
+  pendingAction = null
 }: {
   actions: MessageMenuAction[]
   t: Translator
+  pendingAction?: "compact" | "fork" | null
 }) {
   const [open, setOpen] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
@@ -1695,16 +1890,24 @@ function SessionActionsMenu({
               key={action.id}
               type="button"
               role="menuitem"
+              disabled={action.disabled}
+              title={action.disabled ? action.disabledReason : undefined}
               onClick={() => {
+                if (action.disabled) return
                 setOpen(false)
                 action.onSelect()
               }}
             >
-              {action.label}
+              {pendingAction === "compact" && action.id === "compact" ? t('detail.compacting')
+                : pendingAction === "fork" && action.id === "fork" ? t('detail.forking')
+                  : action.label}
             </button>
           ))}
         </div>
       )}
+      {pendingAction && <span className="session-action-pending" role="status" aria-live="polite">
+        {pendingAction === "compact" ? t('detail.compacting') : t('detail.forking')}
+      </span>}
     </div>
   )
 }
@@ -1807,10 +2010,11 @@ function MessageContextMenu({
           {text && <button type="button" role="menuitem" onClick={() => copy(false)}>{t('detail.copyText')}</button>}
           {text && <button type="button" role="menuitem" onClick={() => copy(true)}>{t('detail.copyMarkdown')}</button>}
           {text && actions.length > 0 && <div className="message-context-menu__separator" role="separator" />}
-          {actions.map((action) => (
-            <button key={action.id} type="button" role="menuitem" onClick={() => {
-              setPosition(null)
-              action.onSelect()
+            {actions.map((action) => (
+             <button key={action.id} type="button" role="menuitem" disabled={action.disabled} title={action.disabled ? action.disabledReason : undefined} onClick={() => {
+               if (action.disabled) return
+               setPosition(null)
+               action.onSelect()
             }}>{action.label}</button>
           ))}
         </div>
@@ -1829,6 +2033,7 @@ function ConversationRunView({
   directory,
   actions,
   onRevertMessage,
+  revertDisabled,
   t
 }: {
   items: TimelineItem[]
@@ -1838,6 +2043,7 @@ function ConversationRunView({
   directory: string | undefined
   actions: MessageMenuAction[]
   onRevertMessage: (messageID: string) => void
+  revertDisabled: boolean
   t: Translator
 }) {
   const fallback = [...messagesByID.values()].pop()
@@ -1854,7 +2060,7 @@ function ConversationRunView({
       text={runText}
       className="message assistant fade-in"
       t={t}
-      actions={fallback ? [...actions, ...(config.backend === "opencode" || config.backend === "opencode2" ? [{ id: "revert", label: t('detail.revertToMessage'), onSelect: () => onRevertMessage(fallback.info.id) }] : [])] : actions}
+       actions={fallback ? [...actions, ...(config.backend === "opencode" || config.backend === "opencode2" ? [{ id: "revert", label: t('detail.revertToMessage'), disabled: revertDisabled, disabledReason: revertDisabled ? t('detail.actionLocked') : undefined, onSelect: () => onRevertMessage(fallback.info.id) }] : [])] : actions}
     >
       {items.map((item) =>
         item.kind === "action-group" ? (
@@ -1892,21 +2098,28 @@ const MessageArticle = memo(function MessageArticle({
   directory,
   actions,
   onRevertMessage,
-  t
+  revertDisabled,
+  t,
+  onCancelQueuedMessage,
+  cancellingInboxIDs
 }: {
   message: MessageEnvelope & { text: string }
   config: ServerConfig
   directory: string | undefined
   actions: MessageMenuAction[]
   onRevertMessage: (messageID: string) => void
+  revertDisabled: boolean
   t: Translator
+  onCancelQueuedMessage: (message: MessageEnvelope) => void
+  cancellingInboxIDs: ReadonlySet<string>
 }) {
+  const cancelableInboxID = message.info.delivery === "queue" ? queuedInboxItemID(message) : null
   return (
     <MessageContextMenu
       text={message.text}
       className={`message ${message.info.role} fade-in`}
       t={t}
-      actions={[...actions, ...(config.backend === "opencode" || config.backend === "opencode2" ? [{ id: "revert", label: t('detail.revertToMessage'), onSelect: () => onRevertMessage(message.info.id) }] : [])]}
+      actions={[...actions, ...(config.backend === "opencode" || config.backend === "opencode2" ? [{ id: "revert", label: t('detail.revertToMessage'), disabled: revertDisabled, disabledReason: revertDisabled ? t('detail.actionLocked') : undefined, onSelect: () => onRevertMessage(message.info.id) }] : [])]}
     >
       {buildMessageTimeline(message.parts).map((item) =>
         item.kind === "action-group" ? (
@@ -1931,6 +2144,22 @@ const MessageArticle = memo(function MessageArticle({
           />
         )
       )}
+      {message.info.delivery === "queue" && (
+        <div className="message-delivery-notice">
+          <span>{t('detail.queuedPrompt')}</span>
+          {cancelableInboxID && (
+            <button
+              type="button"
+              className="message-cancel-queued"
+              onClick={() => onCancelQueuedMessage(message)}
+              disabled={cancellingInboxIDs.has(cancelableInboxID)}
+              title={t('detail.cancelQueuedPrompt')}
+            >
+              {t('detail.cancelQueuedPrompt')}
+            </button>
+          )}
+        </div>
+      )}
     </MessageContextMenu>
   )
 })
@@ -1953,15 +2182,20 @@ const MessagesPane = memo(function MessagesPane({
   directory,
   actions,
   onRevertMessage,
+  revertDisabled,
   t,
   messagesRef,
   messagesEndRef,
   onMessagesScroll,
   onQuestionResolved,
   onPermissionResolved,
+  coordinator,
+  onLeaseChanged,
   jumpAffordances,
   onJumpToTop,
-  onJumpToBottom
+  onJumpToBottom,
+  onCancelQueuedMessage,
+  cancellingInboxIDs
 }: {
   loadingSessionID: string | null
   loadedSessionID: string | null
@@ -1977,15 +2211,20 @@ const MessagesPane = memo(function MessagesPane({
   directory: string | undefined
   actions: MessageMenuAction[]
   onRevertMessage: (messageID: string) => void
+  revertDisabled: boolean
   t: Translator
   messagesRef: RefObject<HTMLDivElement>
   messagesEndRef: RefObject<HTMLDivElement>
   onMessagesScroll: () => void
   onQuestionResolved: (id: string) => void
   onPermissionResolved: (id: string) => void
+  coordinator: SessionMutationCoordinator
+  onLeaseChanged: () => void
   jumpAffordances: { top: boolean; bottom: boolean }
   onJumpToTop: () => void
   onJumpToBottom: () => void
+  onCancelQueuedMessage: (message: MessageEnvelope) => void
+  cancellingInboxIDs: ReadonlySet<string>
 }) {
   return (
     <div className="messages-wrap">
@@ -2022,7 +2261,7 @@ const MessagesPane = memo(function MessagesPane({
           <>
             {timelineGroups.map((group) =>
               group.kind === "message" ? (
-                <MessageArticle key={group.message.info.id} message={group.message} config={config} directory={directory} actions={actions} onRevertMessage={onRevertMessage} t={t} />
+                <MessageArticle key={group.message.info.id} message={group.message} config={config} directory={directory} actions={actions} onRevertMessage={onRevertMessage} revertDisabled={revertDisabled} t={t} onCancelQueuedMessage={onCancelQueuedMessage} cancellingInboxIDs={cancellingInboxIDs} />
               ) : (
                 <ConversationRunView
                   key={group.key}
@@ -2033,6 +2272,7 @@ const MessagesPane = memo(function MessagesPane({
                   directory={directory}
                   actions={actions}
                   onRevertMessage={onRevertMessage}
+                  revertDisabled={revertDisabled}
                   t={t}
                 />
               )
@@ -2044,8 +2284,10 @@ const MessagesPane = memo(function MessagesPane({
                   config={config}
                   directory={directory}
                   request={request}
-                  onResolved={onQuestionResolved}
-                  t={t}
+                   onResolved={onQuestionResolved}
+                   t={t}
+                    coordinator={coordinator}
+                    onLeaseChanged={onLeaseChanged}
                 />
               ))}
             {directory !== undefined &&
@@ -2055,8 +2297,10 @@ const MessagesPane = memo(function MessagesPane({
                   config={config}
                   directory={directory}
                   request={request}
-                  onResolved={onPermissionResolved}
-                  t={t}
+                   onResolved={onPermissionResolved}
+                   t={t}
+                    coordinator={coordinator}
+                    onLeaseChanged={onLeaseChanged}
                 />
               ))}
             {showTypingBubble && (
@@ -2201,6 +2445,121 @@ function App() {
 
   const [sessions, setSessions] = useState<SessionView[]>([])
   const [selectedID, setSelectedID] = useState<string | null>(null)
+  // This ref, rather than React state, is the synchronous authority for session mutations. State is
+  // only a paint signal so every alternate affordance sees the lock in the same tick.
+  const mutationCoordinatorRef = useRef<SessionMutationCoordinator | null>(null)
+  if (!mutationCoordinatorRef.current) mutationCoordinatorRef.current = createSessionMutationCoordinator({
+    profileID: activeProfileID,
+    configKey: configKey(config),
+    sessionID: selectedID
+  })
+  const mutationCoordinator = mutationCoordinatorRef.current
+  const [, bumpMutationLock] = useState(0)
+  // Abort is deliberately not represented by the ordinary lease: it may overlap the prompt lease,
+  // and must remain a lock after that lease's owner has finished cleaning up.
+  const abortInFlightRef = useRef(new Map<string, Promise<void>>())
+  const [abortPresentationContext, setAbortPresentationContext] = useState<string | null>(null)
+  // This is the single synchronous navigation boundary. Old leases may finish later, but they must
+  // not leave their spinners, draft, optimistic bubbles, or activity caches in the new context.
+  const replaceMutationContext = (sessionID: string | null = selectedID, profileID = activeProfileID, nextConfig = config) => {
+    const context = { profileID, configKey: configKey(nextConfig), sessionID }
+    if (!mutationCoordinator.isContextCurrent(context)) {
+      const previousContext = mutationCoordinator.getContext()
+      mutationCoordinator.replaceContext(context)
+      bumpMutationLock((value) => value + 1)
+      sessionActionPendingRef.current = null
+      setBusySending(false)
+      setAbortPresentationContext(null)
+      setSessionActionPending(null)
+      setActivatingSkill(null)
+      setCreatingSession(false)
+      setAwaitingAssistantReply(false)
+      // A replacement view starts with its own presentation state. The old lease is still held by
+      // its physical owner, so the lock remains visible, but its spinner must not bleed into here.
+      setRefreshingSessions(false)
+      refreshingSessionsRef.current = false
+      refreshIndicatorRequestRef.current += 1
+      setRuntimeError(null)
+      setActionNotice(null)
+      setLoadingSessionID(null)
+      setAgentOptions([])
+      setAgentLoadError(null)
+      setModelOptions([])
+      setModelLoadError(null)
+      setOptimisticUserMessages([])
+      setQueuedInboxMessages([])
+      compactObservationRef.current = null
+      forkReconcilingRef.current = false
+      pendingSkillRequestsRef.current.clear()
+      setComposer("")
+      setAttachments([])
+      // H1: session-only navigation must never silently destroy the draft/staged attachments.
+      // Park the outgoing session's draft under its own key and restore the incoming session's
+      // parked draft; only a profile/config change (different namespace) clears the whole map.
+      // The ref is the synchronous authority here — replaceContext has already committed.
+      const namespaceChanged = previousContext === null
+        || previousContext.profileID !== context.profileID
+        || previousContext.configKey !== context.configKey
+      if (namespaceChanged) {
+        sessionDraftsRef.current.clear()
+        pendingForkDraftRef.current = null
+        setComposer("")
+        setAttachments([])
+      } else {
+        if (previousContext.sessionID && (composer.trim() || attachments.length > 0)) {
+          sessionDraftsRef.current.set(
+            sessionDraftKey(previousContext.profileID, previousContext.configKey, previousContext.sessionID),
+            { text: composer, attachments: [...attachments] }
+          )
+        } else if (previousContext.sessionID) {
+          // The outgoing composer is empty, so any parked draft for this session is stale: the
+          // user cleared it deliberately (or already sent it), and restoring the old text on the
+          // next visit would resurrect exactly what they removed.
+          sessionDraftsRef.current.delete(sessionDraftKey(previousContext.profileID, previousContext.configKey, previousContext.sessionID))
+        }
+        const saved = context.sessionID
+          ? sessionDraftsRef.current.get(sessionDraftKey(context.profileID, context.configKey, context.sessionID))
+          : undefined
+        setComposer(saved ? saved.text : "")
+        setAttachments(saved ? [...saved.attachments] : [])
+      }
+      completionShouldPlayRef.current = false
+      awaitingAssistantBaselineRef.current = ""
+      latestMessageTimesRef.current.clear()
+      lastEventBySessionRef.current.clear()
+      loadAgentsRequestRef.current += 1
+      loadModelsRequestRef.current += 1
+      refreshRequestRef.current += 1
+      activityRequestRef.current += 1
+    }
+  }
+  const isSessionMutationLocked = () => mutationCoordinator.getActiveLease() !== null || abortInFlightRef.current.size > 0
+  // Ownership and currency are deliberately separate. A stale owner must release its lease, but it
+  // may not write into the replacement view (including cleanup state).
+  const isLeaseContextCurrent = (lease: MutationLease) => mutationCoordinator.isLeaseCurrent(lease)
+    && mutationCoordinator.isContextGenerationCurrent(lease.contextGeneration)
+    && mutationCoordinator.isContextCurrent(lease.context)
+    && mutationCoordinator.isForkGenerationCurrent(lease.forkGeneration)
+  const acquireMutation = (kind: MutationKind, targetSessionID?: string | null): MutationLease | null => {
+    const lease = mutationCoordinator.acquireLease(kind, targetSessionID)
+    if (lease) bumpMutationLock((value) => value + 1)
+    return lease
+  }
+  const releaseMutation = (lease: MutationLease) => {
+    if (mutationCoordinator.releaseLease(lease)) bumpMutationLock((value) => value + 1)
+  }
+  // Keep the coordinator in lock-step with React after an externally-driven profile/config change.
+  // This is deliberately an effect, never a render side effect; event handlers below replace the
+  // context synchronously before starting navigation or a mutation.
+  useLayoutEffect(() => {
+    const context = { profileID: activeProfileID, configKey: configKey(config), sessionID: selectedID }
+    if (!mutationCoordinator.isContextCurrent(context)) replaceMutationContext(selectedID, activeProfileID, config)
+  }, [activeProfileID, config, selectedID, mutationCoordinator])
+  const mutationLocked = isSessionMutationLocked()
+  // Async session actions must never complete into a different server/profile or session. This is
+  // updated during render so an in-flight fork can compare against the user's latest context.
+  const activeContextRef = useRef({ profileID: activeProfileID, configKey: configKey(config), sessionID: selectedID })
+  activeContextRef.current = { profileID: activeProfileID, configKey: configKey(config), sessionID: selectedID }
   const showInspector = isDesktop && inspectorOpen && hasRoomForInspector && mainView === "detail" && Boolean(selectedID)
   // The persisted widths are the user's preference, changed only by dragging the divider. What is
   // actually laid out is that preference clamped to what this window can spare at this moment —
@@ -2218,6 +2577,15 @@ function App() {
   const [pickerError, setPickerError] = useState<string | null>(null)
   const [messages, setMessages] = useState<MessageEnvelope[]>([])
   const [optimisticUserMessages, setOptimisticUserMessages] = useState<MessageEnvelope[]>([])
+  /** Server-admitted but still queued prompts (from `GET /api/session/{id}/inbox`), rendered as
+   *  transcript rows with the queued indicator so they survive reconciliation. */
+  const [queuedInboxMessages, setQueuedInboxMessages] = useState<MessageEnvelope[]>([])
+  /** Inbox ids whose cancellation request is in flight, so the queued row's cancel control
+   *  disables itself instead of double-firing. A ReadonlySet keeps the reference stable across
+   *  unrelated renders, so the message-list memo is not defeated on every keystroke. */
+  const cancellingInboxIDsRef = useRef<ReadonlySet<string>>(new Set())
+  const [cancellingInboxIDs, setCancellingInboxIDs] = useState<ReadonlySet<string>>(() => new Set())
+  cancellingInboxIDsRef.current = cancellingInboxIDs
   const [todos, setTodos] = useState<TodoItem[]>([])
   const [diffFiles, setDiffFiles] = useState<DiffFile[]>([])
   const [pendingQuestions, setPendingQuestions] = useState<QuestionRequest[]>([])
@@ -2230,8 +2598,118 @@ function App() {
   const [query, setQuery] = useState("")
   const [composer, setComposer] = useState("")
   const [attachments, setAttachments] = useState<AttachmentPart[]>([])
+  /** H1: composer drafts and staged attachments parked per session, scoped to the current
+   *  profile/config namespace. A session-only switch parks the outgoing draft under its own key
+   *  and restores the incoming session's parked draft; only a profile/config change clears the
+   *  whole namespace. This mirrors the fork restore pattern (empty-composer guard, context
+   *  scoped) for plain navigation, so switching sessions never silently destroys unsent input. */
+  const sessionDraftsRef = useRef(new Map<string, { text: string; attachments: AttachmentPart[] }>())
+  /** M4: the fork snapshot survives reconcile exhaustion. The child could not be confirmed, but
+   *  the fork may still have committed server-side; keeping the snapshot here lets a later manual
+   *  open of the child restore it (see openSession), so the draft is never lost. Scoped to the
+   *  profile/config the fork ran in and consumed on restore. */
+  const pendingForkDraftRef = useRef<{
+    namespace: string
+    parentSessionID: string
+    parentDirectory: string
+    baselineChildIDs: Set<string>
+    text: string
+    attachments: AttachmentPart[]
+  } | null>(null)
+  function sessionDraftKey(profileID: string, configKeyValue: string, sessionID: string | null): string {
+    return `${profileID}\u0000${configKeyValue}\u0000${sessionID ?? ""}`
+  }
+  /** Retires a session's parked draft once its text has actually been sent: the composer was
+   *  flushed by the dispatch, so an older parked entry from a previous visit must not resurrect
+   *  the already-sent text on a session round-trip. Only called at commit boundaries, when the
+   *  send is confirmed (or, for skills, when the activation is later confirmed by poll). */
+  function clearParkedDraft(sessionID: string) {
+    sessionDraftsRef.current.delete(sessionDraftKey(activeProfileID, configKey(config), sessionID))
+  }
   const attachmentInputRef = useRef<HTMLInputElement | null>(null)
   const [busySending, setBusySending] = useState(false)
+  const [sessionActionPending, setSessionActionPending] = useState<"compact" | "fork" | null>(null)
+  const sessionActionPendingRef = useRef<"compact" | "fork" | null>(null)
+  sessionActionPendingRef.current = sessionActionPending
+  /** Tracks one in-flight compaction: the exact admission id when the acknowledgement confirmed it
+   *  (so terminal state is correlated to THAT request), the stable request id otherwise — the server
+   *  admits compaction durably under the client-supplied id, so the terminal compaction message
+   *  carries that same id in every path, including a lost acknowledgement or double-indeterminate
+   *  response — plus a bounded deadline for when the admission could not be established. No
+   *  baseline/any-terminal heuristic: only the exact admission/request id resolves the pending
+   *  state, so a later unrelated compaction can never release this one. */
+  const compactObservationRef = useRef<{
+    context: string
+    expectedID: string | null
+    startedAt: number
+    /** M5: true once the bounded deadline resolved the pending lock. The observation then becomes a
+     *  passive watcher: it no longer locks controls, but it keeps watching for the exact expected
+     *  compaction id so the terminal result is still announced instead of silently vanishing. */
+    passive: boolean
+  } | null>(null)
+  useEffect(() => {
+    const observation = compactObservationRef.current
+    if (!observation) return
+    const context = JSON.stringify({ profileID: activeProfileID, configKey: configKey(config), sessionID: selectedID })
+    if (observation.context !== context || !selectedID) {
+      // The compaction belongs to a context this view no longer owns. Clear the observation and the
+      // pending action so a stale compaction can never strand the global sessionActionPending.
+      if (compactObservationRef.current === observation) compactObservationRef.current = null
+      sessionActionPendingRef.current = null
+      setSessionActionPending(null)
+      return
+    }
+    const compactions = messages.filter((message) => message.info.type === "compaction")
+    // Exact correlation only: the terminal compaction message carries the same durable id the server
+    // admitted under, so only a message with the expected id may release the pending action.
+    const expected = observation.expectedID
+      ? compactions.find((message) => message.info.id === observation.expectedID)
+      : undefined
+    if (expected && (expected.info.compactionStatus === "completed" || expected.info.compactionStatus === "failed")) {
+      const terminal = expected.info.compactionStatus === "failed" ? t('detail.compactFailed') : t('detail.compactCompleted')
+      compactObservationRef.current = null
+      if (!observation.passive) {
+        sessionActionPendingRef.current = null
+        setSessionActionPending(null)
+        setActionNotice(terminal)
+      } else {
+        // M5: the deadline already released the pending lock. Only announce the terminal result —
+        // re-locking the controls (or re-enabling a duplicate compaction) would be wrong here.
+        setActionNotice(terminal)
+      }
+      return
+    }
+    // A passive watcher has no deadline of its own: the lock already resolved, and it only waits
+    // for the exact expected id to reach terminal state (or for the context to change).
+    if (observation.passive) return
+    // Bounded terminal recovery: the expected message never reached terminal state. Do not let the
+    // pending action (and the compact button) block forever — check inline on every message change
+    // AND schedule a timer for a quiet session that stops changing.
+    const remaining = COMPACTION_PENDING_MAX_MS - (Date.now() - observation.startedAt)
+    if (remaining <= 0) {
+      // M5: resolve the lock but keep the observation as a passive watcher on the exact id.
+      observation.passive = true
+      sessionActionPendingRef.current = null
+      setSessionActionPending(null)
+      setActionNotice(t('detail.compactUnconfirmed'))
+      return
+    }
+    const deadlineTimer = setTimeout(() => {
+      const active = compactObservationRef.current
+      if (!active || active !== observation || sessionActionPendingRef.current !== "compact") return
+      active.passive = true
+      sessionActionPendingRef.current = null
+      setSessionActionPending(null)
+      setActionNotice(t('detail.compactUnconfirmed'))
+    }, remaining)
+    return () => clearTimeout(deadlineTimer)
+  }, [activeProfileID, config, messages, selectedID, sessionActionPending, t])
+  const forkFocusSessionRef = useRef<string | null>(null)
+  const forkReconcilingRef = useRef(false)
+  /** Skill activations whose 204 acknowledgement was lost: keyed by the original request id (which
+   *  the projected skill message carries, see `Session.skill`), so a later poll can confirm the
+   *  activation by exact id instead of retrying the unsafe duplicate admission. */
+  const pendingSkillRequestsRef = useRef(new Map<string, { sessionID: string; skillName: string }>())
   const [activatingSkill, setActivatingSkill] = useState<string | null>(null)
   const [loadingSessionID, setLoadingSessionID] = useState<string | null>(null)
   /** The empty transcript state is only meaningful after this session's first history snapshot succeeds. */
@@ -2241,6 +2719,8 @@ function App() {
   const [testingConnection, setTestingConnection] = useState(false)
   const [creatingSession, setCreatingSession] = useState(false)
   const [refreshingSessions, setRefreshingSessions] = useState(false)
+  const refreshingSessionsRef = useRef(false)
+  refreshingSessionsRef.current = refreshingSessions
   const [awaitingAssistantReply, setAwaitingAssistantReply] = useState(false)
   const [settingsNotice, setSettingsNotice] = useState<{ type: NoticeType; text: string } | null>(null)
   const [runtimeError, setRuntimeError] = useState<string | null>(null)
@@ -2267,7 +2747,15 @@ function App() {
   const messagesEndRef = useRef<HTMLDivElement | null>(null)
   const composerRef = useRef<HTMLDivElement | null>(null)
   const composerInputRef = useRef<HTMLTextAreaElement | null>(null)
+  const detailHeadingRef = useRef<HTMLHeadingElement | null>(null)
   const searchInputRef = useRef<HTMLInputElement | null>(null)
+  useLayoutEffect(() => {
+    if (forkFocusSessionRef.current !== selectedID || !selectedID || mainView !== "detail") return
+    // Focus the heading rather than the textarea: this gives both desktop and mobile users a
+    // deterministic announcement without unexpectedly opening a soft keyboard on mobile.
+    detailHeadingRef.current?.focus()
+    forkFocusSessionRef.current = null
+  }, [mainView, selectedID])
   // Both gate on mainView, not view: on desktop, picking a session leaves view === "sessions" while
   // the chat is what's actually rendered, so gating on view left the buttons permanently inactive.
   const [jumpAffordances, refreshChatJumps] = useJumpAffordances(mainView === "detail", () =>
@@ -2290,10 +2778,24 @@ function App() {
   const wasRunningRef = useRef(false)
   const awaitingAssistantBaselineRef = useRef("")
   const loadSelectedRequestRef = useRef(0)
+  const loadCommandsRequestRef = useRef(0)
+  const loadAgentsRequestRef = useRef(0)
   const loadModelsRequestRef = useRef(0)
+  const refreshRequestRef = useRef(0)
+  const refreshIndicatorRequestRef = useRef(0)
+  const activityRequestRef = useRef(0)
   const backgroundFailureCountRef = useRef(0)
   const initialSessionLoadRef = useRef(true)
   const latestMessageTimesRef = useRef(new Map<string, { sessionUpdated: number; activityTime: number }>())
+  // Deletes are eventual-consistency tombstones. Keep them per profile/config namespace so
+  // leaving a profile and coming back does not resurrect a row, while a different server can
+  // legitimately have a session with the same id.
+  const removedSessionIDsRef = useRef(new Map<string, Set<string>>())
+  const tombstonesHydratedRef = useRef(false)
+  if (!tombstonesHydratedRef.current) {
+    for (const [key, ids] of readSessionTombstones()) removedSessionIDsRef.current.set(key, ids)
+    tombstonesHydratedRef.current = true
+  }
   const selectedSessionRef = useRef<SessionView | null>(null)
   /** The session `openSession` is currently working on, so its retry can tell it is still wanted. */
   const openingSessionRef = useRef<string | null>(null)
@@ -2370,6 +2872,9 @@ function App() {
     if (commandFilter === "skill") return commands.filter((command) => command.source === "skill")
     return commands
   }, [commands, commandFilter])
+  const isSessionRunning = Boolean(selectedSession && isSessionWorking(selectedSession.status))
+  const isWorking = awaitingAssistantReply || busySending || isSessionRunning
+  // revertDisabled={sessionActionPending === "fork"}
   const messageMenuActions = useMemo(() => {
     const supported = new Set(commands.map((command) => command.name.toLowerCase()))
     const actions: MessageMenuAction[] = []
@@ -2382,10 +2887,10 @@ function App() {
     const hasRedo = config.backend === "opencode" || config.backend === "opencode2" ? !!revertMessageID : redoAction ? redoAction.enabled : true
     const supportsUndo = config.backend === "opencode" || config.backend === "opencode2" || !!undoAction || supported.has("undo")
     const supportsRedo = config.backend === "opencode" || config.backend === "opencode2" || !!redoAction || supported.has("redo")
-    if (supportsUndo && hasUndo) actions.push({ id: "undo", label: t('detail.undo'), onSelect: () => void runNativeHistoryCommand("undo") })
-    if (supportsRedo && hasRedo) actions.push({ id: "redo", label: t('detail.redo'), onSelect: () => void runNativeHistoryCommand("redo") })
+    if (supportsUndo && hasUndo) actions.push({ id: "undo", label: t('detail.undo'), disabled: mutationLocked || sessionActionPending !== null, disabledReason: mutationLocked || sessionActionPending !== null ? t('detail.actionLocked') : undefined, onSelect: () => void runNativeHistoryCommand("undo") })
+    if (supportsRedo && hasRedo) actions.push({ id: "redo", label: t('detail.redo'), disabled: mutationLocked || sessionActionPending !== null, disabledReason: mutationLocked || sessionActionPending !== null ? t('detail.actionLocked') : undefined, onSelect: () => void runNativeHistoryCommand("redo") })
     return actions
-  }, [commands, config.backend, extensionActions, messages, selectedSession?.revertMessageID, t])
+  }, [commands, config.backend, extensionActions, messages, mutationLocked, selectedSession?.revertMessageID, sessionActionPending, t])
   /** Session-level actions for the header ⋯ menu. Unlike the message context menu, availability
    *  follows the harness/extension's own enabled state rather than the transcript contents: an
    *  Undo that empties the conversation leaves Redo enabled but with no bubble left to host a menu,
@@ -2396,23 +2901,48 @@ function App() {
     const revertMessageID = selectedSession?.revertMessageID
     const undoAction = extensionActions.find((action) => action.id === "undo")
     const redoAction = extensionActions.find((action) => action.id === "redo")
+    // M8: availability counts every visible user row (history, optimistic bubble, queued inbox),
+    // so a just-sent or queued prompt keeps Compact/Fork reachable.
+    const hasUserMessage = hasAnyUserMessage(messages, optimisticUserMessages, queuedInboxMessages)
+    // M7: a disabled item must be able to explain itself in its tooltip. The lock and pending
+    // action win over every other reason; compact/fork additionally need a user message and an
+    // idle agent. mutationLocked is intentionally additive so every lease also disables them.
+    const lockedReason = t('detail.actionLocked')
+    const emptyReason = t('detail.requiresUserMessage')
+    const workingReason = t('detail.actionWhileWorking')
+    const disabledReasonFor = (extraDisabled: boolean): string | undefined => {
+      if (extraDisabled) {
+        if (mutationLocked || sessionActionPending !== null) return lockedReason
+        if (!hasUserMessage) return emptyReason
+        return workingReason
+      }
+      return undefined
+    }
     const hasUndo = config.backend === "opencode" || config.backend === "opencode2"
       ? messages.some((message) => message.info.role === "user" && (!revertMessageID || message.info.id < revertMessageID))
       : undoAction ? undoAction.enabled : supported.has("undo")
     const hasRedo = config.backend === "opencode" || config.backend === "opencode2" ? !!revertMessageID : redoAction ? redoAction.enabled : supported.has("redo")
-    if (hasUndo) actions.push({ id: "undo", label: t('detail.undo'), onSelect: () => void runNativeHistoryCommand("undo") })
-    if (hasRedo) actions.push({ id: "redo", label: t('detail.redo'), onSelect: () => void runNativeHistoryCommand("redo") })
+     if (hasUndo) actions.push({ id: "undo", label: t('detail.undo'), disabled: mutationLocked || sessionActionPending !== null, disabledReason: disabledReasonFor(mutationLocked || sessionActionPending !== null), onSelect: () => void runNativeHistoryCommand("undo") })
+     if (hasRedo) actions.push({ id: "redo", label: t('detail.redo'), disabled: mutationLocked || sessionActionPending !== null, disabledReason: disabledReasonFor(mutationLocked || sessionActionPending !== null), onSelect: () => void runNativeHistoryCommand("redo") })
+    if (selectedSession && config.backend === "opencode2" && capabilities.compactSession) {
+      const compactDisabled = mutationLocked || sessionActionPending !== null || !hasUserMessage || isWorking || busySending
+       actions.push({ id: "compact", label: t('detail.compactSession'), disabled: compactDisabled, disabledReason: disabledReasonFor(compactDisabled), onSelect: () => void compactCurrentSession() })
+    }
+    if (selectedSession && config.backend === "opencode2" && capabilities.forkSession) {
+      const forkDisabled = mutationLocked || sessionActionPending !== null || !hasUserMessage || isWorking || busySending
+       actions.push({ id: "fork", label: t('detail.forkSession'), disabled: forkDisabled, disabledReason: disabledReasonFor(forkDisabled), onSelect: () => void forkCurrentSession() })
+    }
     return actions
-  }, [commands, config.backend, extensionActions, messages, selectedSession?.revertMessageID, t])
+  }, [awaitingAssistantReply, busySending, capabilities.compactSession, capabilities.forkSession, commands, config.backend, extensionActions, isWorking, messages, optimisticUserMessages, queuedInboxMessages, selectedSession, sessionActionPending, t, mutationLocked])
   const selectedNewSessionDirectory = normalizeDirectory(newSessionDirectory)
 
   const renderedMessages = useMemo(() => {
     const revertMessageID = config.backend === "opencode" || config.backend === "opencode2" ? selectedSession?.revertMessageID : undefined
-    return [...messages, ...optimisticUserMessages]
+    return [...messages, ...optimisticUserMessages, ...queuedInboxMessages]
       .filter((message) => !revertMessageID || message.info.id < revertMessageID)
       .map(toRenderedMessage)
       .filter((message) => message.text || message.parts.some((part) => part.type !== "step-start" && part.type !== "step-finish"))
-  }, [config.backend, messages, optimisticUserMessages, selectedSession?.revertMessageID])
+  }, [config.backend, messages, optimisticUserMessages, queuedInboxMessages, selectedSession?.revertMessageID])
 
   const timelineGroups = useMemo(() => groupRenderedMessages(renderedMessages), [renderedMessages])
 
@@ -2455,10 +2985,25 @@ function App() {
         : eventStreamState === "fallback"
           ? t('events.fallback', { error: liveEventError ?? t('events.unknownError') })
           : ""
-  const isSessionRunning = Boolean(selectedSession && isSessionWorking(selectedSession.status))
   const isWaitingForOpenCodeReply = awaitingAssistantReply || busySending || isSessionRunning
-  const isWorking = isWaitingForOpenCodeReply
-  const showStopAction = isWorking && !composer.trim() && attachments.length === 0
+  // Stop is the one deliberate out-of-band action allowed to overlap a working turn. It may
+  // interrupt prompt/command/skill work, but never competes with an unrelated structural mutation.
+  const activeWorkingLease = mutationCoordinator.getActiveLease()
+  const currentAbortContext = { profileID: activeProfileID, configKey: configKey(config), sessionID: selectedID }
+  const currentAbortKey = `${currentAbortContext.profileID}\u0000${currentAbortContext.configKey}\u0000${currentAbortContext.sessionID ?? ""}`
+  const canAbortSession = Boolean(selectedSession && isWorking
+    && !abortInFlightRef.current.has(currentAbortKey)
+    && abortPresentationContext !== currentAbortKey
+    && (!activeWorkingLease
+      || (activeWorkingLease.context.profileID === currentAbortContext.profileID
+        && activeWorkingLease.context.configKey === currentAbortContext.configKey
+        && activeWorkingLease.context.sessionID === currentAbortContext.sessionID
+        && activeWorkingLease.targetSessionID === selectedSession.id
+        && (activeWorkingLease.kind === "prompt" || activeWorkingLease.kind === "command" || activeWorkingLease.kind === "skill"))))
+  // Stopping is an out-of-band action, so it must stay reachable while a draft is present. The
+  // draft remains in the composer; changing the action to Stop must never make an interruption
+  // destructive on either mobile or desktop.
+  const showStopAction = canAbortSession
   const showTypingBubble = Boolean(selectedSession) && isWaitingForOpenCodeReply
   const activeSessions = sessions.filter((session) => isSessionWorking(session.status)).length
   const changedSessions = sessions.filter(
@@ -2486,7 +3031,27 @@ function App() {
       : modelLoadError ? t('detail.modelUnavailable') : t('detail.modelLoading'))
 
   async function openSession(sessionID: string, directory: string) {
+    replaceMutationContext(sessionID)
+    const openContextGeneration = mutationCoordinator.getContextGeneration()
+    const openContext = { profileID: activeProfileID, configKey: configKey(config), sessionID }
+    const isCurrentOpen = () => mutationCoordinator.isContextGenerationCurrent(openContextGeneration)
+      && mutationCoordinator.isContextCurrent(openContext)
     setSelectedID(sessionID)
+    // M4: restore a preserved fork draft when the child is subsequently opened manually. Only
+    // when the open stays in the fork's profile/config, targets a session that is not the fork's
+    // parent and not part of the pre-fork baseline, and matches the fork's directory; and only
+    // into an empty composer/attachment tray (the empty-composer guard from the fork restore
+    // pattern), so anything the user typed meanwhile is never overwritten. Consumed on restore.
+    const pendingForkDraft = pendingForkDraftRef.current
+    if (pendingForkDraft
+      && pendingForkDraft.namespace === `${activeProfileID}\u0000${configKey(config)}`
+      && sessionID !== pendingForkDraft.parentSessionID
+      && !pendingForkDraft.baselineChildIDs.has(sessionID)
+      && directory === pendingForkDraft.parentDirectory) {
+      pendingForkDraftRef.current = null
+      setComposer((current) => (current === "" ? pendingForkDraft.text : current))
+      setAttachments((current) => (current.length === 0 ? pendingForkDraft.attachments : current))
+    }
     setSelectedModelKey(readStoredModel(config.backend, sessionID))
     loadModelsRequestRef.current += 1
     setModelOptions([])
@@ -2515,23 +3080,27 @@ function App() {
         // connection is common enough that it was the usual way this screen failed. Announcing it
         // immediately made the app look broken for the second it took to come good on its own, so
         // one quiet retry comes first and only a second failure is worth telling anyone about.
-        if (openingSessionRef.current !== sessionID) throw first
+        if (openingSessionRef.current !== sessionID || !isCurrentOpen()) throw first
         await new Promise((resolve) => setTimeout(resolve, 600))
-        if (openingSessionRef.current !== sessionID) throw first
+        if (openingSessionRef.current !== sessionID || !isCurrentOpen()) throw first
         await loadSelected(sessionID, directory, true)
       }
-      await Promise.all([loadAgents(), loadModels(sessionID, directory)])
+      await Promise.all([loadAgents(sessionID, directory), loadModels(sessionID, directory)])
     } catch (err) {
       const message = (err as Error).message
-      setRuntimeError(message)
-      setLoadFailure({ sessionID, message })
+      if (isCurrentOpen()) {
+        setRuntimeError(message)
+        setLoadFailure({ sessionID, message })
+      }
     }
-    setLoadingSessionID((activeID) => (activeID === sessionID ? null : activeID))
+    if (isCurrentOpen()) setLoadingSessionID((activeID) => (activeID === sessionID ? null : activeID))
   }
 
   function applyConfig(nextConfig: ServerConfig, profileID = activeProfileID, sourceProfiles = profiles) {
+    replaceMutationContext(null, profileID, nextConfig)
     const serverChanged = configKey(nextConfig) !== configKey(config)
-    if (serverChanged) {
+    const profileChanged = profileID !== activeProfileID
+    if (serverChanged || profileChanged) {
       loadSelectedRequestRef.current += 1
       loadModelsRequestRef.current += 1
       autoSelectAttemptedRef.current = false
@@ -2612,6 +3181,12 @@ function App() {
 
   async function refreshSessions(silent = false, preserveSession?: SessionView, suppressError = false): Promise<boolean> {
     if (!isValidServerConfig(config)) return true
+    const refreshRequestID = ++refreshRequestRef.current
+    const refreshContextGeneration = mutationCoordinator.getContextGeneration()
+    const refreshContext = { profileID: activeProfileID, configKey: configKey(config), sessionID: selectedID }
+    const refreshIsCurrent = () => refreshRequestID === refreshRequestRef.current
+      && mutationCoordinator.isContextGenerationCurrent(refreshContextGeneration)
+      && mutationCoordinator.isContextCurrent(refreshContext)
     if (!silent) {
       setRuntimeError(null)
       setConnectionState(sessions.length === 0 ? "connecting" : "reconnecting")
@@ -2621,7 +3196,11 @@ function App() {
       setConnectionMessage(t('connection.loadingSessions'))
     }
     try {
-      const items = await api.listGlobalSessions(config).catch(() => api.listSessions(config))
+      let authoritativeGlobalListing = true
+      const items = await api.listGlobalSessions(config).catch(async () => {
+        authoritativeGlobalListing = false
+        return api.listSessions(config)
+      })
       // OpenCode scopes both of these to a project directory, so each one has to be asked
       // separately. The bridge does not: called without a directory it answers for every session it
       // knows. Fanning out there turned one refresh into two requests per distinct directory — over
@@ -2643,9 +3222,37 @@ function App() {
       const statuses = Object.assign({}, ...statusMaps)
       const hydratedItems = items.map((session) => ({ ...session, ...scopedSessions.get(session.id), project: session.project }))
       const activityTimes = await loadSessionActivityTimes(hydratedItems)
+      const tombstoneKey = refreshContext.profileID + "\u0000" + refreshContext.configKey
+      const persistedTombstoneKey = tombstoneNamespaceKey(refreshContext.profileID, refreshContext.configKey)
+      const tombstones = mergedSessionTombstones(removedSessionIDsRef.current, tombstoneKey, persistedTombstoneKey)
       const mapped = hydratedItems
         .map((session) => toSessionView(session, statuses[session.id], activityTimes.get(session.id)))
+        .filter((session) => !tombstones.has(session.id))
         .sort((a, b) => b.updated - a.updated)
+      // A profile/session switch, or a fork that started while this fan-out was in flight, makes
+      // this snapshot historical. Never let it replace a newer list (especially the just-inserted
+      // child row).
+      if (!refreshIsCurrent()) return true
+      // Retirement needs both halves of the proof: the global endpoint really answered, and this
+      // refresh still belongs to the current context/generation. Scoped fallbacks and stale
+      // snapshots may hide rows, but can never erase durable deletion evidence.
+      if (authoritativeGlobalListing) {
+        const authoritativeIDs = new Set(hydratedItems.map((session) => session.id))
+        let tombstonesChanged = false
+        for (const id of [...tombstones]) {
+          if (!authoritativeIDs.has(id)) { tombstones.delete(id); tombstonesChanged = true }
+        }
+        if (tombstonesChanged) {
+          if (tombstones.size) {
+            removedSessionIDsRef.current.set(tombstoneKey, tombstones)
+            removedSessionIDsRef.current.set(persistedTombstoneKey, tombstones)
+          } else {
+            removedSessionIDsRef.current.delete(tombstoneKey)
+            removedSessionIDsRef.current.delete(persistedTombstoneKey)
+          }
+          persistSessionTombstones(removedSessionIDsRef.current)
+        }
+      }
       setSessions((current) => {
         // `current` is the list this refresh started from, so a session opened moments ago may not
         // be in it yet; the ref holds what is actually on screen. Falling back to `current` alone
@@ -2656,11 +3263,17 @@ function App() {
             ?? (selectedSessionRef.current?.id === selectedID ? selectedSessionRef.current : null)
           : null
         const toPreserve = preserveSession ?? selected
-        const next = !toPreserve || mapped.some((session) => session.id === toPreserve.id)
-          ? mapped
-          : [toPreserve, ...mapped].sort((a, b) => b.updated - a.updated)
+        const activeLease = mutationCoordinator.getActiveLease()
+        const optimisticRows = activeLease?.kind === "fork" || activeLease?.kind === "create"
+          ? current.filter((session) => !mapped.some((item) => item.id === session.id))
+          : []
+        const preserved = toPreserve && !mapped.some((session) => session.id === toPreserve.id) ? [toPreserve] : []
+        const next = [...mapped, ...optimisticRows, ...preserved]
+          .filter((session, index, all) => all.findIndex((item) => item.id === session.id) === index)
+          .sort((a, b) => b.updated - a.updated)
         return keepIfUnchanged(current, next)
       })
+      if (!refreshIsCurrent()) return true
       backgroundFailureCountRef.current = 0
       initialSessionLoadRef.current = false
       setConnectionState("connected")
@@ -2669,6 +3282,7 @@ function App() {
       return true
     } catch (err) {
       const message = (err as Error).message
+      if (!refreshIsCurrent()) return true
       if (suppressError) return false
       if (!silent) {
         setConnectionState("offline")
@@ -2696,32 +3310,53 @@ function App() {
   }
 
   async function refreshSessionsWithIndicator() {
-    if (refreshingSessions) return
+    if (refreshingSessionsRef.current) return
+    const generation = mutationCoordinator.getContextGeneration()
+    const context = { profileID: activeProfileID, configKey: configKey(config), sessionID: selectedID }
+    const indicatorRequestID = ++refreshIndicatorRequestRef.current
+    refreshingSessionsRef.current = true
     setRefreshingSessions(true)
     try {
       await refreshSessions()
     } finally {
-      setRefreshingSessions(false)
+      if (indicatorRequestID === refreshIndicatorRequestRef.current
+        && mutationCoordinator.isContextGenerationCurrent(generation)
+        && mutationCoordinator.isContextCurrent(context)) {
+        refreshingSessionsRef.current = false
+        setRefreshingSessions(false)
+      }
     }
   }
 
   async function loadCommands() {
     if (!isValidServerConfig(config)) return
+    const requestID = ++loadCommandsRequestRef.current
+    const generation = mutationCoordinator.getContextGeneration()
+    const context = { profileID: activeProfileID, configKey: configKey(config), sessionID: selectedID }
+    const current = () => requestID === loadCommandsRequestRef.current
+      && mutationCoordinator.isContextGenerationCurrent(generation)
+      && mutationCoordinator.isContextCurrent(context)
     try {
       const list = await api.listCommands(config)
+      if (!current()) return
       setCommands(list)
     } catch {
+      if (!current()) return
       setCommands([])
     }
   }
 
-  async function loadAgents() {
+  async function loadAgents(sessionID = selectedSession?.id, directory = selectedSession?.directory ?? selectedNewSessionDirectory) {
     if (!isValidServerConfig(config) || !capabilities.agents) {
       setAgentOptions([])
       return
     }
+    const requestID = ++loadAgentsRequestRef.current
+    const generation = mutationCoordinator.getContextGeneration()
+    const context = { profileID: activeProfileID, configKey: configKey(config), sessionID: sessionID ?? selectedID }
     try {
-      const list = await api.listAgents(config, selectedSession?.directory ?? selectedNewSessionDirectory)
+      const list = await api.listAgents(config, directory)
+       if (requestID !== loadAgentsRequestRef.current || !mutationCoordinator.isContextGenerationCurrent(generation) || !mutationCoordinator.isContextCurrent(context)) return
       setAgentOptions(list)
       setAgentLoadError(null)
       const saved = localStorage.getItem(AGENT_STORAGE_KEY) || selectedAgentID
@@ -2732,16 +3367,21 @@ function App() {
         localStorage.setItem(AGENT_STORAGE_KEY, next.id)
       }
     } catch (err) {
-      setAgentLoadError((err as Error).message)
+      if (requestID === loadAgentsRequestRef.current && mutationCoordinator.isContextGenerationCurrent(generation) && mutationCoordinator.isContextCurrent(context)) setAgentLoadError((err as Error).message)
     }
   }
 
   async function loadModels(sessionID = selectedSession?.id, directory = selectedSession?.directory ?? selectedNewSessionDirectory) {
     if (!isValidServerConfig(config) || !capabilities.models) return
     const requestID = ++loadModelsRequestRef.current
+    const generation = mutationCoordinator.getContextGeneration()
+    const context = { profileID: activeProfileID, configKey: configKey(config), sessionID: sessionID ?? selectedID }
+    const current = () => requestID === loadModelsRequestRef.current
+      && mutationCoordinator.isContextGenerationCurrent(generation)
+      && mutationCoordinator.isContextCurrent(context)
     try {
       const list = await api.listModels(config, directory, backendClient.modelSelectionRequiresSession ? sessionID : undefined)
-      if (requestID !== loadModelsRequestRef.current) return
+      if (!current()) return
       setModelOptions(list)
       setModelLoadError(null)
       const sessionModel = sessions.find((session) => session.id === sessionID)?.model
@@ -2766,68 +3406,126 @@ function App() {
         writeStoredModel(config.backend, sessionID, nextKey)
       }
     } catch (err) {
-      if (requestID === loadModelsRequestRef.current) setModelLoadError((err as Error).message)
+      if (current()) setModelLoadError((err as Error).message)
     }
   }
 
   async function loadSessionActivityTimes(items: Session[]): Promise<Map<string, number>> {
+    const activityRequestID = ++activityRequestRef.current
+    const activityGeneration = mutationCoordinator.getContextGeneration()
+    const activityContext = { profileID: activeProfileID, configKey: configKey(config), sessionID: selectedID }
+    const activityIsCurrent = () => activityRequestID === activityRequestRef.current
+      && mutationCoordinator.isContextGenerationCurrent(activityGeneration)
+      && mutationCoordinator.isContextCurrent(activityContext)
     if (config.backend !== "opencode") {
       return new Map(items.map((session) => [session.id, session.time.updated]))
     }
     const results = await Promise.all(items.map(async (session) => {
-      const cached = latestMessageTimesRef.current.get(session.id)
+      const cacheKey = `${activityContext.profileID}|${activityContext.configKey}|${session.id}`
+      const cached = latestMessageTimesRef.current.get(cacheKey)
       if (cached?.sessionUpdated === session.time.updated) return [session.id, cached.activityTime] as const
 
       const latest = await api.loadLatestMessage(config, session.id, session.directory).catch(() => null)
       if (latest === null) return [session.id, session.time.updated] as const
       const activityTime = latest.length > 0 ? Math.max(...latest.map(messageActivityTime)) : session.time.updated
-      latestMessageTimesRef.current.set(session.id, { sessionUpdated: session.time.updated, activityTime })
+       // The request may finish after navigation. Never let its response repopulate a cache that was
+       // synchronously cleared for another profile/config/session.
+       if (activityIsCurrent()) latestMessageTimesRef.current.set(cacheKey, { sessionUpdated: session.time.updated, activityTime })
       return [session.id, activityTime] as const
     }))
     return new Map(results)
   }
 
   function changeModel(nextKey: string) {
+    if (isSessionMutationLocked()) return
+    const lease = acquireMutation("model")
+    if (!lease) return
+    // A manual choice wins over a catalog request that was already in flight. The request's
+    // response may still be useful for a later refresh, but it must not restore its old selection.
+    loadModelsRequestRef.current += 1
     setSelectedModelKey(nextKey)
     writeStoredModel(config.backend, selectedSession?.id, nextKey)
+    releaseMutation(lease)
   }
 
   function changeAgent(nextAgentID: string) {
+    if (isSessionMutationLocked()) return
+    const lease = acquireMutation("agent")
+    if (!lease) return
+    // Do not let an older agent catalog completion apply its saved/default choice after an explicit
+    // user selection.
+    loadAgentsRequestRef.current += 1
     setSelectedAgentID(nextAgentID)
     localStorage.setItem(AGENT_STORAGE_KEY, nextAgentID)
+    releaseMutation(lease)
   }
 
   async function loadSelected(sessionID: string, directory: string, refreshHistory = false, replaceMessages = false) {
     const requestID = ++loadSelectedRequestRef.current
-    const [msg, todo, diff, questions, permissions, actions] = await Promise.all([
+    const loadContext = { profileID: activeProfileID, configKey: configKey(config), sessionID }
+    const loadContextGeneration = mutationCoordinator.getContextGeneration()
+    const isCurrentLoad = () => requestID === loadSelectedRequestRef.current
+      && mutationCoordinator.isContextGenerationCurrent(loadContextGeneration)
+      && mutationCoordinator.isContextCurrent(loadContext)
+    const [msg, todo, diff, questions, permissions, actions, inbox] = await Promise.all([
       api.loadMessages(config, sessionID, directory, backendClient.messageRefreshSupported && refreshHistory),
       capabilities.todos ? api.loadTodo(config, sessionID, directory) : Promise.resolve([]),
       capabilities.diff ? api.loadDiff(config, sessionID, directory).catch(() => []) : Promise.resolve([]),
       capabilities.questions ? api.loadQuestions(config, directory).catch(() => []) : Promise.resolve([]),
       capabilities.permissions ? api.loadPermissions(config, directory).catch(() => []) : Promise.resolve([]),
-      capabilities.actions ? api.listActions(config, sessionID, directory).catch(() => []) : Promise.resolve([])
+      capabilities.actions ? api.listActions(config, sessionID, directory).catch(() => []) : Promise.resolve([]),
+      config.backend === "opencode2"
+        ? listInboxV2(config, sessionID, directory).catch(() => [])
+        : Promise.resolve([] as V2InboxItem[])
     ])
     if (requestID !== loadSelectedRequestRef.current) return
+    if (!isCurrentLoad()) return
     setLoadedSessionID(sessionID)
     // Background polling keeps running after a failed open, so a session that only failed once must
     // not stay stuck on the failure state once its history does arrive.
     setLoadFailure((failure) => (failure?.sessionID === sessionID ? null : failure))
     const current = loadedMessagesRef.current
+    // The server admits queued prompts durably before delivering them: overlay the inbox's delivery
+    // metadata on messages that reached history (their queued indicator survives reconciliation) and
+    // render inbox-only queued items as stable transcript rows (see queuedInboxMessageEnvelopes).
+    const transcript = config.backend === "opencode2" ? applyInboxDelivery(msg, inbox) : msg
+    const queuedRows = config.backend === "opencode2"
+      ? queuedInboxMessageEnvelopes(sessionID, inbox, new Set(transcript.map((message) => message.info.id)))
+      : []
     // A snapshot carrying less assistant text than is already on screen used to be rejected wholesale, to
     // avoid erasing streamed content. But the optimistic user bubble below is cleared against this same
     // snapshot either way, so rejecting it made a just-sent message vanish — and since the rejected
     // snapshot never reached state, the comparison stayed true and swallowed every later message too,
     // until the session was reopened. Shrinking text is now held back per part in mergeFetchedMessages
     // instead, which keeps the streamed text without ever dropping the messages that came with it.
-    if (!messagesHaveSameContent(current, msg)) {
-      shouldAutoScrollRef.current = messagesExtendContent(current, msg) && isNearMessagesBottom()
-      loadedMessagesRef.current = msg
-      setMessages((prev) => replaceMessages ? msg : mergeFetchedMessages(prev, msg))
+    if (!messagesHaveSameContent(current, transcript)) {
+      shouldAutoScrollRef.current = messagesExtendContent(current, transcript) && isNearMessagesBottom()
+      loadedMessagesRef.current = transcript
+      setMessages((prev) => replaceMessages ? transcript : mergeFetchedMessages(prev, transcript))
     }
+    // A prompt the server has durably admitted (in history or still queued in the inbox) retires the
+    // app's own optimistic bubble for the same text.
+    const optimisticMatchSource = [...transcript, ...queuedRows]
     setOptimisticUserMessages((current) => {
-      const remaining = current.filter((message) => !hasMatchingUserMessage(msg, message))
+      const remaining = current.filter((message) => !hasMatchingUserMessage(optimisticMatchSource, message))
       return remaining.length === current.length ? current : remaining
     })
+    // A skill activation whose 204 acknowledgement was lost is confirmed when the projected skill
+    // message — which carries the original request id — appears in history. The tagged optimistic
+    // row was retired by that exact id above; announce the confirmation once, when it lands.
+    if (pendingSkillRequestsRef.current.size > 0) {
+      for (const [requestID, entry] of pendingSkillRequestsRef.current) {
+        if (entry.sessionID !== sessionID) continue
+        if (transcript.some((message) => message.info.id === requestID)) {
+          pendingSkillRequestsRef.current.delete(requestID)
+          // The activation is confirmed; the composer was flushed for it, so the session's
+          // parked draft must not resurrect the activation text on a later round-trip.
+          clearParkedDraft(sessionID)
+          if (isCurrentLoad()) setActionNotice(t('help.skillActivated', { skill: entry.skillName }))
+        }
+      }
+    }
+    setQueuedInboxMessages((current) => keepIfUnchanged(current, queuedRows))
     setTodos((current) => keepIfUnchanged(current, todo))
     setDiffFiles((current) => keepIfUnchanged(current, diff))
     setPendingQuestions((current) => keepIfUnchanged(current, questions.filter((question) => question.sessionID === sessionID)))
@@ -2839,7 +3537,7 @@ function App() {
     // answering again. Spaced out because some failures are permanent rather than transient: Codex
     // will not list models for a conversation another client holds open, and retrying that on every
     // poll would be a request every few seconds for an answer that is not going to change.
-    if (capabilities.models && modelLoadErrorRef.current) {
+    if (capabilities.models && modelLoadErrorRef.current && isCurrentLoad()) {
       const lastAttempt = modelRetryRef.current
       if (lastAttempt?.sessionID !== sessionID || Date.now() - lastAttempt.at > 30_000) {
         modelRetryRef.current = { sessionID, at: Date.now() }
@@ -2849,13 +3547,16 @@ function App() {
     // A bridge-backed harness only advertises its commands once a session is loaded, so the
     // mount-time fetch of an idle bridge legitimately returns []. Retry here rather than in each
     // of loadSelected's callers, otherwise Help -> Commands stays empty for the whole visit.
-    if (capabilities.commands && commands.length === 0) await loadCommands()
-    await loadProjectDashboard(directory)
+    // if (capabilities.commands && commands.length === 0) await loadCommands()
+    if (capabilities.commands && commands.length === 0 && isCurrentLoad()) await loadCommands()
+    if (isCurrentLoad()) await loadProjectDashboard(directory, loadContextGeneration, loadContext)
   }
 
   async function runNativeHistoryCommand(command: "undo" | "redo") {
-    if (!selectedSession || busySending) return
+    if (!selectedSession || busySending || sessionActionPending !== null || isSessionMutationLocked()) return
     if (command === "undo" && !window.confirm(t('detail.undoConfirm'))) return
+    const lease = acquireMutation("history")
+    if (!lease) return
 
     setBusySending(true)
     setRuntimeError(null)
@@ -2877,6 +3578,7 @@ function App() {
         }
       } else if (capabilities.actions && extensionActions.some((action) => action.id === command)) {
         const result = await api.invokeAction(config, selectedSession.id, command, selectedSession.directory)
+        if (!isLeaseContextCurrent(lease)) return
         setExtensionActions(result.actions)
         if (result.applied === false) {
           setActionNotice(t(command === "undo" ? 'detail.nothingToUndo' : 'detail.nothingToRedo'))
@@ -2886,41 +3588,289 @@ function App() {
         await api.sendCommand(config, selectedSession.id, command, "", selectedSession.directory, activeModel, activeAgentID)
         await loadSelected(selectedSession.id, selectedSession.directory, true)
       }
+      if (!isLeaseContextCurrent(lease) || !mutationCoordinator.isForkGenerationCurrent(lease.forkGeneration)) return
       if (config.backend === "opencode" || config.backend === "opencode2") await loadSelected(selectedSession.id, selectedSession.directory, true)
       await refreshSessions(true)
       if (revertedSession) {
         setSessions((current) => current.map((item) => item.id === revertedSession.id ? { ...item, revertMessageID: revertedSession.revert?.messageID } : item))
       }
     } catch (err) {
-      setRuntimeError((err as Error).message)
+      if (isLeaseContextCurrent(lease)) setRuntimeError((err as Error).message)
     } finally {
-      setBusySending(false)
+      if (isLeaseContextCurrent(lease)) {
+        setBusySending(false)
+      }
+      releaseMutation(lease)
+    }
+  }
+
+  /** Compact is a queued current-session action: it must not replace the selected session. */
+  async function compactCurrentSession() {
+    if (config.backend !== "opencode2" || !selectedSession || sessionActionPending || sessionActionPendingRef.current || isWorking || busySending || isSessionMutationLocked()
+      || !hasAnyUserMessage(messages, optimisticUserMessages, queuedInboxMessages)) return
+    const lease = acquireMutation("compact")
+    if (!lease) return
+    setSessionActionPending("compact")
+    setRuntimeError(null)
+    setActionNotice(null)
+    // A stable admission id makes the acknowledgement retryable (the server answers 409 once the id
+    // is durably recorded) and lets terminal history state be correlated to THIS compaction. The
+    // server admits compaction durably under this id and the terminal compaction message carries the
+    // same id, so the observation's expectedID is the exact admission id when the response confirms
+    // it, and the stable request id otherwise — including a 409 conflict or a double-indeterminate
+    // response, where no heuristic is needed: either the exact message appears and releases the
+    // pending action, or the bounded deadline resolves it as unconfirmed.
+    const compactRequestID = createMessageRequestID()
+    const observation = {
+      context: JSON.stringify({ profileID: activeProfileID, configKey: configKey(config), sessionID: selectedSession.id }),
+      expectedID: compactRequestID as string | null,
+      startedAt: Date.now(),
+      passive: false
+    }
+    compactObservationRef.current = observation
+    try {
+      const admission = await compactSessionV2(config, selectedSession.id, selectedSession.directory, compactRequestID)
+      observation.expectedID = admission?.id ?? compactRequestID
+      if (isLeaseContextCurrent(lease)) setActionNotice(t('detail.compactQueued'))
+    } catch (err) {
+      if (isLeaseContextCurrent(lease)) {
+        if (isIndeterminateDeliveryError(err)) {
+          // The acknowledgement was lost. The server admits compaction durably under our id, so one
+          // idempotent retry with the SAME id either confirms the earlier admission (409 conflict)
+          // or performs it — it can never queue the compaction twice.
+          try {
+            const admission = await compactSessionV2(config, selectedSession.id, selectedSession.directory, compactRequestID)
+            observation.expectedID = admission?.id ?? compactRequestID
+            setActionNotice(t('detail.compactQueued'))
+          } catch (retryErr) {
+            if (isAdmissionConflict(retryErr)) {
+              // The earlier admission is durably recorded under the request id; correlate with it.
+              observation.expectedID = compactRequestID
+              setActionNotice(t('detail.compactQueued'))
+            } else if (isIndeterminateDeliveryError(retryErr)) {
+              // Still unknown: if the transmission landed, the server admitted the compaction under
+              // the request id, so correlating with that exact id still resolves the pending action
+              // at terminal state; if it never landed, the bounded deadline resolves as unconfirmed.
+              observation.expectedID = compactRequestID
+              setActionNotice(t('detail.deliveryIndeterminate'))
+              void loadSelected(selectedSession.id, selectedSession.directory, true).catch(() => undefined)
+            } else {
+              // The retry answered definitely (not a conflict): the compaction was never admitted.
+              compactObservationRef.current = null
+              setSessionActionPending(null)
+              sessionActionPendingRef.current = null
+              setRuntimeError((retryErr as Error).message)
+            }
+          }
+        } else {
+          compactObservationRef.current = null
+          setSessionActionPending(null)
+          sessionActionPendingRef.current = null
+          setRuntimeError((err as Error).message)
+        }
+      }
+    } finally {
+      // Keep the logical action pending after a successful acknowledgement. The server performs
+      // compaction asynchronously; the refresh metadata effect releases it at terminal state.
+      releaseMutation(lease)
+    }
+  }
+
+  async function forkCurrentSession() {
+    if (config.backend !== "opencode2" || !selectedSession || sessionActionPending || sessionActionPendingRef.current || isWorking || busySending || isSessionMutationLocked()
+      || !hasAnyUserMessage(messages, optimisticUserMessages, queuedInboxMessages)) return
+    const original = selectedSession
+    const forkDraft = { text: composer, attachments: [...attachments] }
+    const forkContext = {
+      profileID: activeProfileID,
+      configKey: configKey(config),
+      sessionID: original.id
+    }
+    const lease = acquireMutation("fork")
+    if (!lease) return
+    // State updates are batched. Update the ref too so callbacks and an awaited command
+    // discovery cannot slip through during the render before the pending state commits.
+    sessionActionPendingRef.current = "fork"
+    forkReconcilingRef.current = false
+    setSessionActionPending("fork")
+    setRuntimeError(null)
+    setActionNotice(null)
+    // Children that already exist BEFORE the request are the baseline: reconciliation must find the
+    // child THIS fork created, never navigate to an older fork's child.
+    const baselineChildIDs = new Set<string>()
+    const captureBaseline = async () => {
+      try {
+        for (const child of await listChildSessionsV2(config, original.id)) baselineChildIDs.add(child.id)
+      } catch {
+        try {
+          for (const child of await api.listGlobalSessions(config)) if (child.parentID === original.id) baselineChildIDs.add(child.id)
+        } catch {
+          try {
+            for (const child of await api.listSessions(config)) if (child.parentID === original.id) baselineChildIDs.add(child.id)
+          } catch { /* best-effort: an empty baseline still reconciles, only less selectively */ }
+        }
+      }
+    }
+    // Currency for the reconciliation is deliberately NOT the lease: the fork lease is released as
+    // soon as the acknowledgement is lost, so a check like isLeaseContextCurrent would fail the
+    // moment the reconciliation starts. The captured context/generation is the authority.
+    const reconcileGeneration = mutationCoordinator.getContextGeneration()
+    const isReconcileCurrent = () => mutationCoordinator.isContextGenerationCurrent(reconcileGeneration)
+      && mutationCoordinator.isContextCurrent(forkContext)
+    const restoreForkDraft = (childID: string) => {
+      const childContext = { profileID: activeProfileID, configKey: configKey(config), sessionID: childID }
+      if (mutationCoordinator.isContextCurrent(childContext) && activeContextRef.current.sessionID === childID) {
+        // Only restore into an empty composer/attachment tray: the reconciliation can lag the
+        // navigation (bounded retries with delays), and anything the user typed into the child in
+        // the meantime is newer than the forked snapshot and must never be overwritten.
+        setComposer((current) => (current === "" ? forkDraft.text : current))
+        setAttachments((current) => (current.length === 0 ? forkDraft.attachments : current))
+      }
+    }
+    const finishForkPending = () => {
+      forkReconcilingRef.current = false
+      sessionActionPendingRef.current = null
+      setSessionActionPending(null)
+    }
+    /** Indeterminate fork: the POST may have committed even though its response was lost. Reconcile
+     *  with bounded, paginated, authoritative listings; never ask the user to retry blindly. */
+    const reconcileFork = async () => {
+      try {
+        for (let attempt = 0; attempt < FORK_RECONCILE_MAX_ATTEMPTS; attempt += 1) {
+          if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, FORK_RECONCILE_ATTEMPT_DELAY_MS))
+          if (!isReconcileCurrent()) return
+          const children = await (async () => {
+            try { return await listChildSessionsV2(config, original.id) }
+            catch {
+              try { return (await api.listGlobalSessions(config)).filter((child) => child.parentID === original.id) }
+              catch {
+                try { return (await api.listSessions(config)).filter((child) => child.parentID === original.id) }
+                catch { return [] }
+              }
+            }
+          })()
+          const child = children.find((candidate) => !baselineChildIDs.has(candidate.id))
+          if (child && isReconcileCurrent()) {
+            const childView = toSessionView(child)
+            setSessions((current) => current.some((session) => session.id === childView.id)
+              ? current
+              : [childView, ...current].sort((a, b) => b.updated - a.updated))
+            // M3: a back/view navigation during a pending fork must not be reversed by reconcile.
+            // If the user left the fork context's detail view (mobile back/settings/help, or a
+            // different session on desktop), insert the confirmed child into the list and announce
+            // the result — never yank them back into the child. The fork draft is parked under the
+            // child's key so a later manual open restores it (H1 session drafts).
+            if (mainViewRef.current !== "detail" || selectedSessionRef.current?.id !== original.id) {
+              sessionDraftsRef.current.set(
+                sessionDraftKey(activeProfileID, configKey(config), childView.id),
+                { text: forkDraft.text, attachments: [...forkDraft.attachments] }
+              )
+              setActionNotice(t('detail.forkCreated'))
+              return
+            }
+            forkFocusSessionRef.current = childView.id
+            await openSession(childView.id, childView.directory)
+            restoreForkDraft(childView.id)
+            return
+          }
+        }
+        // Bounded terminal recovery: the child could not be confirmed. Resolve the pending state and
+        // leave a resolvable path (refresh the session list) instead of blocking the menu forever.
+        if (isReconcileCurrent()) {
+          // M4: the fork may still have committed server-side even though the child was not found.
+          // Preserve the fork draft snapshot (context-scoped) so opening the child manually later
+          // restores it instead of losing it; openSession consumes the record with the empty
+          // composer guard. It is cleared by replaceMutationContext on any profile/config change.
+          pendingForkDraftRef.current = {
+            namespace: `${activeProfileID}\u0000${configKey(config)}`,
+            parentSessionID: original.id,
+            parentDirectory: original.directory,
+            baselineChildIDs,
+            text: forkDraft.text,
+            attachments: [...forkDraft.attachments]
+          }
+          setActionNotice(t('detail.forkUnconfirmed'))
+        }
+      } finally {
+        // Always release the pending state on exhaustion (and on confirmed navigation, where the
+        // child open already cleared it). When the context changed mid-reconciliation, navigation
+        // cleared the pending state synchronously, and a newer action's state must not be clobbered
+        // by this stale reconciliation's finally.
+        if (isReconcileCurrent()) finishForkPending()
+      }
+    }
+    try {
+      await captureBaseline()
+      if (!isLeaseContextCurrent(lease) || !mutationCoordinator.isContextCurrent(forkContext)) return
+      const forked = await api.forkSession(config, original.id, original.directory)
+      // The user may have switched profile or session while the server created the child. Do not
+      // insert it into the new context or steal navigation from the session they chose meanwhile.
+      if (!isLeaseContextCurrent(lease) || !mutationCoordinator.isContextCurrent(forkContext)) return
+      const forkedView = toSessionView(forked)
+      setSessions((current) => current.some((session) => session.id === forkedView.id)
+        ? current
+        : [forkedView, ...current].sort((a, b) => b.updated - a.updated))
+      // Keep the original session and navigate through the shared session-opening path.
+       forkFocusSessionRef.current = forkedView.id
+       await openSession(forkedView.id, forkedView.directory)
+      // A fork copies server history, not the unsent composer. Restore the snapshot only when the
+      // navigation that this request initiated still owns the destination context.
+      restoreForkDraft(forkedView.id)
+       forkReconcilingRef.current = false
+       sessionActionPendingRef.current = null
+       setSessionActionPending(null)
+    } catch (err) {
+      if (isLeaseContextCurrent(lease)) {
+        if (isIndeterminateDeliveryError(err)) {
+          forkReconcilingRef.current = true
+          setActionNotice(t('detail.deliveryIndeterminate'))
+          // Runs detached from this function: the lease is released in finally while the
+          // reconciliation continues on its own (bounded) schedule.
+          void reconcileFork()
+        } else {
+          setRuntimeError((err as Error).message)
+        }
+      }
+    } finally {
+      if (isLeaseContextCurrent(lease)) {
+        if (!forkReconcilingRef.current) {
+          sessionActionPendingRef.current = null
+          setSessionActionPending(null)
+        }
+      }
+      releaseMutation(lease)
     }
   }
 
   async function revertToMessage(messageID: string) {
-    if (!selectedSession || busySending || (config.backend !== "opencode" && config.backend !== "opencode2")) return
+    if (!selectedSession || busySending || sessionActionPending === "fork" || isSessionMutationLocked() || (config.backend !== "opencode" && config.backend !== "opencode2")) return
     if (!window.confirm(t('detail.revertConfirm'))) return
 
     setBusySending(true)
+    const lease = acquireMutation("history")
+    if (!lease) { setBusySending(false); return }
     setRuntimeError(null)
     try {
       const session = await api.revertMessage(config, selectedSession.id, messageID, selectedSession.directory)
       await loadSelected(selectedSession.id, selectedSession.directory, true)
       await refreshSessions(true)
-      setSessions((current) => current.map((item) => item.id === session.id ? { ...item, revertMessageID: session.revert?.messageID } : item))
+      if (isLeaseContextCurrent(lease)) setSessions((current) => current.map((item) => item.id === session.id ? { ...item, revertMessageID: session.revert?.messageID } : item))
     } catch (err) {
-      setRuntimeError((err as Error).message)
+      if (isLeaseContextCurrent(lease)) setRuntimeError((err as Error).message)
     } finally {
-      setBusySending(false)
+      if (isLeaseContextCurrent(lease)) {
+        setBusySending(false)
+      }
+      releaseMutation(lease)
     }
   }
 
-  async function loadProjectDashboard(directory: string) {
+  async function loadProjectDashboard(directory: string, expectedGeneration = mutationCoordinator.getContextGeneration(), expectedContext = { profileID: activeProfileID, configKey: configKey(config), sessionID: selectedID }) {
     // The bridge implements none of these three, so on a bridge-backed harness this was nine
     // guaranteed 404s a second during polling. One round of them settles the question for the
     // rest of the connection.
     if (dashboardUnsupportedRef.current) return
+    if (!mutationCoordinator.isContextGenerationCurrent(expectedGeneration) || !mutationCoordinator.isContextCurrent(expectedContext)) return
     setDashboardError(null)
     try {
       const [project, vcs, fileStatus] = await Promise.all([
@@ -2928,6 +3878,7 @@ function App() {
         api.loadVcs(config, directory).catch(() => null),
         api.loadFileStatus(config, directory).catch(() => [])
       ])
+      if (!mutationCoordinator.isContextGenerationCurrent(expectedGeneration) || !mutationCoordinator.isContextCurrent(expectedContext)) return
       const files = toFileStatusList(fileStatus)
       if (project === null && vcs === null && files.length === 0) {
         dashboardUnsupportedRef.current = true
@@ -2939,7 +3890,7 @@ function App() {
         return current && JSON.stringify(current) === JSON.stringify(next) ? current : next
       })
     } catch (err) {
-      setDashboardError((err as Error).message)
+      if (mutationCoordinator.isContextGenerationCurrent(expectedGeneration) && mutationCoordinator.isContextCurrent(expectedContext)) setDashboardError((err as Error).message)
     }
   }
 
@@ -2999,6 +3950,11 @@ function App() {
     setPendingPermissions((current) => current.filter((item) => item.id !== id))
   }, [])
 
+  /** Identity-stable lease-change signal for the memoized MessagesPane: an inline arrow would be
+   *  a fresh reference every render, which defeated the memo and re-formatted every message on
+   *  every keystroke even though nothing about the lease changed. */
+  const handleLeaseChanged = useCallback(() => bumpMutationLock((value) => value + 1), [])
+
   function scrollMessagesToBottom(behavior: ScrollBehavior = "smooth") {
     requestAnimationFrame(() => {
       syncChatBottomClearance()
@@ -3050,8 +4006,59 @@ function App() {
   const revertToMessageRef = useRef(revertToMessage)
   revertToMessageRef.current = revertToMessage
   const handleRevertMessage = useCallback((messageID: string) => {
+    if (sessionActionPendingRef.current === "fork") return
     void revertToMessageRef.current(messageID)
   }, [])
+
+  /** Cancels a server-admitted queued prompt by inbox id (`DELETE /api/session/{id}/inbox/{id}`).
+   *  The row is removed optimistically and the transcript is refreshed; the server answers
+   *  definite statuses (409 — already delivered or executing; 404 — unknown session), so a
+   *  failure surfaces as a visible error instead of being retried blindly. Deliberately
+   *  out-of-band like Stop: the queued prompt's own send lease is long gone and the item is not
+   *  a coordinator mutation, so no lease is acquired — the in-flight guard is the cancelling set.
+   *  The body lives behind a ref so the identity-stable callback always calls the current one. */
+  const cancelQueuedMessageRef = useRef<(message: MessageEnvelope) => void>(() => undefined)
+  const cancelQueuedMessage = useCallback((message: MessageEnvelope) => {
+    cancelQueuedMessageRef.current(message)
+  }, [])
+  cancelQueuedMessageRef.current = (message: MessageEnvelope) => {
+    const inboxID = queuedInboxItemID(message)
+    const session = selectedSessionRef.current
+    if (!inboxID || !session || session.id !== message.info.sessionID) return
+    const cancelContext = { profileID: activeProfileID, configKey: configKey(config), sessionID: session.id }
+    if (!mutationCoordinator.isContextCurrent(cancelContext)) return
+    if (cancellingInboxIDsRef.current.has(inboxID)) return
+    cancellingInboxIDsRef.current = new Set(cancellingInboxIDsRef.current).add(inboxID)
+    setCancellingInboxIDs(cancellingInboxIDsRef.current)
+    setRuntimeError(null)
+    void (async () => {
+      try {
+        await api.cancelInboxItem(config, session.id, inboxID, session.directory)
+        if (!mutationCoordinator.isContextCurrent(cancelContext)) return
+        // Definite success (204): drop the row now — both the server-inbox row and any optimistic
+        // twin carrying the same durable id — then reconcile so the transcript converges.
+        setQueuedInboxMessages((current) => {
+          const remaining = current.filter((candidate) => queuedInboxItemID(candidate) !== inboxID)
+          return remaining.length === current.length ? current : remaining
+        })
+        setOptimisticUserMessages((current) => {
+          const remaining = current.filter((candidate) => queuedInboxItemID(candidate) !== inboxID)
+          return remaining.length === current.length ? current : remaining
+        })
+        void loadSelected(session.id, session.directory, true).catch(() => undefined)
+        void refreshSessions(false, undefined, true).catch(() => undefined)
+      } catch (err) {
+        // 409/404 and transport failures are definite: name them instead of leaving the row
+        // half-removed or pretending the cancel succeeded.
+        if (mutationCoordinator.isContextCurrent(cancelContext)) setRuntimeError((err as Error).message)
+      } finally {
+        if (cancellingInboxIDsRef.current.has(inboxID)) {
+          cancellingInboxIDsRef.current = new Set([...cancellingInboxIDsRef.current].filter((id) => id !== inboxID))
+          setCancellingInboxIDs(cancellingInboxIDsRef.current)
+        }
+      }
+    })()
+  }
 
   const openSessionRef = useRef(openSession)
   openSessionRef.current = openSession
@@ -3093,7 +4100,7 @@ function App() {
   }
 
   async function openNewSessionPicker() {
-    if (creatingSession) return
+    if (creatingSession || isSessionMutationLocked()) return
     setRuntimeError(null)
     setShowNewSessionPicker(true)
     setPickerError(null)
@@ -3106,7 +4113,12 @@ function App() {
   }
 
   async function createSession(directory = selectedNewSessionDirectory) {
-    if (creatingSession) return
+    if (creatingSession || isSessionMutationLocked()) return
+    const lease = acquireMutation("create")
+    if (!lease) return
+    // v2 create accepts an optional client id (`Session.ID`); with it, a lost response can be
+    // reconciled by fetching the session by id instead of retrying the mutation blindly.
+    const createRequestID = config.backend === "opencode2" ? createSessionRequestID() : undefined
     setCreatingSession(true)
     setRuntimeError(null)
     setPickerError(null)
@@ -3117,7 +4129,27 @@ function App() {
           throw new Error(t('sessions.projectDirectoryInvalid', { directory }))
         }
       }
-      const created = await api.createSession(config, t('sessions.remoteSessionTitle'), activeModel, directory)
+      let created: Session
+      if (createRequestID) {
+        try {
+          created = await (api.createSession as unknown as (config: ServerConfig, title: string, model: ModelSelection | undefined, directory: string | undefined, requestID: string) => Promise<Session>)(config, t('sessions.remoteSessionTitle'), activeModel, directory, createRequestID)
+        } catch (createErr) {
+          if (!isIndeterminateDeliveryError(createErr)) throw createErr
+          // The POST may have committed before the response was lost. Reconcile by id: the session
+          // either exists (created once) or was never admitted. Never blind-retry the create.
+          try {
+            created = await getSessionV2(config, createRequestID)
+            setActionNotice(t('detail.deliveryAdmitted'))
+          } catch {
+            setActionNotice(t('detail.deliveryIndeterminate'))
+            void refreshSessions(false, undefined, true).catch(() => undefined)
+            return
+          }
+        }
+      } else {
+        created = await api.createSession(config, t('sessions.remoteSessionTitle'), activeModel, directory)
+      }
+      if (!isLeaseContextCurrent(lease)) return
       const createdView = toSessionView(created)
       if (directory) {
         setNewSessionDirectory(directory)
@@ -3127,6 +4159,11 @@ function App() {
         if (current.some((session) => session.id === created.id)) return current
         return [createdView, ...current].sort((a, b) => b.updated - a.updated)
       })
+      // The create lease targets the pre-session (null) context. Release it before replacing that
+      // context, otherwise replaceContext invalidates the lease and leaves the create spinner stuck.
+      setCreatingSession(false)
+      releaseMutation(lease)
+      replaceMutationContext(created.id)
       setSelectedID(created.id)
       setMessages([])
       setLoadedSessionID(null)
@@ -3141,22 +4178,37 @@ function App() {
       setLoadingSessionID(created.id)
       try {
         await loadSelected(created.id, created.directory)
-        await Promise.all([loadAgents(), loadModels(created.id, created.directory)])
+        await Promise.all([loadAgents(created.id, created.directory), loadModels(created.id, created.directory)])
         await refreshSessions(false, createdView)
       } catch (err) {
-        setRuntimeError((err as Error).message)
+        if (mutationCoordinator.isContextCurrent({ profileID: activeProfileID, configKey: configKey(config), sessionID: created.id })) {
+          setRuntimeError((err as Error).message)
+        }
       } finally {
-        setLoadingSessionID((activeID) => (activeID === created.id ? null : activeID))
+        if (mutationCoordinator.isContextCurrent({ profileID: activeProfileID, configKey: configKey(config), sessionID: created.id })) {
+          setLoadingSessionID((activeID) => (activeID === created.id ? null : activeID))
+        }
       }
-    } catch (err) {
-      setPickerError((err as Error).message)
-      setRuntimeError((err as Error).message)
+      } catch (err) {
+        if (isLeaseContextCurrent(lease)) {
+        setPickerError((err as Error).message)
+        setRuntimeError((err as Error).message)
+      }
     } finally {
-      setCreatingSession(false)
+      if (isLeaseContextCurrent(lease)) {
+        setCreatingSession(false)
+      }
+      // A create can replace the context before this finally runs. Releasing an old lease is safe,
+      // and is required to free the physical owner even when its result became stale.
+      releaseMutation(lease)
     }
   }
 
-  async function activateSkill(skill: CommandInfo, input = `/${skill.name}`) {
+  async function activateSkill(skill: CommandInfo, input = `/${skill.name}`, stagedAttachments = attachments) {
+    // F2: refuse dispatch during the fork reconcile window (ref = synchronous authority), so an
+    // activation started in the same tick as a fork cannot be orphaned by the reconcile navigation.
+    if (sessionActionPendingRef.current === "fork") return
+    if (isSessionMutationLocked()) return
     if (!selectedSession) {
       setRuntimeError(t('help.skillRequiresSession'))
       return
@@ -3167,11 +4219,19 @@ function App() {
     }
     const skillName = skill.id ?? skill.name
     const session = selectedSession
+    const lease = acquireMutation("skill")
+    if (!lease) return
+    // Stable durable admission id: the projected skill message carries this exact id (the server
+    // derives the event id from it), so an indeterminate acknowledgement can be confirmed by id on a
+    // later poll. Unlike prompt/command/compact the skill endpoint is NOT durably admitted by id, so
+    // the id is only ever used for correlation — never for an automatic retry, which could defect on
+    // a duplicate event id.
+    const skillRequestID = createMessageRequestID()
     setComposer("")
     setActivatingSkill(skillName)
     setActionNotice(t('help.skillActivating'))
     setRuntimeError(null)
-    const optimisticMessage = createOptimisticUserMessage(session.id, input)
+    const optimisticMessage = createOptimisticUserMessage(session.id, input, undefined, skillRequestID)
     setOptimisticUserMessages((current) => [...current, optimisticMessage])
     awaitingAssistantBaselineRef.current = assistantResponseSignature
     completionShouldPlayRef.current = true
@@ -3181,9 +4241,11 @@ function App() {
     try {
       // The v1 compatibility surface deliberately rejects this method, but shares the v2 signature;
       // the proxy routes the same call to the live v2 client for OpenCode 2.
-      await api.sendSkill(config, session.id, skillName, session.directory)
+      await sendSkillV2(config, session.id, skillName, session.directory, skillRequestID)
+      if (!isLeaseContextCurrent(lease)) return
       // A successful 204 is the commit point. Refreshes are best-effort and must not turn a
       // completed activation into a failed command or put the slash text back in the composer.
+      clearParkedDraft(session.id)
       setOptimisticUserMessages((current) => current.filter((message) => message.info.id !== optimisticMessage.info.id))
       setActionNotice(t('help.skillActivated', { skill: skill.name }))
       let refreshFailed = false
@@ -3192,23 +4254,53 @@ function App() {
       } catch {
         refreshFailed = true
       }
-      if (!(await refreshSessions(false, undefined, true))) refreshFailed = true
-      if (refreshFailed) setActionNotice(t('help.skillRefreshFailed'))
+      try {
+        if (!(await refreshSessions(false, undefined, true))) refreshFailed = true
+      } catch {
+        refreshFailed = true
+      }
+      if (refreshFailed && isLeaseContextCurrent(lease)) setActionNotice(t('help.skillRefreshFailed'))
     } catch (err) {
-      completionShouldPlayRef.current = false
-      setAwaitingAssistantReply(false)
-      setOptimisticUserMessages((current) => current.filter((message) => message.info.id !== optimisticMessage.info.id))
-      setComposer((current) => current || input)
-      setActionNotice(null)
-      setRuntimeError(t('help.skillActivationFailed', { skill: skill.name, message: (err as Error).message }))
+      if (isLeaseContextCurrent(lease)) {
+        completionShouldPlayRef.current = false
+        setAwaitingAssistantReply(false)
+        if (!isIndeterminateDeliveryError(err)) {
+          // Definite failure: the activation was never accepted, so the optimistic row is retired,
+          // the draft is restored, and the failure is named as such.
+          setOptimisticUserMessages((current) => current.filter((message) => message.info.id !== optimisticMessage.info.id))
+          setComposer((current) => current || input)
+          setAttachments((current) => current.length ? current : stagedAttachments)
+          setRuntimeError(t('help.skillActivationFailed', { skill: skill.name, message: (err as Error).message }))
+        } else {
+          // Indeterminate delivery: the 204 may have been lost after the server activated the skill.
+          // The skill endpoint is not durably admitted by id, so re-POSTing can defect on a duplicate
+          // event id — never retry automatically. Keep the tagged optimistic row as the visible trace
+          // and reconcile: a poll that surfaces the projected skill message under the original
+          // request id confirms the activation (loadSelected retires the row and announces it).
+          pendingSkillRequestsRef.current.set(skillRequestID, { sessionID: session.id, skillName: skill.name })
+          setActionNotice(t('detail.deliveryIndeterminate'))
+          void loadSelected(session.id, session.directory, true).catch(() => undefined)
+          void refreshSessions(false, undefined, true).catch(() => undefined)
+        }
+      }
     } finally {
-      setBusySending(false)
-      setActivatingSkill(null)
+      if (isLeaseContextCurrent(lease)) {
+        setBusySending(false)
+        setActivatingSkill(null)
+      }
+      releaseMutation(lease)
     }
   }
 
   async function send() {
-    if (!selectedSession) return
+    // Read the ref here as well as after awaited work. The render-state check would
+    // narrow sessionActionPending for the rest of this function, even though the ref
+    // is the live guard needed to catch a fork that starts while this send is pending.
+    // F2: while a fork is pending (reconcile window), refuse dispatch outright — an in-flight
+    // prompt could otherwise be orphaned by the reconcile navigation that follows. Compaction
+    // deliberately keeps its queue window instead (see promptDelivery below).
+    if (sessionActionPendingRef.current === "fork") return
+    if (!selectedSession || isSessionMutationLocked()) return
     const text = composer.trim()
     // An image with no caption is a complete prompt, so emptiness is about both.
     if (!text && attachments.length === 0) return
@@ -3252,25 +4344,42 @@ function App() {
       }
 
       let availableCommands = commands
+      const commandLease = acquireMutation("command")
+      if (!commandLease) return
+      const commandContext = commandLease.context
+      const commandForkGeneration = commandLease.forkGeneration
       if (availableCommands.length === 0) {
         try {
           availableCommands = await api.listCommands(config)
+          // Fork can begin while command discovery is in flight. Do not let the
+          // stale closure dispatch a command or update command state afterwards.
+           if (!isLeaseContextCurrent(commandLease)) { releaseMutation(commandLease); return }
+           if (!mutationCoordinator.isContextCurrent(commandContext) || !mutationCoordinator.isForkGenerationCurrent(commandForkGeneration)) { releaseMutation(commandLease); return }
           setCommands(availableCommands)
         } catch (err) {
+          if (!isLeaseContextCurrent(commandLease)) { releaseMutation(commandLease); return }
+          if (!mutationCoordinator.isContextCurrent(commandContext) || !mutationCoordinator.isForkGenerationCurrent(commandForkGeneration)) { releaseMutation(commandLease); return }
           setRuntimeError(`Cannot load server commands: ${(err as Error).message}`)
+          releaseMutation(commandLease)
           return
         }
       }
 
+      if (!isLeaseContextCurrent(commandLease)) { releaseMutation(commandLease); return }
+      if (!mutationCoordinator.isContextCurrent(commandContext) || !mutationCoordinator.isForkGenerationCurrent(commandForkGeneration)) { releaseMutation(commandLease); return }
+
       const matchingCommand = availableCommands.find((item) => item.name === command)
       if (!matchingCommand) {
         const available = availableCommands.map((item) => `/${item.name}`).join(", ")
-        setRuntimeError(`Command not found: "/${command}". Available commands: ${available}`)
+        if (isLeaseContextCurrent(commandLease)) setRuntimeError(`Command not found: "/${command}". Available commands: ${available}`)
+        releaseMutation(commandLease)
         return
       }
 
       if (matchingCommand.source === "skill") {
-        await activateSkill(matchingCommand, text)
+        releaseMutation(commandLease)
+        if (!mutationCoordinator.isContextCurrent(commandContext) || !mutationCoordinator.isForkGenerationCurrent(commandForkGeneration)) return
+        await activateSkill(matchingCommand, text, attachments)
         return
       }
 
@@ -3281,29 +4390,125 @@ function App() {
       completionShouldPlayRef.current = true
       setAwaitingAssistantReply(true)
       scrollMessagesToBottom("smooth")
+      // Stable durable admission id for the resolved prompt input (see sendPrompt).
+      const commandRequestID = createMessageRequestID()
 
       setBusySending(true)
       setRuntimeError(null)
       try {
-        await api.sendCommand(config, selectedSession.id, command, args, selectedSession.directory, activeModel, activeAgentID)
-        await loadSelected(selectedSession.id, selectedSession.directory)
-        setOptimisticUserMessages((current) => current.filter((message) => message.info.id !== optimisticMessage.info.id))
-        await refreshSessions()
+        const admission = await sendCommandV2(config, selectedSession.id, command, args, selectedSession.directory, activeModel, activeAgentID, commandRequestID)
+        if (!isLeaseContextCurrent(commandLease)) return
+        // sendCommand is the commit boundary. The composer was flushed, so any parked draft for
+        // this session must not resurrect the dispatched command on a round-trip.
+        clearParkedDraft(selectedSession.id)
+        // Tag the optimistic row with the durable admission metadata instead of removing it: the
+        // exact message id retires the bubble by id once the resolved prompt reaches history (or the
+        // inbox), and the server-recorded delivery keeps any queued status visible in the meantime.
+        setOptimisticUserMessages((current) => current.map((message) =>
+          message.info.id === optimisticMessage.info.id
+            ? { ...message, info: { ...message.info, durableID: admission?.messageID, delivery: admission?.delivery ?? message.info.delivery } }
+            : message))
+        // sendCommand is the commit boundary. History/session refreshes are best effort and must
+        // not make a successfully dispatched command look retryable or restore its draft.
+        let refreshFailed = false
+        try {
+          await loadSelected(selectedSession.id, selectedSession.directory)
+        } catch {
+          refreshFailed = true
+        }
+        try {
+          if (!(await refreshSessions(false, undefined, true))) refreshFailed = true
+        } catch {
+          refreshFailed = true
+        }
+        if (refreshFailed && isLeaseContextCurrent(commandLease)) {
+          setActionNotice("Command sent, but the session view could not be refreshed. Please refresh to see the latest state.")
+        }
       } catch (err) {
-        completionShouldPlayRef.current = false
-        setAwaitingAssistantReply(false)
-        setOptimisticUserMessages((current) => current.filter((message) => message.info.id !== optimisticMessage.info.id))
-        setComposer((current) => current || text)
-        setRuntimeError((err as Error).message)
+        if (isLeaseContextCurrent(commandLease)) {
+          completionShouldPlayRef.current = false
+          setAwaitingAssistantReply(false)
+          if (!isIndeterminateDeliveryError(err)) {
+            setOptimisticUserMessages((current) => current.filter((message) => message.info.id !== optimisticMessage.info.id))
+            setComposer((current) => current || text)
+            setAttachments((current) => current.length ? current : attachments)
+            setRuntimeError((err as Error).message)
+          } else {
+            // Indeterminate delivery: one idempotent retry with the SAME id either confirms the
+            // earlier admission (409 conflict) or performs it — never dispatches the command twice.
+            // The resolved prompt is admitted durably under the request id, so a confirmed retry
+            // tags the row with that exact id for retirement by id on the next poll.
+            let resolved = false
+            try {
+              const readmission = await sendCommandV2(config, selectedSession.id, command, args, selectedSession.directory, activeModel, activeAgentID, commandRequestID)
+              resolved = true
+              if (readmission?.messageID) {
+                setOptimisticUserMessages((current) => current.map((message) =>
+                  message.info.id === optimisticMessage.info.id
+                    ? { ...message, info: { ...message.info, durableID: readmission.messageID, delivery: readmission.delivery ?? message.info.delivery } }
+                    : message))
+              } else {
+                // A 204-style admission without the envelope: the durable admission key is the
+                // request id itself, which the resolved prompt will carry.
+                setOptimisticUserMessages((current) => current.map((message) =>
+                  message.info.id === optimisticMessage.info.id
+                    ? { ...message, info: { ...message.info, durableID: commandRequestID } }
+                    : message))
+              }
+            } catch (retryErr) {
+              if (isAdmissionConflict(retryErr)) {
+                resolved = true
+                // The request id was durably admitted; the resolved prompt surfaces under that id.
+                setOptimisticUserMessages((current) => current.map((message) =>
+                  message.info.id === optimisticMessage.info.id
+                    ? { ...message, info: { ...message.info, durableID: commandRequestID } }
+                    : message))
+              }
+            }
+            if (resolved && isLeaseContextCurrent(commandLease)) {
+              clearParkedDraft(selectedSession.id)
+              setActionNotice(t('detail.deliveryAdmitted'))
+              void loadSelected(selectedSession.id, selectedSession.directory, true).catch(() => undefined)
+              void refreshSessions(false, undefined, true).catch(() => undefined)
+            } else if (isLeaseContextCurrent(commandLease)) {
+              // Still unknown after the idempotent retry. The resolved prompt is admitted durably
+              // under the request id when the transmission landed — and its history text differs from
+              // the typed slash command, so text matching could never retire this row — tag it with
+              // the stable request id so a surfacing message retires it by exact id instead.
+              setOptimisticUserMessages((current) => current.map((message) =>
+                message.info.id === optimisticMessage.info.id
+                  ? { ...message, info: { ...message.info, durableID: commandRequestID } }
+                  : message))
+              setActionNotice(t('detail.deliveryIndeterminate'))
+              void loadSelected(selectedSession.id, selectedSession.directory, true).catch(() => undefined)
+              void refreshSessions(false, undefined, true).catch(() => undefined)
+            }
+          }
+        }
       } finally {
-        setBusySending(false)
+        if (isLeaseContextCurrent(commandLease)) {
+          setBusySending(false)
+        }
+        releaseMutation(commandLease)
       }
       return
     }
 
+    const promptLease = acquireMutation("prompt")
+    if (!promptLease) return
+    // Preserve the normal working follow-up contract (`attachments, isWorking ? "queue" : "steer"`)
+    // and extend it to the whole window where compaction has acknowledged but is not terminal. The
+    // ref is the synchronous authority, so a send that lands in the same tick as a pending compact
+    // still queues instead of steering a prompt into the compaction.
+    const promptDelivery = (sessionActionPendingRef.current === "compact" || sessionActionPending === "compact")
+      ? "queue"
+      : (isWorking ? "queue" : "steer")
+    // Stable durable admission id: a lost acknowledgement can be retried with the SAME id, which the
+    // server answers with 409 (already admitted) instead of admitting the prompt twice.
+    const promptRequestID = createMessageRequestID()
     setComposer("")
     setAttachments([])
-    const optimisticMessage = createOptimisticUserMessage(selectedSession.id, text)
+    const optimisticMessage = createOptimisticUserMessage(selectedSession.id, text, promptDelivery)
     setOptimisticUserMessages((current) => [...current, optimisticMessage])
     awaitingAssistantBaselineRef.current = assistantResponseSignature
     completionShouldPlayRef.current = true
@@ -3312,28 +4517,146 @@ function App() {
 
     setBusySending(true)
     setRuntimeError(null)
+    let promptDispatched = false
     try {
-      await api.sendPrompt(config, selectedSession.id, text, selectedSession.directory, activeModel, activeAgentID, attachments)
-      await loadSelected(selectedSession.id, selectedSession.directory)
-      await refreshSessions()
+      const admission = await sendPromptV2(config, selectedSession.id, text, selectedSession.directory, activeModel, activeAgentID, attachments, promptDelivery, promptRequestID)
+      promptDispatched = true
+      if (!isLeaseContextCurrent(promptLease)) return
+      // Dispatch is the commit boundary for the parked draft too: the composer was flushed, so a
+      // parked entry from a previous visit must not resurrect this prompt on a round-trip.
+      clearParkedDraft(selectedSession.id)
+      // Tag the optimistic row with the durable admission metadata instead of removing it: the exact
+      // message id retires the bubble by id once the prompt reaches history (or the inbox), and the
+      // server-recorded delivery keeps the queued status visible until the inbox stops listing it.
+      setOptimisticUserMessages((current) => current.map((message) =>
+        message.info.id === optimisticMessage.info.id
+          ? { ...message, info: { ...message.info, durableID: admission?.messageID, delivery: admission?.delivery ?? message.info.delivery } }
+          : message))
+      // Dispatch is the commit boundary. A history/sidebar refresh is best effort and must never
+      // turn a prompt that the server accepted into a retryable send failure or restore its draft.
+      let refreshFailed = false
+      try {
+        await loadSelected(selectedSession.id, selectedSession.directory)
+      } catch {
+        refreshFailed = true
+      }
+      try {
+        if (!(await refreshSessions(false, undefined, true))) refreshFailed = true
+      } catch {
+        refreshFailed = true
+      }
+      if (refreshFailed && isLeaseContextCurrent(promptLease)) {
+        setActionNotice("Message sent, but the session view could not be refreshed. Please refresh to see the latest state.")
+      }
     } catch (err) {
-      completionShouldPlayRef.current = false
-      setAwaitingAssistantReply(false)
-      setOptimisticUserMessages((current) => current.filter((message) => message.info.id !== optimisticMessage.info.id))
-      setComposer((current) => current || text)
-      // Losing a staged image to a failed send would mean picking it out of the gallery again.
-      setAttachments((current) => current.length ? current : attachments)
-      setRuntimeError((err as Error).message)
+      if (isLeaseContextCurrent(promptLease) && isIndeterminateDeliveryError(err)) {
+        // The response was lost after transmission. The server admits durably under the request id,
+        // so exactly one idempotent retry with the same id confirms the earlier admission (409) or
+        // performs it — it can never send the prompt twice. A confirmed retry tags the row with the
+        // exact durable id so retirement is by id, never by text.
+        let resolved = false
+        try {
+          const readmission = await sendPromptV2(config, selectedSession.id, text, selectedSession.directory, activeModel, activeAgentID, attachments, promptDelivery, promptRequestID)
+          resolved = true
+          if (readmission?.messageID) {
+            setOptimisticUserMessages((current) => current.map((message) =>
+              message.info.id === optimisticMessage.info.id
+                ? { ...message, info: { ...message.info, durableID: readmission.messageID, delivery: readmission.delivery ?? message.info.delivery } }
+                : message))
+          } else {
+            // An admission without the envelope: the durable admission key is the request id itself.
+            setOptimisticUserMessages((current) => current.map((message) =>
+              message.info.id === optimisticMessage.info.id
+                ? { ...message, info: { ...message.info, durableID: promptRequestID } }
+                : message))
+          }
+        } catch (retryErr) {
+          if (isAdmissionConflict(retryErr)) {
+            resolved = true
+            // The request id was durably admitted; the prompt surfaces under that exact id.
+            setOptimisticUserMessages((current) => current.map((message) =>
+              message.info.id === optimisticMessage.info.id
+                ? { ...message, info: { ...message.info, durableID: promptRequestID } }
+                : message))
+          }
+        }
+        if (resolved && isLeaseContextCurrent(promptLease)) {
+          promptDispatched = true
+          clearParkedDraft(selectedSession.id)
+          setActionNotice(t('detail.deliveryAdmitted'))
+          void loadSelected(selectedSession.id, selectedSession.directory, true).catch(() => undefined)
+          void refreshSessions(false, undefined, true).catch(() => undefined)
+        } else if (isLeaseContextCurrent(promptLease)) {
+          // Still unknown after the idempotent retry. The server admits durably under the request id
+          // when the transmission landed, so tag the row with that stable id: if the prompt surfaces
+          // (in the inbox or history) it retires by exact id; if it never landed, the row stays as
+          // the visible trace of the indeterminate send.
+          setOptimisticUserMessages((current) => current.map((message) =>
+            message.info.id === optimisticMessage.info.id
+              ? { ...message, info: { ...message.info, durableID: promptRequestID } }
+              : message))
+          setActionNotice(t('detail.deliveryIndeterminate'))
+          void loadSelected(selectedSession.id, selectedSession.directory, true).catch(() => undefined)
+          void refreshSessions(false, undefined, true).catch(() => undefined)
+        }
+      } else if (isLeaseContextCurrent(promptLease)) setRuntimeError((err as Error).message)
+      if (!promptDispatched && !isIndeterminateDeliveryError(err) && isLeaseContextCurrent(promptLease)) {
+        completionShouldPlayRef.current = false
+        setAwaitingAssistantReply(false)
+        setOptimisticUserMessages((current) => current.filter((message) => message.info.id !== optimisticMessage.info.id))
+        setComposer((current) => current || text)
+        // Losing a staged image to a failed send would mean picking it out of the gallery again.
+        setAttachments((current) => current.length ? current : attachments)
+      }
     } finally {
-      setBusySending(false)
+      if (isLeaseContextCurrent(promptLease)) {
+        setBusySending(false)
+      }
+      releaseMutation(promptLease)
     }
   }
 
   async function deleteSession(sessionID: string) {
+    if (isSessionMutationLocked()) return
+    // Capture the target namespace and directory before awaiting the delete. Navigation may change
+    // the selected session while the server is processing this request, but a successful delete
+    // still needs a tombstone in the same profile/config namespace.
+    const deleteTarget = sessions.find((session) => session.id === sessionID) ?? sessionToDelete
+    const deleteContext = {
+      profileID: activeProfileID,
+      configKey: configKey(config),
+      sessionID: sessionID
+    }
+    const deleteDirectory = deleteTarget?.directory
+    const lease = acquireMutation("delete", sessionID)
+    if (!lease) return
     try {
-      await api.deleteSession(config, sessionID, sessionToDelete?.directory)
-      if (selectedID === sessionID) {
-        setSelectedID(null)
+       await api.deleteSession(config, sessionID, deleteDirectory)
+       // The server may continue returning a recently deleted row for a short time. Persist the
+       // tombstone in the captured namespace regardless of where navigation ended up; only the
+       // visible list and selection below are allowed to depend on the current namespace.
+        const tombstoneKey = deleteContext.profileID + "\u0000" + deleteContext.configKey
+        const persistedTombstoneKey = tombstoneNamespaceKey(deleteContext.profileID, deleteContext.configKey)
+        const tombstones = mergedSessionTombstones(removedSessionIDsRef.current, tombstoneKey, persistedTombstoneKey)
+        tombstones.add(sessionID)
+        removedSessionIDsRef.current.set(tombstoneKey, tombstones)
+        removedSessionIDsRef.current.set(persistedTombstoneKey, tombstones)
+        persistSessionTombstones(removedSessionIDsRef.current)
+       // Lease currency includes the session, so it is intentionally too strict for this part:
+      // moving to another session does not make persistence of this deletion unsafe. Profile/config
+      // changes do, because their session list is a different namespace.
+      const currentDeleteContext = mutationCoordinator.getContext()
+      const sameNamespace = currentDeleteContext?.profileID === deleteContext.profileID
+        && currentDeleteContext.configKey === deleteContext.configKey
+       if (sameNamespace) {
+         setSessions((current) => current.filter((item) => item.id !== sessionID))
+      }
+      if (sameNamespace && currentDeleteContext?.sessionID === sessionID) {
+        // Remove the row and invalidate navigation before any refresh can reintroduce it.
+        replaceMutationContext(null)
+        // The tombstone intentionally survives this session-only context replacement so an
+        // eventual-consistency refresh (and navigation) cannot resurrect the deleted row.
+         setSelectedID(null)
         setMessages([])
         loadedMessagesRef.current = []
         setOptimisticUserMessages([])
@@ -3346,19 +4669,26 @@ function App() {
       setSessionToDelete(null)
       await refreshSessions(true)
     } catch (err) {
-      setRuntimeError((err as Error).message)
+      if (isLeaseContextCurrent(lease)) setRuntimeError((err as Error).message)
+    } finally {
+      releaseMutation(lease)
     }
   }
 
   async function renameSession(sessionID: string, newTitle: string, directory: string) {
-    if (!newTitle.trim()) return
+    if (!newTitle.trim() || isSessionMutationLocked()) return
+    const lease = acquireMutation("rename", sessionID)
+    if (!lease) return
     try {
       await api.renameSession(config, sessionID, newTitle.trim(), directory)
+      if (!isLeaseContextCurrent(lease)) return
       setRenamingSessionID(null)
       setRenameValue("")
       await refreshSessions(true)
     } catch (err) {
-      setRuntimeError((err as Error).message)
+      if (isLeaseContextCurrent(lease)) setRuntimeError((err as Error).message)
+    } finally {
+      releaseMutation(lease)
     }
   }
 
@@ -3368,6 +4698,7 @@ function App() {
   // over the single renameInputRef). Track which one is active so only that side switches to the
   // input.
   function startRename(session: SessionView, source: "list" | "header" = "list") {
+    if (isSessionMutationLocked()) return
     setRenameValue(session.title)
     setRenamingSessionID(session.id)
     setRenameSource(source)
@@ -3385,16 +4716,63 @@ function App() {
   }
 
   async function abortSession() {
-    if (!selectedSession) return
-    try {
-      await api.abort(config, selectedSession.id, selectedSession.directory)
-      completionShouldPlayRef.current = false
-      setAwaitingAssistantReply(false)
-      await refreshSessions()
-      await loadSelected(selectedSession.id, selectedSession.directory)
-    } catch (err) {
-      setRuntimeError((err as Error).message)
+    const target = selectedSession
+    const activeLease = mutationCoordinator.getActiveLease()
+    const abortContext = mutationCoordinator.getContext()
+    const abortContextGeneration = mutationCoordinator.getContextGeneration()
+    const abortKey = abortContext
+      ? `${abortContext.profileID}\u0000${abortContext.configKey}\u0000${abortContext.sessionID ?? ""}`
+      : ""
+    const canAbort = Boolean(target && isWorking && abortContext && abortContext.sessionID === target.id
+      && !abortInFlightRef.current.has(abortKey)
+      && (!activeLease
+        || (activeLease.context.profileID === abortContext.profileID
+          && activeLease.context.configKey === abortContext.configKey
+          && activeLease.context.sessionID === abortContext.sessionID
+          && activeLease.targetSessionID === target.id
+          && (activeLease.kind === "prompt" || activeLease.kind === "command" || activeLease.kind === "skill"))))
+    if (!target || !canAbort) return
+    // A prompt/command/skill owns the coordinator lease while it waits for the backend. Do not
+    // steal or release that lease: abort is an out-of-band request and the original owner still
+    // needs to finish its cleanup safely.
+    const lease = activeLease ? null : acquireMutation("abort")
+    if (!activeLease && !lease) return
+    if (!abortContext) {
+      if (lease) releaseMutation(lease)
+      return
     }
+    setAbortPresentationContext(abortKey)
+    bumpMutationLock((value) => value + 1)
+    let operation!: Promise<void>
+    operation = (async () => {
+      const sameContext = () => mutationCoordinator.isContextGenerationCurrent(abortContextGeneration)
+        && mutationCoordinator.isContextCurrent(abortContext)
+      try {
+        await api.abort(config, target.id, target.directory)
+        // The original prompt lease may have released by now. Currency is the full captured
+        // profile/config/session context, not ownership of that lease.
+        if (!sameContext()) return
+        completionShouldPlayRef.current = false
+        setAwaitingAssistantReply(false)
+        await refreshSessions()
+        if (!sameContext()) return
+        await loadSelected(target.id, target.directory)
+      } catch (err) {
+        if (sameContext()) setRuntimeError((err as Error).message)
+      } finally {
+        if (lease) releaseMutation(lease)
+        if (abortInFlightRef.current.get(abortKey) === operation) {
+          abortInFlightRef.current.delete(abortKey)
+          if (sameContext()) {
+            setAbortPresentationContext(null)
+          }
+          // The registry is part of the synchronous mutation-lock presentation even when this
+          // operation belongs to a context the user has already left.
+          bumpMutationLock((value) => value + 1)
+        }
+      }
+    })()
+    abortInFlightRef.current.set(abortKey, operation)
   }
 
   useEffect(() => {
@@ -3406,6 +4784,10 @@ function App() {
   // handler is registered once and must not capture a stale view.
   const backStateRef = useRef({ view, activeDetailSheet, sessionToDelete, renamingSessionID })
   backStateRef.current = { view, activeDetailSheet, sessionToDelete, renamingSessionID }
+  /** M3: fork reconciliation runs detached from renders, so it reads navigation state through refs —
+   *  mainView (which layout is on screen) and selectedSession (which session is open). */
+  const mainViewRef = useRef(mainView)
+  mainViewRef.current = mainView
 
   useEffect(() => {
     if (!isAndroidPlatform(Capacitor.getPlatform())) return
@@ -3823,24 +5205,29 @@ function App() {
   function runAppCommand(id: string) {
     switch (id) {
       case "session.new":
+        if (!hasConfiguredServer || isOffline || isSessionMutationLocked()) return
         void openNewSessionPicker()
         return
       case "session.refresh":
         void refreshSessionsWithIndicator().catch(() => undefined)
         return
       case "session.rename":
+        if (isSessionMutationLocked()) return
         if (selectedSession) startRename(selectedSession, "header")
         return
       case "session.delete":
+        if (isSessionMutationLocked()) return
         if (selectedSession) setSessionToDelete(selectedSession)
         return
       case "session.stop":
         void abortSession()
         return
       case "session.undo":
+        if (sessionActionPending !== null) return
         void runNativeHistoryCommand("undo")
         return
       case "session.redo":
+        if (sessionActionPending !== null) return
         void runNativeHistoryCommand("redo")
         return
       case "focus.composer":
@@ -3928,8 +5315,8 @@ function App() {
       id: "file",
       label: t('menubar.file'),
       entries: [
-        menuItem("session.new", t('command.newSession'), { disabled: !hasConfiguredServer || isOffline }),
-        menuItem("session.refresh", t('command.refreshSessions'), { disabled: !hasConfiguredServer }),
+         menuItem("session.new", t('command.newSession'), { disabled: !hasConfiguredServer || isOffline || mutationLocked }),
+          menuItem("session.refresh", t('command.refreshSessions'), { disabled: !hasConfiguredServer }),
         { kind: "separator", id: "file-sep" },
         menuItem("server.add", t('command.addServer')),
         menuItem("server.settings", t('command.openSettings'))
@@ -3940,13 +5327,13 @@ function App() {
       label: t('menubar.session'),
       entries: [
         menuItem("focus.composer", t('command.focusComposer'), { disabled: !selectedSession }),
-        menuItem("session.stop", t('command.stopAgent'), { disabled: !selectedSession || !isWorking }),
+         menuItem("session.stop", t('command.stopAgent'), { disabled: !canAbortSession }),
         { kind: "separator", id: "session-sep-1" },
-        menuItem("session.undo", t('detail.undo'), { disabled: !sessionHeaderActions.some((action) => action.id === "undo") }),
-        menuItem("session.redo", t('detail.redo'), { disabled: !sessionHeaderActions.some((action) => action.id === "redo") }),
+        menuItem("session.undo", t('detail.undo'), { disabled: !sessionHeaderActions.some((action) => action.id === "undo" && !action.disabled) }),
+        menuItem("session.redo", t('detail.redo'), { disabled: !sessionHeaderActions.some((action) => action.id === "redo" && !action.disabled) }),
         { kind: "separator", id: "session-sep-2" },
-        menuItem("session.rename", t('session.renameTitle'), { disabled: !selectedSession || !capabilities.sessionRename }),
-        menuItem("session.delete", t('sessions.delete'), { disabled: !selectedSession || !capabilities.sessionDelete })
+         menuItem("session.rename", t('session.renameTitle'), { disabled: !selectedSession || !capabilities.sessionRename || mutationLocked }),
+         menuItem("session.delete", t('sessions.delete'), { disabled: !selectedSession || !capabilities.sessionDelete || mutationLocked })
       ]
     },
     {
@@ -3996,13 +5383,13 @@ function App() {
   }, [nativeMenuSignature])
 
   const paletteCommands: PaletteCommand[] = [
-    { id: "session.new", group: t('command.groupSession'), label: t('command.newSession'), hint: displayShortcut("session.new"), icon: <PlusIcon size={16} />, disabled: !hasConfiguredServer || isOffline },
-    { id: "session.refresh", group: t('command.groupSession'), label: t('command.refreshSessions'), hint: displayShortcut("session.refresh"), icon: <RefreshIcon size={16} />, disabled: !hasConfiguredServer },
-    { id: "session.rename", group: t('command.groupSession'), label: t('session.renameTitle'), icon: <PencilIcon size={16} />, disabled: !selectedSession || !capabilities.sessionRename },
-    { id: "session.delete", group: t('command.groupSession'), label: t('sessions.delete'), icon: <TrashIcon size={16} />, disabled: !selectedSession || !capabilities.sessionDelete },
-    { id: "session.stop", group: t('command.groupSession'), label: t('command.stopAgent'), icon: <StopCircleIcon size={16} />, disabled: !selectedSession || !isWorking },
-    { id: "session.undo", group: t('command.groupSession'), label: t('detail.undo'), disabled: !sessionHeaderActions.some((action) => action.id === "undo") },
-    { id: "session.redo", group: t('command.groupSession'), label: t('detail.redo'), disabled: !sessionHeaderActions.some((action) => action.id === "redo") },
+     { id: "session.new", group: t('command.groupSession'), label: t('command.newSession'), hint: displayShortcut("session.new"), icon: <PlusIcon size={16} />, disabled: !hasConfiguredServer || isOffline || mutationLocked },
+      { id: "session.refresh", group: t('command.groupSession'), label: t('command.refreshSessions'), hint: displayShortcut("session.refresh"), icon: <RefreshIcon size={16} />, disabled: !hasConfiguredServer },
+     { id: "session.rename", group: t('command.groupSession'), label: t('session.renameTitle'), icon: <PencilIcon size={16} />, disabled: !selectedSession || !capabilities.sessionRename || mutationLocked },
+     { id: "session.delete", group: t('command.groupSession'), label: t('sessions.delete'), icon: <TrashIcon size={16} />, disabled: !selectedSession || !capabilities.sessionDelete || mutationLocked },
+      { id: "session.stop", group: t('command.groupSession'), label: t('command.stopAgent'), icon: <StopCircleIcon size={16} />, disabled: !canAbortSession },
+     { id: "session.undo", group: t('command.groupSession'), label: t('detail.undo'), disabled: mutationLocked || !sessionHeaderActions.some((action) => action.id === "undo" && !action.disabled) },
+     { id: "session.redo", group: t('command.groupSession'), label: t('detail.redo'), disabled: mutationLocked || !sessionHeaderActions.some((action) => action.id === "redo" && !action.disabled) },
     { id: "server.add", group: t('command.groupServer'), label: t('command.addServer'), icon: <ServerIcon size={16} /> },
     { id: "server.settings", group: t('command.groupServer'), label: t('command.openSettings'), hint: displayShortcut("server.settings"), icon: <SettingsIcon size={16} /> },
     { id: "view.palette", group: t('command.groupView'), label: t('command.commandPalette'), hint: displayShortcut("view.palette"), icon: <CommandIcon size={16} /> },
@@ -4069,7 +5456,7 @@ function App() {
               id="agent-select"
               value={activeAgentID}
               onChange={(event) => changeAgent(event.target.value)}
-              disabled={isWorking}
+               disabled={isWorking || mutationLocked}
             >
               {primaryAgentOptions.map((agent) => (
                 <option key={agent.id} value={agent.id}>{agentLabel(agent)}</option>
@@ -4096,7 +5483,7 @@ function App() {
               enterKeyHint="search"
               autoCapitalize="none"
               spellCheck={false}
-              disabled={isWorking}
+               disabled={isWorking || mutationLocked}
               autoComplete="off"
             />
           </label>
@@ -4111,7 +5498,7 @@ function App() {
                     key={optionKey}
                     className={active ? "model-option active" : "model-option"}
                     onClick={() => changeModel(optionKey)}
-                    disabled={isWorking}
+                               disabled={isWorking || mutationLocked}
                     role="option"
                     aria-selected={active}
                   >
@@ -4214,7 +5601,10 @@ function App() {
     onRename: (session: SessionView) => void renameSession(session.id, renameValue, session.directory).catch(() => undefined),
     onCancelRename: cancelRename,
     onStartRename: (session: SessionView) => startRename(session),
-    onDelete: setSessionToDelete
+    onDelete: (session: SessionView) => {
+      if (!isSessionMutationLocked()) setSessionToDelete(session)
+    },
+    mutationLocked
   }
 
   return (
@@ -4257,13 +5647,13 @@ function App() {
               <ArrowLeftIcon size={20} />
             </button>
             <div className="appbar-titles">
-              <h1 title={selectedSession.title}>{selectedSession.title}</h1>
+              <h1 ref={detailHeadingRef} tabIndex={-1} title={selectedSession.title}>{selectedSession.title}</h1>
               <p title={selectedSession.directory}>{projectLabel(selectedSession.directory)}</p>
             </div>
           </div>
           {sessionHeaderActions.length > 0 && (
             <div className="appbar-actions">
-              <SessionActionsMenu actions={sessionHeaderActions} t={t} />
+              <SessionActionsMenu actions={sessionHeaderActions} t={t} pendingAction={sessionActionPending} />
             </div>
           )}
         </header>
@@ -4283,8 +5673,9 @@ function App() {
           query={query}
           searchInputRef={searchInputRef}
           sidebarSessionsRef={sidebarSessionsRef}
-          refreshing={refreshingSessions}
-          creating={creatingSession}
+            refreshing={refreshingSessions}
+           creating={creatingSession}
+          mutationLocked={mutationLocked}
           offline={isOffline}
           width={viewportSidebarWidth}
           t={t}
@@ -4525,14 +5916,16 @@ function App() {
           activeSessions={activeSessions}
           changedSessions={changedSessions}
           query={query}
-          refreshing={refreshingSessions}
-          creating={creatingSession}
+            refreshing={refreshingSessions}
+           creating={creatingSession}
+          mutationLocked={mutationLocked}
           offline={isOffline}
           connectionState={connectionState}
           connectionStatusText={connectionStatusText}
           eventStreamState={eventStreamState}
           eventStreamText={eventStreamText}
           runtimeError={runtimeError}
+          actionNotice={actionNotice}
           t={t}
           onQueryChange={setQuery}
           onRefresh={() => void refreshSessionsWithIndicator().catch(() => undefined)}
@@ -4563,7 +5956,7 @@ function App() {
         <main className="panel detail fade-in">
           <div className="header-row detail-header desktop-detail-header">
               <div>
-              <h2>
+              <h2 ref={detailHeadingRef} tabIndex={-1}>
                 {selectedSession ? (
                   <div className="detail-title-row">
                     {renamingSessionID === selectedSession.id && renameSource === "header" ? (
@@ -4595,7 +5988,7 @@ function App() {
                           className="btn-icon btn-primary compact rename-save"
                           onClick={() => renameSession(selectedSession.id, renameValue, selectedSession.directory).catch(() => undefined)}
                           onMouseDown={(event) => event.preventDefault()}
-                          disabled={!renameValue.trim() || renameValue === selectedSession.title}
+                          disabled={mutationLocked || !renameValue.trim() || renameValue === selectedSession.title}
                           title={t('session.renameConfirm')}
                           aria-label={t('session.renameConfirm')}
                         >
@@ -4619,7 +6012,8 @@ function App() {
                           <button
                             type="button"
                             className="session-title-button"
-                            onClick={() => startRename(selectedSession, "header")}
+                             onClick={() => startRename(selectedSession, "header")}
+                             disabled={mutationLocked}
                             title={t('session.renameTitle')}
                             aria-label={t('session.renameTitle')}
                           >
@@ -4649,7 +6043,7 @@ function App() {
                 )}
               </div>
               {isDesktop && selectedSession && sessionHeaderActions.length > 0 && (
-                <SessionActionsMenu actions={sessionHeaderActions} t={t} />
+                <SessionActionsMenu actions={sessionHeaderActions} t={t} pendingAction={sessionActionPending} />
               )}
             </div>
 
@@ -4720,6 +6114,7 @@ function App() {
             directory={selectedSession?.directory}
             actions={messageMenuActions}
             onRevertMessage={handleRevertMessage}
+             revertDisabled={sessionActionPending === "fork" || mutationLocked}
             t={t}
             jumpAffordances={jumpAffordances}
             onJumpToTop={handleJumpToTop}
@@ -4729,13 +6124,20 @@ function App() {
             onMessagesScroll={handleMessagesScroll}
             onQuestionResolved={handleQuestionResolved}
             onPermissionResolved={handlePermissionResolved}
+            coordinator={mutationCoordinator}
+            onLeaseChanged={handleLeaseChanged}
+            onCancelQueuedMessage={cancelQueuedMessage}
+            cancellingInboxIDs={cancellingInboxIDs}
           />
           <SessionComposer
-            selected={Boolean(selectedSession)}
+            selected={Boolean(selectedSession) && sessionActionPending !== "fork"}
+            attachmentContextKey={`${activeProfileID}|${configKey(config)}|${selectedID ?? ""}`}
+            mutationLocked={mutationLocked}
             value={composer}
             attachments={attachments}
             supportsAttachments={capabilities.attachments}
             showStopAction={showStopAction}
+            canAbortSession={canAbortSession}
             softKeyboard={SOFT_KEYBOARD_DEVICE}
             t={t}
             composerRef={composerRef}
@@ -4757,8 +6159,8 @@ function App() {
             onAbort={() => void abortSession()}
           />
 
-          {runtimeError && <div className="error fade-in">✗ {runtimeError}</div>}
-          {actionNotice && <div className="notice info fade-in">ℹ {actionNotice}</div>}
+          {runtimeError && <div className="error fade-in" role="alert">✗ {runtimeError}</div>}
+          {actionNotice && <div className="notice info fade-in" role="status" aria-live="polite">ℹ {actionNotice}</div>}
         </main>
       )}
 
@@ -4790,7 +6192,7 @@ function App() {
 
             {activeDetailSheet === "ai" && (
               <div className="sheet-content">
-                <button type="button" className="btn-secondary" onClick={() => Promise.all([loadAgents(), loadModels()]).catch(() => undefined)}>
+                <button type="button" className="btn-secondary" disabled={mutationLocked} onClick={() => { if (mutationLocked) return; void Promise.all([loadAgents(selectedSession?.id, selectedSession?.directory), loadModels(selectedSession?.id, selectedSession?.directory)]).catch(() => undefined) }}>
                   <RefreshIcon size={16} />
                   {t('detail.refreshAi')}
                 </button>
@@ -4802,7 +6204,7 @@ function App() {
                         id="agent-select"
                         value={activeAgentID}
                         onChange={(event) => changeAgent(event.target.value)}
-                        disabled={isWorking}
+                         disabled={isWorking || mutationLocked}
                       >
                         {primaryAgentOptions.map((agent) => (
                           <option key={agent.id} value={agent.id}>{agentLabel(agent)}</option>
@@ -4829,7 +6231,7 @@ function App() {
                         enterKeyHint="search"
                         autoCapitalize="none"
                         spellCheck={false}
-                        disabled={isWorking}
+                               disabled={isWorking || mutationLocked}
                         autoComplete="off"
                       />
                     </label>
@@ -4844,7 +6246,7 @@ function App() {
                               key={optionKey}
                               className={active ? "model-option active" : "model-option"}
                               onClick={() => changeModel(optionKey)}
-                              disabled={isWorking}
+                              disabled={isWorking || mutationLocked}
                               role="option"
                               aria-selected={active}
                             >
@@ -4975,7 +6377,7 @@ function App() {
               <button className="btn-secondary" onClick={() => setSessionToDelete(null)}>
                 {t('session.cancel')}
               </button>
-              <button className="btn-danger" onClick={() => deleteSession(sessionToDelete.id)}>
+              <button className="btn-danger" disabled={mutationLocked} onClick={() => deleteSession(sessionToDelete.id)}>
                 <TrashIcon size={16} />
                 {t('session.deleteConfirm')}
               </button>
@@ -5248,10 +6650,10 @@ http://YOUR_PC_IP:4096/global/health</pre>
                        <div className="command-card-header">
                          <code className="command-name">/{cmd.name}</code>
                          {cmd.source === "skill" && (
-                           <button
-                             type="button"
-                             className="btn-secondary"
-                             disabled={!selectedSession || config.backend !== "opencode2" || busySending}
+                            <button
+                              type="button"
+                              className="btn-secondary"
+                               disabled={!selectedSession || config.backend !== "opencode2" || busySending || sessionActionPending === "fork" || mutationLocked}
                              onClick={() => void activateSkill(cmd)}
                              title={!selectedSession
                                ? t('help.skillRequiresSession')
@@ -5283,10 +6685,10 @@ http://YOUR_PC_IP:4096/global/health</pre>
                    {!selectedSession ? t('help.skillRequiresSession') : t('help.skillRequiresOpenCode2')}
                  </p>
                )}
-               {actionNotice && <div className="notice info fade-in">ℹ {actionNotice}</div>}
+               {actionNotice && <div className="notice info fade-in" role="status" aria-live="polite">ℹ {actionNotice}</div>}
              </div>
            )}
-          {runtimeError && <p className="error">{runtimeError}</p>}
+          {runtimeError && <p className="error" role="alert">{runtimeError}</p>}
         </section>
         </ConditionalWrapper>
       )}
@@ -5314,7 +6716,7 @@ http://YOUR_PC_IP:4096/global/health</pre>
               <section className="inspector-section">
                 <div className="inspector-section-title">
                   <span>{t('detail.aiTitle')}</span>
-                  <button type="button" className="btn-icon btn-ghost compact" onClick={() => void Promise.all([loadAgents(), loadModels()]).catch(() => undefined)} aria-label={t('detail.refreshAi')}>
+                   <button type="button" className="btn-icon btn-ghost compact" disabled={mutationLocked} onClick={() => { if (mutationLocked) return; void Promise.all([loadAgents(selectedSession?.id, selectedSession?.directory), loadModels(selectedSession?.id, selectedSession?.directory)]).catch(() => undefined) }} aria-label={t('detail.refreshAi')}>
                     <RefreshIcon size={14} />
                   </button>
                 </div>

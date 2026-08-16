@@ -62,9 +62,50 @@ assert.equal(zhCN('detail.changedFilesTitle'), '已更改文件')
 assert.equal(zhCN('settings.themeSystem'), '跟随系统')
 assert.equal(zhCN('action.preparingTool', { tool: 'write' }), '正在准备 write')
 assert.equal(zhCN('detail.linesAddedDeleted', { additions: 3, deletions: 1 }), '+3 行 · -1 行')
+for (const translator of [en, it, zh, zhCN]) {
+  assert.match(translator('detail.removeAttachment', { filename: 'photo.png' }), /photo\.png/)
+}
+for (const translator of [en, it, zh, zhCN]) {
+  assert.notEqual(translator('detail.compacting'), 'detail.compacting')
+  assert.notEqual(translator('detail.forking'), 'detail.forking')
+}
+
+// The unconfirmed-compaction notice must not invite an immediate duplicate compaction, and the
+// queued status line must be localized for the shared queue indicator.
+assert.ok(
+  en('detail.compactUnconfirmed').includes('before compacting again'),
+  'the unconfirmed compaction notice must counsel waiting, not an immediate duplicate compaction'
+)
+assert.ok(
+  !en('detail.compactUnconfirmed').includes('compact again if needed'),
+  'the unconfirmed compaction notice must not invite an immediate retry'
+)
+for (const translator of [en, it, zh, zhCN]) {
+  assert.notEqual(translator('detail.compactUnconfirmed'), 'detail.compactUnconfirmed')
+  assert.notEqual(translator('detail.queuedPrompt'), 'detail.queuedPrompt')
+  assert.notEqual(translator('detail.deliveryIndeterminate'), 'detail.deliveryIndeterminate')
+}
+
+// The queued-prompt cancel affordance must be localized in every language, so a queued row can
+// always offer a labelled way out of the queue.
+for (const translator of [en, it, zh, zhCN]) {
+  assert.notEqual(translator('detail.cancelQueuedPrompt'), 'detail.cancelQueuedPrompt')
+}
 
 assert.equal(en('settings.deleteServerTitle'), 'Delete saved server?')
 assert.equal(it('settings.deleteServerTitle'), 'Eliminare il server salvato?')
 assert.equal(zh('settings.deleteServerTitle'), '刪除已儲存的伺服器？')
+
+// Disabled session-action explanations and the fork-created notice must exist in every language,
+// so a greyed-out Compact/Fork/Undo/Redo can always explain itself in the user's own language.
+for (const translator of [en, it, zh, zhCN]) {
+  assert.notEqual(translator('detail.actionLocked'), 'detail.actionLocked')
+  assert.notEqual(translator('detail.requiresUserMessage'), 'detail.requiresUserMessage')
+  assert.notEqual(translator('detail.actionWhileWorking'), 'detail.actionWhileWorking')
+  assert.notEqual(translator('detail.forkCreated'), 'detail.forkCreated')
+}
+assert.ok(en('detail.requiresUserMessage').includes('message'), 'the user-message requirement must be stated in the explanation')
+assert.ok(en('detail.actionWhileWorking').includes('idle'), 'the working-state explanation must name the idle condition')
+assert.ok(en('detail.forkCreated').includes('session list'), 'the fork-created notice must point at the session list')
 
 console.log('i18n tests passed')

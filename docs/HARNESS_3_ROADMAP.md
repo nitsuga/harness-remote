@@ -135,12 +135,13 @@ As of August 15, 2026:
 
 - ✅ **#147 — One-command startup** is complete.
 - ✅ **#143 — Universal Daemon** is complete as an implementation milestone. Its architecture and mechanics are well covered by tests, but a real ACP-backed harness still needs to be run end to end before heterogeneous daemon compatibility is described as validated.
-- ✅ **#145 — Create work** is complete, delivered as **PR #20 in this fork**. The upstream issue #145 post was erroneous; it was relocated to this fork and implemented, pushed and merged as PR #20. This covers project discovery, normalized tasks, isolated worktrees, agent launch, persisted task/run linkage, restart reconciliation, safe cleanup, result inspection, explicit finish semantics and the task-first client workflow end to end.
+- ✅ **Task/worktree/finish backend foundations** are complete: machine project discovery, persistent task drafts, isolated Git worktrees, agent launch, task/run linkage, restart reconciliation, safe cleanup, result inspection and explicit finish semantics. This is backend/API capability only.
+- ⏳ **#12 — Expose task and worktree workflows in the client** (this fork) is **open**. The task-first client UX — select project, enter task, choose agent, prepare/start the worktree, monitor the run, inspect results and finish safely — remains outstanding.
 - ✅ **#163 — Finish-work result and safe finalization primitives** is complete through #164.
 - ⏳ Full review/tests/PR lifecycle remains ahead.
 - ⏳ **#146 — Multi-machine Fleet** remains the next major differentiating product milestone after the task workflow is exposed cleanly to users and fleet demand is validated.
 
-That distinction is now resolved: task/worktree/finish support exists as **backend/API capability** and the client exposes the task-first workflow end to end via PR #20. The full review/tests/PR lifecycle remains ahead.
+The distinction is clear: task/worktree/finish support exists as **backend/API capability**, while the client task-first workflow remains outstanding, tracked by open fork issue **#12**. Fork **PR #20** (merged Aug 15, 2026 — *fix(client): read bare OpenCode 2 response bodies*) fixed a client regression in OpenCode 2 response handling; it did not implement task/worktree UX.
 
 ## 7. Execution sequencing
 
@@ -148,7 +149,7 @@ The roadmap has two dependency tracks, but **not an assumption of parallel maint
 
 ### Primary track — Product / Adoption
 
-#### Completed foundation — #147 + #143 + #145
+#### Completed foundation — #147 + #143 + task/worktree/finish backend
 
 One-command startup and the Universal Daemon established the adoption/runtime base:
 
@@ -161,13 +162,13 @@ One-command startup and the Universal Daemon established the adoption/runtime ba
 
 The architecture/mechanics are implemented, but real heterogeneous multi-host validation still requires at least one reachable ACP-backed harness environment. Test doubles are evidence for the architecture, not proof of real harness compatibility.
 
-#145 — Create work — was posted as upstream issue #145 in error. It was relocated to this fork and implemented, pushed and merged as **PR #20**. The backend loop is now exposed cleanly in the client:
+The task/worktree/finish **backend foundations** are in place: machine project discovery, persistent task drafts, isolated Git worktrees, agent launch, task/run linkage, restart reconciliation, safe cleanup, result inspection and explicit finish semantics. The backend loop is:
 
 ```text
 project → task → isolated worktree → agent → run → result → finish
 ```
 
-The client workflow covers:
+The client task-first workflow is the outstanding piece, tracked by open fork issue **#12 — feat: expose task and worktree workflows in the client**. It should cover:
 
 - choose a known project;
 - enter a task;
@@ -176,9 +177,15 @@ The client workflow covers:
 - open the resulting run/session;
 - inspect the result and finish safely.
 
+Fork **PR #20** (merged Aug 15, 2026 — *fix(client): read bare OpenCode 2 response bodies*) fixed a client regression in OpenCode 2 response handling; it did not implement the task/worktree UX, which remains open under #12.
+
 Several tasks should eventually be usable concurrently in separate worktrees. Explicit agent selection is enough initially. `Auto` routing remains later.
 
-#### Current — Finish-work expansion — review / tests / PR
+#### Current — Task-first client UX (#12)
+
+The backend foundations are complete, but users cannot yet drive them from the client. The next slice is shipping the #12 task-first client workflow end to end, including failure-recovery and cleanup integration tests, before the review/tests/PR lifecycle expands.
+
+#### Next — Review / tests / PR lifecycle
 
 The first backend finish primitives are complete, but the competitive loop is not:
 
@@ -326,7 +333,9 @@ PRIMARY
   ↓
 #143  Universal Daemon
   ↓
-#145  Task-first client workflow — complete (this fork, PR #20)
+       Task/worktree/finish backend foundations — complete
+  ↓
+#12   Task-first client workflow — open (this fork) — next
   ↓
        Diff / tests / review / PR / CI lifecycle
   ↓

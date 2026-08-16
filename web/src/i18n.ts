@@ -102,7 +102,7 @@ type TranslationKey =
 
   | 'detail.composerPlaceholder'
   | 'detail.attachImage'
-  | 'detail.removeAttachment'
+   | 'detail.removeAttachment'
   | 'detail.attachedImage'
   | 'detail.externalSession'
   | 'detail.waiting'
@@ -165,6 +165,23 @@ type TranslationKey =
   | 'detail.sessionDetailsTitle'
   | 'detail.sessionDetailsHint'
   | 'detail.closeSheet'
+  | 'detail.compactSession'
+  | 'detail.forkSession'
+  | 'detail.compactQueued'
+  | 'detail.compacting'
+  | 'detail.forking'
+  | 'detail.compactCompleted'
+  | 'detail.compactFailed'
+  | 'detail.compactUnconfirmed'
+  | 'detail.deliveryIndeterminate'
+  | 'detail.deliveryAdmitted'
+  | 'detail.forkUnconfirmed'
+  | 'detail.forkCreated'
+  | 'detail.actionLocked'
+  | 'detail.requiresUserMessage'
+  | 'detail.actionWhileWorking'
+  | 'detail.queuedPrompt'
+  | 'detail.cancelQueuedPrompt'
   | 'todo.title'
   | 'todo.hide'
   | 'todo.show'
@@ -408,7 +425,7 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.emptyHint': 'Start a conversation below',
     'detail.composerPlaceholder': 'Prompt, or / for commands',
     'detail.attachImage': 'Attach image',
-    'detail.removeAttachment': 'Remove attachment',
+    'detail.removeAttachment': 'Remove attachment {filename}',
     'detail.attachedImage': 'Attached image',
     'detail.externalSession': 'Started by another client',
     'detail.waiting': 'Waiting...',
@@ -471,6 +488,23 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.sessionDetailsTitle': 'Session details',
     'detail.sessionDetailsHint': 'Advanced project, VCS, file and model information.',
     'detail.closeSheet': 'Close',
+    'detail.compactSession': 'Compact session',
+    'detail.forkSession': 'Fork session',
+    'detail.compactQueued': 'Compaction queued',
+    'detail.compacting': 'Compacting…',
+    'detail.forking': 'Forking…',
+    'detail.compactCompleted': 'Compaction completed',
+    'detail.compactFailed': 'Compaction failed; you can try again',
+    'detail.compactUnconfirmed': 'Compaction status is unknown. Check the transcript and wait for the current run to finish before compacting again.',
+    'detail.deliveryIndeterminate': 'Delivery status is unknown. The server is being reconciled; do not resend.',
+    'detail.deliveryAdmitted': 'Delivery confirmed with the server; nothing was sent twice.',
+    'detail.forkUnconfirmed': 'Could not confirm the forked session. Refresh the session list to find it.',
+    'detail.forkCreated': 'Fork created — find it in the session list.',
+    'detail.actionLocked': 'Another session action is in progress; wait for it to finish.',
+    'detail.requiresUserMessage': 'Needs at least one message in this session.',
+    'detail.actionWhileWorking': 'Available once the agent is idle.',
+    'detail.queuedPrompt': 'Queued · waiting to send',
+    'detail.cancelQueuedPrompt': 'Cancel queued prompt',
     'todo.title': 'Todo Items',
     'todo.hide': 'Hide',
     'todo.show': 'Show',
@@ -713,7 +747,7 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.emptyHint': 'Inizia una conversazione qui sotto',
     'detail.composerPlaceholder': 'Prompt, o / per i comandi',
     'detail.attachImage': 'Allega immagine',
-    'detail.removeAttachment': 'Rimuovi allegato',
+    'detail.removeAttachment': 'Rimuovi allegato {filename}',
     'detail.attachedImage': 'Immagine allegata',
     'detail.externalSession': 'Avviata da un altro client',
     'detail.waiting': 'Attesa...',
@@ -776,6 +810,23 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.sessionDetailsTitle': 'Dettagli sessione',
     'detail.sessionDetailsHint': 'Informazioni avanzate su progetto, VCS, file e modello.',
     'detail.closeSheet': 'Chiudi',
+    'detail.compactSession': 'Compatta sessione',
+    'detail.forkSession': 'Duplica sessione',
+    'detail.compactQueued': 'Compattazione in coda',
+    'detail.compacting': 'Compattazione…',
+    'detail.forking': 'Duplicazione…',
+    'detail.compactCompleted': 'Compattazione completata',
+    'detail.compactFailed': 'Compattazione non riuscita; puoi riprovare',
+    'detail.compactUnconfirmed': 'Stato della compattazione sconosciuto. Controlla la trascrizione e attendi che l’esecuzione in corso finisca prima di compattare di nuovo.',
+    'detail.deliveryIndeterminate': 'Stato della consegna sconosciuto. Sincronizzazione in corso; non inviare di nuovo.',
+    'detail.deliveryAdmitted': 'Consegna confermata con il server; nulla è stato inviato due volte.',
+    'detail.forkUnconfirmed': 'Impossibile confermare la sessione duplicata. Aggiorna l’elenco delle sessioni per trovarla.',
+    'detail.forkCreated': 'Sessione duplicata creata: trovala nell’elenco delle sessioni.',
+    'detail.actionLocked': 'Un’altra azione della sessione è in corso; attendi che finisca.',
+    'detail.requiresUserMessage': 'Richiede almeno un messaggio in questa sessione.',
+    'detail.actionWhileWorking': 'Disponibile quando l’agente è inattivo.',
+    'detail.queuedPrompt': 'In coda · in attesa di invio',
+    'detail.cancelQueuedPrompt': 'Annulla il prompt in coda',
     'todo.title': 'Todo',
     'todo.hide': 'Nascondi',
     'todo.show': 'Mostra',
@@ -1011,7 +1062,7 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.emptyHint': '在下方開始對話',
     'detail.composerPlaceholder': '輸入提示，或以 / 下命令',
     'detail.attachImage': '附加圖片',
-    'detail.removeAttachment': '移除附件',
+    'detail.removeAttachment': '移除附件 {filename}',
     'detail.attachedImage': '附加的圖片',
     'detail.externalSession': '由其他用戶端啟動',
     'detail.waiting': '等待中...',
@@ -1074,6 +1125,23 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.sessionDetailsTitle': '工作階段詳細資訊',
     'detail.sessionDetailsHint': '專案、VCS、檔案與模型的進階資訊。',
     'detail.closeSheet': '關閉',
+    'detail.compactSession': '壓縮工作階段',
+    'detail.forkSession': '分叉工作階段',
+    'detail.compactQueued': '壓縮已排入佇列',
+    'detail.compacting': '正在壓縮…',
+    'detail.forking': '正在分叉…',
+    'detail.compactCompleted': '壓縮完成',
+    'detail.compactFailed': '壓縮失敗；可以再試一次',
+    'detail.compactUnconfirmed': '壓縮狀態不明。請檢查對話記錄，並等待目前執行結束後再壓縮。',
+    'detail.deliveryIndeterminate': '傳送狀態不明。正在與伺服器同步，請勿重送。',
+    'detail.deliveryAdmitted': '已與伺服器確認傳送；沒有重複傳送。',
+    'detail.forkUnconfirmed': '無法確認分叉的工作階段。請重新整理工作階段清單以尋找它。',
+    'detail.forkCreated': '已建立分叉的工作階段，請在清單中尋找。',
+    'detail.actionLocked': '另一個工作階段動作正在進行；請等待完成。',
+    'detail.requiresUserMessage': '此工作階段需要至少一則訊息。',
+    'detail.actionWhileWorking': '代理程式閒置後即可使用。',
+    'detail.queuedPrompt': '已排隊 · 等待傳送',
+    'detail.cancelQueuedPrompt': '取消佇列中的提示',
     'todo.title': '待辦事項',
     'todo.hide': '隱藏',
     'todo.show': '顯示',
@@ -1258,8 +1326,9 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.loadFailed': '无法打开此会话',
     'detail.emptyTitle': '暂无消息',
     'detail.emptyHint': '在下方开始对话',
-    'detail.composerPlaceholder': '输入提示，或以 / 输入命令',
-    'detail.externalSession': '由其他客户端启动',
+     'detail.composerPlaceholder': '输入提示，或以 / 输入命令',
+     'detail.removeAttachment': '移除附件 {filename}',
+     'detail.externalSession': '由其他客户端启动',
     'detail.waiting': '等待中...',
     'detail.copyText': '复制文本',
     'detail.copyMarkdown': '复制为 Markdown',
@@ -1320,6 +1389,23 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.sessionDetailsTitle': '会话详细信息',
     'detail.sessionDetailsHint': '项目、VCS、文件与模型的进阶信息。',
     'detail.closeSheet': '关闭',
+    'detail.compactSession': '压缩会话',
+    'detail.forkSession': '分叉会话',
+    'detail.compactQueued': '压缩已排队',
+    'detail.compacting': '正在压缩…',
+    'detail.forking': '正在分叉…',
+    'detail.compactCompleted': '压缩完成',
+    'detail.compactFailed': '压缩失败；可以重试',
+    'detail.compactUnconfirmed': '压缩状态未知。请检查对话记录，并等待当前运行结束后再压缩。',
+    'detail.deliveryIndeterminate': '传送状态未知。正在与服务器同步，请勿重新发送。',
+    'detail.deliveryAdmitted': '已与服务器确认传送；没有重复传送。',
+    'detail.forkUnconfirmed': '无法确认分叉的会话。请刷新会话列表以找到它。',
+    'detail.forkCreated': '已创建分叉的会话，请在列表中查找。',
+    'detail.actionLocked': '另一个会话操作正在进行；请等待完成。',
+    'detail.requiresUserMessage': '此会话至少需要一条消息。',
+    'detail.actionWhileWorking': '代理空闲后即可使用。',
+    'detail.queuedPrompt': '已排队 · 等待发送',
+    'detail.cancelQueuedPrompt': '取消队列中的提示',
     'todo.title': '待办事项',
     'todo.hide': '隐藏',
     'todo.show': '显示',

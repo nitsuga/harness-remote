@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { createTranslator } from './i18n.ts'
 import {
+  applyInboxDelivery,
   fetchSkillCatalog,
   isV2RouteAbsent,
   mergeCommandCatalog,
@@ -414,5 +417,242 @@ assert.deepEqual(toFormAnswer(conditionalForm, [['Yes'], ['current-secret']]), {
   enabled: true,
   secret: 'current-secret'
 })
+
+// --- Session compact/fork lane (issue #4) ---------------------------------------------
+
+// `POST /api/session/{id}/fork` (`v2.session.fork`) answers `{ data: Session.Info }`. The fork
+// response carries extra fields (`fork`, `parentID`, `cost`, `tokens`, ...) the app's mapper does
+// not know about; it must still map to a usable Session — the client returns `toSession(forked)`
+// and the UI feeds that straight into its session view.
+const forkedInfo = {
+  id: 'ses_child',
+  parentID: 'ses_003dc6eaeffeXJgbfQFfpD8Od2',
+  fork: { sessionID: 'ses_003dc6eaeffeXJgbfQFfpD8Od2', boundary: { type: 'through', messageID: 'msg_x' } },
+  projectID: 'global',
+  agent: 'build',
+  model: { id: 'deepseek-v4-flash', providerID: 'opencode-go', variant: 'high' },
+  cost: 0.0012965372,
+  tokens: { input: 11583, output: 1236, reasoning: 453, cache: { read: 178048, write: 0 } },
+  time: { created: 1786641617238, updated: 1786710305014 },
+  title: 'Greeting (fork)',
+  location: { directory: '/home/eric' },
+  subpath: 'home/eric'
+}
+assert.deepEqual(toSession(forkedInfo), {
+  id: 'ses_child',
+  title: 'Greeting (fork)',
+  directory: '/home/eric',
+  time: { created: 1786641617238, updated: 1786710305014 },
+  model: { id: 'deepseek-v4-flash', providerID: 'opencode-go', variant: 'high' },
+  project: { id: 'global', worktree: '/home/eric' },
+  revert: undefined,
+  summary: undefined,
+  external: false
+})
+
+// Wire contract for the two new endpoints, checked against the client source the same way the
+// regression suites check App.tsx/api.ts: the node runner cannot import opencode2-client.ts (its
+// extensionless sibling imports), so the exact request shapes are asserted textually.
+const clientSource = readFileSync(new URL('./opencode2-client.ts', import.meta.url), 'utf8')
+assert.match(clientSource, /delivery: promptDelivery/, 'prompt delivery must be selected explicitly for idle and queued follow-ups')
+assert.match(clientSource, /delivery\?: "steer" \| "queue"/, 'v2 prompt delivery must use the protocol enum')
+assert.match(clientSource, /IndeterminateDeliveryError/, 'transport loss after a mutation request must remain indeterminate')
+assert.match(readFileSync(new URL('./opencode2-mappers.ts', import.meta.url), 'utf8'), /compactionStatus/, 'compaction terminal metadata must survive history mapping')
+// Compact is durably admitted under a stable client id (`msg_` prefix) so a lost acknowledgement can
+// be retried idempotently, and the admission response carries the exact compaction message id the UI
+// correlates terminal history state against.
+assert.ok(
+  clientSource.includes('`/api/session/${encodeURIComponent(sessionID)}/compact`, {\n      method: "POST",\n      body\n    })'),
+  'compact must POST its admission body (stable id + queued delivery)'
+)
+assert.match(clientSource, /body\.id = compactRequestID/, 'compact must carry a stable admission id')
+assert.match(clientSource, /return \{ id: admitted\?\.id \?\? compactRequestID, requestID: compactRequestID \}/, 'compact must return the exact admission id for terminal correlation')
+assert.ok(
+  clientSource.includes('`/api/session/${encodeURIComponent(sessionID)}/fork`, {\n      method: "POST",\n      body: { boundary: { type: "through" } }\n    })'),
+  'fork must POST the through boundary — the only fork boundary that needs no messageID'
+)
+// The durable admission id makes prompt/command/skill/compact/create retryable without duplication:
+// the server answers 409 when the id is already recorded, and isAdmissionConflict recognizes that.
+assert.match(clientSource, /body\.id = promptRequestID/, 'prompt must carry its stable admission id')
+assert.match(clientSource, /if \(requestID\) body\.id = requestID/, 'command, skill, and create must carry their stable admission id when provided')
+assert.match(clientSource, /isAdmissionConflict/, 'the client must recognize an idempotent admission conflict (409)')
+assert.ok(clientSource.includes('`/api/session/${encodeURIComponent(sessionID)}/inbox`'), 'queued delivery state must be readable from the v2 inbox endpoint')
+assert.ok(clientSource.includes('`/api/session?parentID=${encodeURIComponent(parentID)}`'), 'fork reconciliation must list children by parent id')
+
+// The v1/bridge backends must reject compact/fork honestly (same pattern as sendSkill) so the UI
+// never sees a silent success from a backend that cannot perform the operation.
+const apiSource = readFileSync(new URL('./api.ts', import.meta.url), 'utf8')
+assert.ok(
+  apiSource.includes('return Promise.reject(new Error("Session compaction is only supported on OpenCode 2 servers"))'),
+  'v1 compactSession must reject honestly'
+)
+assert.ok(
+  apiSource.includes('return Promise.reject(new Error("Session forking is only supported on OpenCode 2 servers"))'),
+  'v1 forkSession must reject honestly'
+)
+
+// --- Inbox delivery metadata (issues #1/#6) ------------------------------------------------
+
+// The message list does not carry delivery state; the inbox (`GET /api/session/{id}/inbox`) does.
+// `applyInboxDelivery` overlays the server's queued/steer metadata onto the fetched transcript so a
+// queued prompt keeps its indicator across reconciliation, and drops it once the item is delivered.
+const queuedTranscript = [
+  toMessageEnvelope({ id: 'msg_pending', type: 'user', time: { created: 1 }, text: 'Queued hello' }, 'ses_x'),
+  toMessageEnvelope({ id: 'msg_delivered', type: 'user', time: { created: 2 }, text: 'Delivered hello' }, 'ses_x')
+]
+const inboxItems = [
+  { id: 'msg_pending', sessionID: 'ses_x', timeCreated: 1, type: 'user', payload: { text: 'Queued hello' }, delivery: 'queue' },
+  { id: 'msg_delivered', sessionID: 'ses_x', timeCreated: 2, type: 'user', payload: { text: 'Delivered hello' }, delivery: 'steer' },
+  { id: 'msg_compact', sessionID: 'ses_x', timeCreated: 3, type: 'compaction', payload: {}, delivery: 'queue' }
+]
+const overlaid = applyInboxDelivery(queuedTranscript, inboxItems)
+assert.equal(overlaid[0].info.delivery, 'queue', 'a message the inbox still holds as queued must keep its queued indicator')
+assert.equal(overlaid[1].info.delivery, 'steer', 'a message the inbox reports as steered must carry steer delivery')
+assert.equal(applyInboxDelivery(queuedTranscript, []), queuedTranscript, 'an empty inbox must leave the transcript untouched')
+assert.equal(applyInboxDelivery(queuedTranscript, [{ id: 'msg_compact', sessionID: 'ses_x', timeCreated: 3, type: 'compaction', payload: {}, delivery: 'queue' }]), queuedTranscript, 'compaction inbox items must not affect user message delivery metadata')
+// A message with no inbox entry (or one whose delivery already matches) must keep its identity so
+// the memoized message rendering does not re-run on every poll.
+const steerOnly = applyInboxDelivery(queuedTranscript, [{ id: 'msg_delivered', sessionID: 'ses_x', timeCreated: 2, type: 'user', payload: {}, delivery: 'steer' }])
+assert.equal(steerOnly[1].info.delivery, 'steer')
+assert.notEqual(steerOnly[1], queuedTranscript[1])
+const alreadyQueued = applyInboxDelivery(overlaid, [{ id: 'msg_pending', sessionID: 'ses_x', timeCreated: 1, type: 'user', payload: {}, delivery: 'queue' }])
+assert.equal(alreadyQueued[0], overlaid[0], 'an unchanged delivery must preserve the message identity')
+
+// --- Compaction admission id (issue #4) ------------------------------------------------
+
+// The client supplies its own stable `msg_` id so the acknowledgement can be retried idempotently,
+// and the server's `{ data: SessionInbox.Compaction }` response carries the exact compaction message
+// id that terminal history state is correlated against.
+assert.match(clientSource, /createMessageRequestID/, 'the client must generate stable msg_ admission ids')
+assert.match(clientSource, /compactRequestID = requestID \?\? createMessageRequestID\(\)/, 'compact must default its admission id when none is supplied')
+
+// --- Prompt/command admission metadata (issues #1/#2) -------------------------------------
+
+// `POST /api/session/{id}/prompt` and `/command` succeed with `{ data: Session.Inbox.User }` — the
+// exact durable message id and the delivery the server recorded. The client must surface both in its
+// return instead of discarding the response: prompt previously returned only `{ admitted, requestID }`
+// and command fabricated a placeholder envelope.
+assert.match(clientSource, /const admitted = await v2Request<\{ id\?: string; delivery\?: "steer" \| "queue" \}>\(config, `\/api\/session\/\$\{encodeURIComponent\(sessionID\)\}\/prompt`/, 'prompt must read the admitted Session.Inbox.User (exact id + delivery) from the response envelope')
+assert.match(clientSource, /const admitted = await v2Request<\{ id\?: string; delivery\?: "steer" \| "queue" \}>\(config, `\/api\/session\/\$\{encodeURIComponent\(sessionID\)\}\/command`/, 'command must read the admitted Session.Inbox.User (exact id + delivery) from the response envelope')
+assert.match(clientSource, /return \{ admitted: true, requestID: promptRequestID, messageID: admitted\?\.id, delivery: admitted\?\.delivery \}/, 'prompt must return the exact durable message id and delivery alongside its stable request id')
+assert.match(clientSource, /return \{ admitted: true, requestID, messageID: admitted\?\.id, delivery: admitted\?\.delivery \}/, 'command must return the exact durable message id and delivery alongside its stable request id')
+assert.ok(!clientSource.includes('parts: [] } as MessageEnvelope'), 'command must not fabricate a placeholder envelope')
+// The stable client admission ids survive the metadata change: prompt keeps its defaulted id and
+// command keeps its caller-supplied id on the wire.
+assert.match(clientSource, /body\.id = promptRequestID/, 'prompt must keep its stable durable admission id')
+assert.match(clientSource, /if \(requestID\) body\.id = requestID/, 'command must keep its stable durable admission id when provided')
+
+// --- Skill activation: NOT idempotent by id (issue #5) ------------------------------------
+
+// The skill endpoint is not durably admitted by id — it derives an event id from the request id,
+// and re-admitting a duplicate event id can defect. The client comment must document that (the
+// previous claim that a retry "can never activate the skill twice" was wrong), and the client must
+// not attempt an automatic idempotent retry for skills the way prompt/command/compact allow.
+const sendSkillSource = clientSource.slice(clientSource.indexOf('async sendSkill'), clientSource.indexOf('async compactSession'))
+assert.ok(!clientSource.includes('can never activate the skill twice'), 'the misleading skill idempotency claim must be removed')
+assert.match(clientSource, /durably admitted by id/, 'the client must document that skill activation is not durably admitted by id')
+assert.match(clientSource, /duplicate event id can defect/, 'the client must document that a duplicate skill event id can defect')
+assert.equal((sendSkillSource.match(/\/skill`, \{/g) ?? []).length, 1, 'sendSkill must admit the activation exactly once — no automatic retry added')
+assert.equal((sendSkillSource.match(/sendSkillV2|sendSkill\(/g) ?? []).length, 1, 'sendSkill must not call itself or a sibling dispatch (no retry loop)')
+
+// Every language must ship the compact/fork labels and the compact queued notice.
+const compactSessionLabels = {
+  en: 'Compact session',
+  it: 'Compatta sessione',
+  'zh-TW': '壓縮工作階段',
+  'zh-CN': '压缩会话'
+}
+const forkSessionLabels = {
+  en: 'Fork session',
+  it: 'Duplica sessione',
+  'zh-TW': '分叉工作階段',
+  'zh-CN': '分叉会话'
+}
+const compactQueuedLabels = {
+  en: 'Compaction queued',
+  it: 'Compattazione in coda',
+  'zh-TW': '壓縮已排入佇列',
+  'zh-CN': '压缩已排队'
+}
+const unconfirmedLabels = {
+  en: 'Compaction status is unknown. Check the transcript and wait for the current run to finish before compacting again.',
+  it: 'Stato della compattazione sconosciuto. Controlla la trascrizione e attendi che l’esecuzione in corso finisca prima di compattare di nuovo.',
+  'zh-TW': '壓縮狀態不明。請檢查對話記錄，並等待目前執行結束後再壓縮。',
+  'zh-CN': '压缩状态未知。请检查对话记录，并等待当前运行结束后再压缩。'
+}
+for (const language of ['en', 'it', 'zh-TW', 'zh-CN']) {
+  const t = createTranslator(language)
+  assert.equal(t('detail.compactSession'), compactSessionLabels[language], `${language} compactSession label`)
+  assert.equal(t('detail.forkSession'), forkSessionLabels[language], `${language} forkSession label`)
+  assert.equal(t('detail.compactQueued'), compactQueuedLabels[language], `${language} compactQueued notice`)
+  assert.equal(t('detail.compactUnconfirmed'), unconfirmedLabels[language], `${language} compactUnconfirmed notice`)
+  assert.notEqual(t('detail.deliveryAdmitted'), 'detail.deliveryAdmitted', `${language} deliveryAdmitted notice`)
+  assert.notEqual(t('detail.forkUnconfirmed'), 'detail.forkUnconfirmed', `${language} forkUnconfirmed notice`)
+}
+
+// --- Desktop definite-error classification (issue #22) ---------------------------------------
+
+// The desktop bridge surfaces transport failures as thrown Errors carrying the electron transport's
+// code and (for HTTP failures) status. The v2 client must wrap only genuine answer loss on a
+// mutation — POST, DELETE, PATCH (anything but GET) — as IndeterminateDeliveryError, since the
+// server may have durably admitted the request before the answer was lost. A definite HTTP status
+// means the server answered, so 4xx/5xx on the desktop build surface as definite errors exactly
+// like web/Capacitor, with the status preserved so the 409 admission-conflict signal keeps
+// resolving through isAdmissionConflict.
+const desktopBridgeSource = readFileSync(new URL('./desktopBridge.ts', import.meta.url), 'utf8')
+assert.match(desktopBridgeSource, /\.status = result\.error\.status/, 'the desktop bridge must keep the HTTP status from the electron transport')
+assert.match(desktopBridgeSource, /\.code = result\.error\.code/, 'the desktop bridge must carry the electron transport error code onto the thrown error')
+const desktopBranch = clientSource.slice(clientSource.indexOf('  if (isDesktopPlatform()) {'), clientSource.indexOf('  const target = `${baseUrl(config)}${path}`'))
+assert.ok(
+  desktopBranch.includes('const lostAnswer = status === undefined && (code === undefined || code === "timeout" || code === "connection" || code === "response-too-large")'),
+  'only bridge timeout/connection (or code-less) transport loss and the unreadable response-too-large answer may be classified as indeterminate'
+)
+assert.match(desktopBranch, /if \(method !== "GET" && lostAnswer\) throw new IndeterminateDeliveryError/, 'the desktop wrap must cover every mutation method (POST/DELETE/PATCH), never a definite HTTP status')
+assert.ok(
+  !desktopBranch.includes('if (method === "POST") throw new IndeterminateDeliveryError((error as Error).message)'),
+  'the desktop branch must not blanket-wrap every POST error as indeterminate'
+)
+assert.ok(
+  desktopBranch.includes('throw error') && desktopBranch.includes('const status = (error as Error & { status?: number }).status'),
+  'a desktop error with a definite HTTP status must rethrow as-is, keeping its status'
+)
+
+// The DELETE mutations (deleteSession, cancelInboxItem) are idempotent and the server may have
+// committed them before the connection broke, so their lost answers must be indeterminate exactly
+// like POST — the wrap condition must be method-based, not a POST allowlist.
+assert.match(
+  desktopBranch,
+  /method !== "GET" && lostAnswer/,
+  'a lost DELETE/PATCH answer must be classified indeterminate alongside POST on the desktop transport'
+)
+// The electron transport attaches no status to `response-too-large` (see desktop-transport.test.mjs),
+// so the client cannot treat it as a definite server answer: it means the server answered but the
+// response body was unreadable, which for a mutation leaves the outcome unknowable.
+assert.ok(
+  desktopBranch.includes('code === "response-too-large"'),
+  'response-too-large must be classified as an unreadable answer (indeterminate for mutations), not a definite status-bearing error'
+)
+// The web branch applies the same non-GET rule to an unreadable 2xx body (the server answered, so
+// a mutation's exact outcome — e.g. the admitted message id — is lost).
+assert.ok(
+  clientSource.includes('if (method !== "GET") throw new IndeterminateDeliveryError((error as Error).message)'),
+  'the web branch must classify an unreadable 2xx body as indeterminate for every mutation method, not just POST'
+)
+
+// --- Queued inbox cancellation (issue #22) ---------------------------------------------------
+
+// `v2.session.inbox.cancel` (protocol-authoritative: `HttpApiEndpoint.delete` on
+// `/api/session/:sessionID/inbox/:inboxID`) answers 204 NoContent, rejecting 409 once the item can
+// no longer be cancelled and 404 for an unknown session. The client must issue that DELETE (never a
+// body-carrying POST) and resolve on the bare acknowledgement, scoping it to the selected project.
+assert.ok(
+  clientSource.includes('`/api/session/${encodeURIComponent(sessionID)}/inbox/${encodeURIComponent(inboxID)}`, directory), { method: "DELETE" }'),
+  'cancel must DELETE the inbox item through the protocol cancel route'
+)
+assert.match(clientSource, /async cancelInboxItem\(config: ServerConfig, sessionID: string, inboxID: string, directory\?: string\)/, 'the v2 client must expose a queued-inbox cancel method')
+assert.ok(
+  apiSource.includes('return Promise.reject(new Error("Inbox cancellation is only supported on OpenCode 2 servers"))'),
+  'v1 cancelInboxItem must reject honestly'
+)
 
 console.log('OpenCode 2 client mapping tests passed')

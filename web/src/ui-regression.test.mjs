@@ -11,6 +11,9 @@ const panels = readFileSync(new URL('./components/panels.tsx', import.meta.url),
 const sessionList = readFileSync(new URL('./components/session-list.tsx', import.meta.url), 'utf8')
 const composerView = readFileSync(new URL('./components/session-composer.tsx', import.meta.url), 'utf8')
 
+assert.match(styles, /button\s*\{[\s\S]*?cursor:\s*pointer;/, 'enabled buttons must advertise that they can be pressed')
+assert.match(styles, /button:disabled\s*\{[\s\S]*?cursor:\s*not-allowed;/, 'disabled buttons must retain the blocked cursor')
+
 assert.ok(api.includes('const body = await response.text()'), 'failed HTTP responses must consume their body only once')
 // The bridge reports failures as {"error": "..."}; without unwrapping that the app printed the raw
 // JSON, so a readable reason like "thread ... already has an active writer" reached the user as a
@@ -43,12 +46,12 @@ assert.match(
   /\.message-reasoning-summary > \*,\s*\.message-action-summary > \*,\s*\.message-tool-summary > \*\s*\{[^}]*min-width:\s*0;/,
   'the text inside a summary row must be allowed to shrink, or the flex item keeps its full width'
 )
-assert.match(styles, /^\.session-card h3\s*\{[^}]*overflow-wrap:\s*(break-word|anywhere);/m, 'a long session title must break rather than widen its card')
+assert.match(styles, /^\.session-card \.session-card-title\s*\{[^}]*overflow-wrap:\s*(break-word|anywhere);/m, 'a long session title must break rather than widen its card')
 assert.ok(
-  !/^\.session-card h3\s*\{[^}]*white-space:\s*nowrap/m.test(styles),
+  !/^\.session-card \.session-card-title\s*\{[^}]*white-space:\s*nowrap/m.test(styles),
   'the mobile session card title must stay free to wrap; only the compact desktop sidebar row truncates it'
 )
-assert.match(styles, /^\.sidebar-sessions \.session-card h3\s*\{[^}]*white-space:\s*nowrap;/m, 'the desktop sidebar row keeps its single-line ellipsised title')
+assert.match(styles, /^\.sidebar-sessions \.session-card \.session-card-title\s*\{[^}]*white-space:\s*nowrap;/m, 'the desktop sidebar row keeps its single-line ellipsised title')
 
 // The desktop shell used to hug the combined width of two fixed panels, which centred the whole app
 // in a narrow column and left dead space either side of it on any wide display. The pane fills the
@@ -111,6 +114,27 @@ assert.ok(app.includes('optimisticUserMessages'), 'sent user messages should ren
 assert.ok(app.includes('createOptimisticUserMessage'), 'send flow should create an optimistic user message envelope')
 assert.ok(app.includes('setOptimisticUserMessages((current) => [...current, optimisticMessage])'), 'send flow should append the optimistic user bubble before awaiting OpenCode')
 assert.ok(app.includes('isWaitingForOpenCodeReply = awaitingAssistantReply || busySending || isSessionRunning'), 'send button/waiting state should stay active until OpenCode assistant output arrives')
+// Session mutations are arbitrated synchronously now. Do not pin send() to the old fork-only
+// predicate: a prompt or command must also reject the same-tick lease held by any other action.
+assert.match(app, /const isSessionMutationLocked = \(\) => mutationCoordinator\.getActiveLease\(\) !== null/, 'the mutation lock must be backed by the coordinator lease, not React state')
+assert.match(app, /async function send\(\)\s*\{[\s\S]*?if \(!selectedSession \|\| isSessionMutationLocked\(\)\) return/, 'composer submission must synchronously reject an active mutation lease')
+assert.match(app, /async function send\(\)[\s\S]*?const commandLease = acquireMutation\("command"\)[\s\S]*?const promptLease = acquireMutation\("prompt"\)/, 'each send path must take an exclusive coordinator lease')
+assert.match(app, /sendPrompt[\s\S]*?if \(!isLeaseContextCurrent\(promptLease\)\) return/, 'prompt results must be discarded when their lease, context, or fork generation is stale')
+assert.match(app, /sendPrompt[\s\S]*?promptDispatched = true[\s\S]*?let refreshFailed = false[\s\S]*?setActionNotice/, 'prompt refresh failures must be soft notices after dispatch commits')
+assert.match(app, /if \(!promptDispatched && !isIndeterminateDeliveryError\(err\) && isLeaseContextCurrent\(promptLease\)\)[\s\S]*?setComposer/, 'only definite prompt dispatch failures may restore the draft')
+assert.match(app, /if \(!isLeaseContextCurrent\(lease\)\) return/, 'session results must reject work from a stale lease, context, or fork generation')
+assert.ok(app.includes('sessionActionPendingRef.current = "fork"'), 'fork must synchronously publish its pending state before React commits the render')
+assert.match(app, /const forkDraft = \{ text: composer, attachments: \[\.\.\.attachments\] \}/, 'fork must snapshot unsent composer content before navigation')
+assert.match(app, /setComposer\(\(current\) => \(current === "" \? forkDraft\.text : current\)\)[\s\S]*?setAttachments\(\(current\) => \(current\.length === 0 \? forkDraft\.attachments : current\)\)/, 'fork must restore its draft only into an empty child composer, never overwriting newer child edits')
+assert.match(app, /!isIndeterminateDeliveryError\(err\)/, 'indeterminate delivery must not restore a duplicate draft')
+assert.match(app, /sessionActionPendingRef\.current = null[\s\S]*?detail\.compactCompleted/, 'compaction must release its pending action only after terminal history metadata')
+assert.match(app, /async function activateSkill\([\s\S]*?if \(isSessionMutationLocked\(\)\) return[\s\S]*?const lease = acquireMutation\("skill"\)/, 'direct skill activation must use the synchronous coordinator lease')
+assert.match(app, /await api\.listCommands\(config\)[\s\S]*?if \(!isLeaseContextCurrent\(commandLease\)\)[\s\S]*?setCommands\(availableCommands\)/, 'slash command discovery must recheck its lease, context, and fork currency before mutating command state')
+assert.ok(app.includes('busySending || sessionActionPending === "fork"'), 'Help skill activation buttons must be disabled during a pending fork')
+assert.match(app, /async function revertToMessage\(messageID: string\)\s*\{[\s\S]*?isSessionMutationLocked\(\)/, 'revert must be blocked while another session mutation is pending')
+assert.ok(app.includes('selected={Boolean(selectedSession) && sessionActionPending !== "fork"}'), 'composer controls must be disabled during a pending fork on every layout')
+assert.ok(app.includes('revertDisabled={sessionActionPending === "fork"}'), 'revert affordances must be removed while a fork snapshot is pending')
+assert.match(app, /const handleRevertMessage = useCallback\(\(messageID: string\) => \{[\s\S]*?revertToMessageRef\.current\(messageID\)/, 'stale message-menu callbacks must route through the coordinator-guarded revert handler')
 assert.ok(app.includes('completionShouldPlayRef.current = true'), 'completion sound should be armed when a real assistant reply is expected')
 assert.ok(app.includes('wasAwaitingAssistantReplyRef.current && !awaitingAssistantReply && completionShouldPlayRef.current'), 'completion sound should play only when assistant waiting ends, not when the user bubble renders')
 assert.ok(app.includes('loadSelectedRequestRef'), 'session message refreshes should ignore stale overlapping polling responses')
@@ -145,6 +169,31 @@ assert.ok(
 )
 assert.ok(composerView.includes('SendIcon') && composerView.includes('<SendIcon size={18} />'), 'composer send button should use the clear paper-plane SendIcon')
 assert.ok(composerView.includes('StopCircleIcon') && composerView.includes('<StopCircleIcon size={18} />'), 'composer waiting button should use a clear stop-task icon')
+assert.ok(composerView.includes('attachmentContextKey'), 'attachment decoding must be scoped to the active session context')
+assert.match(composerView, /requestGeneration[\s\S]*?attachmentRequestState\.current\.generation/, 'a stale async attachment decode must be discarded after navigation')
+assert.match(composerView, /pendingPreparationState[\s\S]*?contextKey[\s\S]*?generation[\s\S]*?count/, 'attachment preparation must be counted per context and generation')
+assert.match(composerView, /pendingPreparation > 0 \|\| attachments\.length >= ATTACHMENT_MAX_COUNT/, 'a second picker selection must be disabled while attachment preparation is pending')
+assert.match(composerView, /prepared\.slice\(0, Math\.max\(0, ATTACHMENT_MAX_COUNT - current\.length\)\)/, 'concurrent attachment completions must clamp to the global capacity in the functional update')
+assert.match(composerView, /current\.contextKey === preparationContext && current\.generation === preparationGeneration[\s\S]*?Math\.max\(0, current\.count - 1\)/, 'stale attachment cleanup must not decrement the destination context counter')
+assert.match(composerView, /mountedRef[\s\S]*?generation \+= 1/, 'attachment preparation must be invalidated when the composer unmounts')
+assert.match(composerView, /useEffect\(\(\) => \{[\s\S]*?mountedRef\.current = true[\s\S]*?return \(\) => \{/, 'attachment preparation must become live again during Strict Mode effect setup')
+assert.match(composerView, /!mountedRef\.current[\s\S]*?onAttachmentsChange/, 'an unmounted composer must never append a prepared attachment')
+assert.match(app, /const deleteContext = \{[\s\S]*?sessionID: sessionID[\s\S]*?const currentDeleteContext = mutationCoordinator\.getContext\(\)[\s\S]*?sameNamespace/, 'delete must capture its target context and explicitly compare the completion namespace')
+assert.match(app, /await api\.deleteSession\([\s\S]*?const tombstoneKey = deleteContext\.profileID[\s\S]*?tombstones\.add\(sessionID\)/, 'a successful delete must capture its tombstone before gating current-namespace UI updates')
+assert.match(app, /if \(sameNamespace\) \{[\s\S]*?setSessions\(\(current\) => current\.filter/, 'only current-namespace delete completion may remove the visible row')
+assert.match(app, /removedSessionIDsRef = useRef\(new Map<string, Set<string>>\(\)\)/, 'session tombstones must be stored per namespace')
+assert.match(app, /mergedSessionTombstones\(removedSessionIDsRef\.current, tombstoneKey, persistedTombstoneKey\)/, 'session refreshes must merge tombstones from the active profile/config namespace')
+assert.match(app, /removedSessionIDsRef\.current\.set\(tombstoneKey, tombstones\)/, 'deletes must write tombstones to their captured profile/config namespace')
+assert.match(app, /sameNamespace && currentDeleteContext\?\.sessionID === sessionID/, 'a stale delete lease must still clear the currently selected target in its namespace')
+assert.ok(!app.includes('removedSessionIDsRef.current.clear()'), 'switching namespaces must not erase prior tombstones')
+assert.ok(!sessionList.includes('role="button"'), 'session cards must not nest buttons inside a role=button container')
+assert.ok(sessionList.includes('className="session-card-open"'), 'session cards need a dedicated keyboard-accessible open control')
+assert.equal(/\.session-card\s*\{[^}]*cursor:\s*pointer/.test(styles), false, 'the article must not promise that non-action card content opens the session')
+assert.match(styles, /\.session-card-open\s*\{[\s\S]*?cursor:\s*pointer/, 'the primary session control must retain a pointer and keyboard affordance')
+assert.match(styles, /\.composer-chips[\s\S]*?overflow-x: auto/, 'attachment chips must remain reachable on narrow screens')
+assert.equal(app.includes('aria-busy={pendingAction !== null}'), false, 'the session-actions toggle must not carry inert aria-busy state')
+assert.match(app, /<span className="session-action-pending" role="status" aria-live="polite">/, 'pending session actions must announce through a live status region instead of aria-busy')
+assert.ok(app.includes('title={action.disabled ? action.disabledReason : undefined}'), 'disabled session-action menu items must carry an explanation in their title')
 assert.match(icons, /export const StopCircleIcon/, 'StopCircleIcon should exist in the shared SVG icon set')
 assert.ok(app.includes('api.loadDiff(config, sessionID, directory)'), 'detail view should load /session/:id/diff for changed-file details')
 assert.ok(app.includes('diffFiles.length > 0'), 'changed-file panel should be hidden when there are no changed files')
@@ -198,6 +247,14 @@ assert.ok(api.includes('loadLatestMessage(config: ServerConfig, sessionID: strin
 assert.ok(app.includes('function messageActivityTime'), 'sessions should display latest message activity instead of mutable session row timestamps')
 assert.ok(app.includes('latestMessageTimesRef'), 'latest message activity lookups should be cached between refreshes')
 assert.ok(app.includes('catch(() => null)'), 'failed latest-message lookups should not be cached as session row timestamps')
+assert.match(app, /setRefreshingSessions\(false\)[\s\S]*?refreshIndicatorRequestRef\.current \+= 1/, 'context replacement must synchronously reset a stale refresh indicator')
+assert.match(app, /const isLeaseContextCurrent = \(lease: MutationLease\)[\s\S]*?isContextGenerationCurrent\(lease\.contextGeneration\)[\s\S]*?isContextCurrent\(lease\.context\)/, 'lease ownership and UI currency must be checked separately')
+assert.match(app, /const cacheKey = `\$\{activityContext\.profileID\}\|\$\{activityContext\.configKey\}\|\$\{session\.id\}`/, 'latest-message activity cache must be scoped to profile, config, and session')
+assert.match(app, /if \(activityIsCurrent\(\)\) latestMessageTimesRef\.current\.set/, 'stale activity responses must not repopulate the cache')
+assert.match(app, /disabled: mutationLocked \|\| sessionActionPending !== null/, 'message history menus must include the shared mutation lock')
+assert.match(app, /case "session\.new":[\s\S]*?if \(!hasConfiguredServer \|\| isOffline \|\| isSessionMutationLocked\(\)\) return/, 'native and keyboard New must defensively honor configuration, offline, and shared mutation guards')
+assert.match(app, /function openNewSessionPicker\(\)[\s\S]*?isSessionMutationLocked\(\)/, 'direct New picker opens must honor the shared lock')
+assert.match(app, /function startRename\([\s\S]*?isSessionMutationLocked\(\)/, 'direct rename opens must honor the shared lock')
 
 assert.ok(app.includes('THEME_STORAGE_KEY'), 'theme preference should persist separately from server settings')
 assert.ok(app.includes('type ThemePreference = "system" | "light" | "dark"'), 'theme preference should support system, light, and dark')
@@ -235,17 +292,151 @@ assert.ok(
 )
 
 assert.ok(app.includes('api.capabilities(config).then(setCapabilities)'), 'bridge capabilities must be loaded from the selected harness')
-for (const capability of ['agents', 'models', 'todos', 'diff', 'questions', 'permissions', 'sessionRename', 'sessionDelete']) {
+for (const capability of ['agents', 'models', 'todos', 'diff', 'questions', 'permissions', 'sessionRename', 'sessionDelete', 'compactSession', 'forkSession']) {
   assert.ok(app.includes(`capabilities.${capability}`), `${capability} UI must be capability-driven`)
 }
+assert.ok(/capabilities\.compactSession[\s\S]*?t\('detail\.compactSession'\)/.test(app), 'compact must be a capability-gated current-session menu action')
+assert.ok(/capabilities\.forkSession[\s\S]*?t\('detail\.forkSession'\)/.test(app), 'fork must be a capability-gated current-session menu action')
+assert.ok(/selectedSession && config\.backend === "opencode2" && capabilities\.compactSession/.test(app), 'compact must only render for the OpenCode 2 backend')
+assert.ok(/selectedSession && config\.backend === "opencode2" && capabilities\.forkSession/.test(app), 'fork must only render for the OpenCode 2 backend')
+assert.ok(app.includes("compactSessionV2(config, selectedSession.id, selectedSession.directory, compactRequestID)"), 'compact must invoke the API once for the selected session with a stable admission id')
+assert.ok(app.includes("setActionNotice(t('detail.compactQueued'))"), 'compact must show the queued notice without replacing the session')
+assert.ok(app.includes('const forked = await api.forkSession(config, original.id, original.directory)'), 'fork must invoke the API once for the current session')
+assert.ok(app.includes('setSessions((current) => current.some((session) => session.id === forkedView.id)'), 'fork must insert the returned child while preserving the original')
+assert.ok(app.includes('await openSession(forkedView.id, forkedView.directory)'), 'fork must navigate through the shared session-opening path')
+assert.ok(app.includes('forkFocusSessionRef.current = forkedView.id') && app.includes('detailHeadingRef.current?.focus()'), 'fork navigation must focus the mounted child session context')
+assert.match(app, /const forkContext = \{[\s\S]*?profileID: activeProfileID[\s\S]*?configKey: configKey\(config\)[\s\S]*?sessionID: original\.id/, 'fork must capture the active profile, server, and session identity before awaiting')
+// Indeterminate fork reconciliation must not depend on the released lease: it keeps its own
+// captured context/generation, a baseline of pre-existing children, paginated authoritative
+// listings with bounded retries, and a resolvable terminal notice instead of a hanging spinner.
+assert.ok(app.includes('const baselineChildIDs = new Set<string>()'), 'fork must capture the pre-existing child ids as a baseline')
+assert.ok(app.includes('!baselineChildIDs.has(candidate.id)'), 'fork reconciliation must only navigate to the NEW child, never an older fork child')
+assert.match(app, /const isReconcileCurrent = \(\) => mutationCoordinator\.isContextGenerationCurrent\(reconcileGeneration\)/, 'fork reconciliation must be current-checked by captured generation, not by the released lease')
+assert.ok(app.includes('FORK_RECONCILE_MAX_ATTEMPTS'), 'fork reconciliation must be bounded')
+assert.ok(app.includes('detail.forkUnconfirmed'), 'an unconfirmed fork must resolve with a retryable notice')
+assert.ok(app.includes('restoreForkDraft(childView.id)'), 'reconciled child navigation must restore the forked draft and attachments')
+// Compaction must correlate terminal state to the exact admission id returned by the server, and
+// resolve (instead of hanging) when the admission cannot be established.
+assert.match(app, /observation\.expectedID = admission\?\.id \?\? compactRequestID/, 'compact must track the exact admission id from the server response')
+assert.ok(app.includes('observation.expectedID'), 'compact terminal state must be correlated to the tracked admission id')
+assert.ok(app.includes('detail.compactUnconfirmed'), 'an unconfirmed compaction must resolve with a retryable notice instead of blocking forever')
+assert.ok(app.includes('COMPACTION_PENDING_MAX_MS'), 'compaction pending state must have a bounded deadline')
+// Stable request ids make post-transmission retries idempotent: the same id is re-sent, and the
+// server's 409 conflict (or silent dedupe for skills) confirms the earlier admission.
+assert.ok(app.includes('const promptRequestID = createMessageRequestID()'), 'prompt sends must carry a stable durable admission id')
+assert.ok(app.includes('const commandRequestID = createMessageRequestID()'), 'slash commands must carry a stable durable admission id')
+assert.ok(app.includes('const skillRequestID = createMessageRequestID()'), 'skill activations must carry a stable durable admission id')
+assert.ok(app.includes('const compactRequestID = createMessageRequestID()'), 'compactions must carry a stable durable admission id')
+assert.ok(app.includes('isAdmissionConflict(retryErr)'), 'an idempotent retry must recognize the 409 conflict that confirms the earlier admission')
+assert.ok(app.includes("t('detail.deliveryAdmitted')"), 'a confirmed idempotent retry must announce the resolved delivery')
+assert.match(
+  app,
+  /if \(!isLeaseContextCurrent\(lease\) \|\| !mutationCoordinator\.isContextCurrent\(forkContext\)\) return/,
+  'a stale fork completion must be discarded by lease, context, and fork validation before inserting or navigating'
+)
+assert.ok(
+  /const sessionHeaderActions = useMemo\([\s\S]*?const compactDisabled = mutationLocked \|\| sessionActionPending !== null \|\| !hasUserMessage \|\| isWorking \|\| busySending[\s\S]*?const forkDisabled = mutationLocked \|\| sessionActionPending !== null \|\| !hasUserMessage \|\| isWorking \|\| busySending[\s\S]*?\}, \[awaitingAssistantReply,/.test(app),
+  'compact and fork must share the coordinator lock and retain the visible-message and active-work guards'
+)
+assert.ok(
+  /id: "undo", label: t\('detail\.undo'\), disabled: mutationLocked \|\| sessionActionPending !== null/.test(app)
+    && /id: "redo", label: t\('detail\.redo'\), disabled: mutationLocked \|\| sessionActionPending !== null/.test(app),
+  'undo and redo must share the coordinator lock and be disabled while compact or fork is pending'
+)
+assert.ok(
+  /function compactCurrentSession\(\)[\s\S]*?config\.backend !== "opencode2"[\s\S]*?isWorking[\s\S]*?busySending[\s\S]*?isSessionMutationLocked\(\)[\s\S]*?!hasAnyUserMessage\(messages, optimisticUserMessages, queuedInboxMessages\)/.test(app)
+    && /function forkCurrentSession\(\)[\s\S]*?config\.backend !== "opencode2"[\s\S]*?isWorking[\s\S]*?busySending[\s\S]*?isSessionMutationLocked\(\)[\s\S]*?!hasAnyUserMessage\(messages, optimisticUserMessages, queuedInboxMessages\)/.test(app),
+  'compact and fork handlers must retain the backend, coordinator, visible-message (including optimistic and queued rows), and active-work guards'
+)
 
 // A follow-up prompt can be queued while the agent is still working.
-assert.ok(app.includes('const showStopAction = isWorking && !composer.trim()'), 'stop should be offered only when there is nothing to send')
+assert.ok(app.includes('const showStopAction = canAbortSession'), 'stop should remain offered while a working session has a draft')
 assert.equal(app.includes('disabled={!selectedSession || isWorking}'), false, 'the composer must stay usable while the agent works')
+// Prompts must queue for the whole window where compaction has acknowledged but is not terminal,
+// read through the synchronous ref so a send in the same tick as a pending compact still queues.
+assert.ok(
+  app.includes('sessionActionPendingRef.current === "compact" || sessionActionPending === "compact"'),
+  'a follow-up prompt must queue while a compaction is pending, not steer into it'
+)
+// Queued delivery metadata must survive server reconciliation: the inbox is the authoritative
+// delivery source, its metadata is overlaid on fetched transcripts, and inbox-only queued prompts
+// render as stable transcript rows.
+assert.ok(app.includes('listInboxV2(config, sessionID, directory)'), 'session loads must read the v2 inbox for queued delivery state')
+assert.ok(app.includes('applyInboxDelivery(msg, inbox)'), 'server delivery metadata must be overlaid on fetched transcripts')
+assert.ok(app.includes('queuedInboxMessageEnvelopes(sessionID, inbox'), 'inbox-only queued prompts must render as stable transcript rows')
+assert.ok(app.includes('queuedInboxMessages'), 'server-admitted queued prompts must survive reconciliation as transcript state')
+assert.ok(app.includes('role="status" aria-live="polite"'), 'indeterminate delivery and other action notices must announce with accessible live semantics')
+
+// --- Exact-delivery client contract (issues #1-#6) ---------------------------------------------
+// Optimistic prompt/command rows are tagged with the admission response's durable message id and
+// retire by that EXACT id once the message reaches history or the inbox — immune to identical text
+// sent twice. Text matching is only the fallback for rows still awaiting their admission response
+// (or whose response was lost), guarded by creation time so a pre-existing identical message can
+// never retire a fresh row.
+assert.ok(app.includes('durableID'), 'optimistic rows must carry the server-confirmed durable message id')
+assert.match(
+  app,
+  /function hasMatchingUserMessage\([\s\S]*?if \(optimistic\.info\.durableID\) \{[\s\S]*?message\.info\.id === optimistic\.info\.durableID[\s\S]*?\}[\s\S]*?extractText\(optimistic\)/,
+  'optimistic retirement must prefer the exact durable id and fall back to text only for untagged rows'
+)
+assert.match(app, /message\.info\.time\.created >= optimistic\.info\.time\.created/, 'the text fallback must only match messages created after the optimistic row was sent')
+assert.match(app, /durableID: admission\?\.messageID[\s\S]*?delivery: admission\?\.delivery/, 'a confirmed admission must tag the optimistic row with the returned message id and delivery')
+assert.match(app, /durableID: promptRequestID/, 'a 409-confirmed prompt retry must tag the row with its durably admitted request id')
+assert.match(app, /durableID: commandRequestID/, 'a 409-confirmed command retry must tag the row with its durably admitted request id')
+assert.match(app, /const readmission = await sendPromptV2\([\s\S]*?durableID: readmission\.messageID/, 'a prompt retry must use the returned admission metadata')
+assert.match(app, /const readmission = await sendCommandV2\([\s\S]*?durableID: readmission\.messageID/, 'a command retry must use the returned admission metadata')
+// Queued delivery renders a localized status for every row — fetched transcripts overlaid with the
+// inbox, optimistic rows tagged with queue delivery, and inbox-only queued rows — on both layouts.
+assert.match(
+  app,
+  /message\.info\.delivery === "queue" && \([\s\S]*?<div className="message-delivery-notice">[\s\S]*?\{t\('detail\.queuedPrompt'\)\}/,
+  'every queued row must render the localized queue status in the shared message view'
+)
+
+// Compaction correlates terminal state ONLY with the exact admission/request id — no baseline or
+// any-terminal heuristic — including the double-indeterminate path where the request id is the only
+// known-valid correlation; context mismatches clear the observation and the pending state.
+assert.equal(app.includes('observation.baseline'), false, 'compaction must not track a baseline of pre-existing compaction messages')
+assert.equal(app.includes('observation.observed'), false, 'compaction must not track observed running message ids')
+assert.match(
+  app,
+  /const expected = observation\.expectedID[\s\S]*?compactions\.find\(\(message\) => message\.info\.id === observation\.expectedID\)/,
+  'terminal compaction state must only release on the exact expected message id'
+)
+assert.match(app, /isAdmissionConflict\(retryErr\)[\s\S]*?observation\.expectedID = compactRequestID/, 'a 409-confirmed compaction must correlate with the durably admitted request id')
+assert.match(app, /isIndeterminateDeliveryError\(retryErr\)[\s\S]*?observation\.expectedID = compactRequestID[\s\S]*?deliveryIndeterminate/, 'a double-indeterminate compaction must still correlate with the request id and announce indeterminate delivery')
+assert.match(
+  app,
+  /observation\.context !== context \|\| !selectedID[\s\S]*?compactObservationRef\.current === observation[\s\S]*?setSessionActionPending\(null\)/,
+  'a stale compaction context must clear its observation and pending state'
+)
+
+// Fork reconciliation clears pending in a finally on exhaustion or confirmed navigation, and the
+// draft restore is guarded so newer child edits are never overwritten.
+assert.match(
+  app,
+  /const reconcileFork = async \(\) => \{[\s\S]*?finally \{[\s\S]*?if \(isReconcileCurrent\(\)\) finishForkPending\(\)/,
+  'fork reconciliation must release pending state in a finally on exhaustion or navigation'
+)
+
+// Skill activation is NOT durably admitted by id: an indeterminate failure must never retry the
+// POST automatically (a duplicate event id can defect); the tagged optimistic row plus poll
+// confirmation correlated by the original request id is the only safe reconciliation, and the
+// indeterminate notice must never read as a definite failure.
+assert.equal((app.match(/await sendSkillV2\(/g) ?? []).length, 1, 'skill activation must never retry the POST automatically, even on indeterminate delivery')
+assert.ok(app.includes('pendingSkillRequestsRef'), 'lost skill acknowledgements must be tracked for poll confirmation')
+assert.match(app, /pendingSkillRequestsRef\.current\.set\(skillRequestID, \{ sessionID: session\.id, skillName: skill\.name \}\)/, 'an indeterminate skill activation must register its original request id for confirmation')
+assert.match(app, /transcript\.some\(\(message\) => message\.info\.id === requestID\)/, 'skill confirmation must correlate by the original request id in history')
+assert.match(
+  app,
+  /if \(!isIndeterminateDeliveryError\(err\)\) \{[\s\S]*?help\.skillActivationFailed[\s\S]*?\} else \{[\s\S]*?pendingSkillRequestsRef\.current\.set[\s\S]*?detail\.deliveryIndeterminate/,
+  'indeterminate skill delivery must reconcile via the accessible indeterminate notice, never a definite-failure message'
+)
+
 // External OMP history must replace stale cached ordering even when the corrected payload is shorter.
 // This no longer needs its own escape hatch: every fetched snapshot is now applied, and only same-id
 // same-type text is held back from shrinking, so a corrected external history replaces the cache.
-assert.ok(app.includes("if (!messagesHaveSameContent(current, msg)) {"), "a fetched snapshot must be applied whenever it differs from what is on screen")
+assert.ok(app.includes("if (!messagesHaveSameContent(current, transcript)) {"), "a fetched snapshot must be applied whenever it differs from what is on screen")
 // The marker moved from below the messages, where the sticky composer cut it in half, into the
 // header. What matters is that an external session is still marked and still explained, not where.
 assert.ok(app.includes("selectedSession.external && ("), "a session from another client must be marked as such")
@@ -254,7 +445,31 @@ assert.ok(
   "the marker must read as a sentence, not a one-word tag that needs a tooltip touch cannot show"
 )
 assert.equal(app.includes("disabled={!selectedSession || selectedSession.external}"), false, "external sessions must remain writable")
-assert.ok(composerView.includes('onClick={showStopAction ? onAbort : onSend}'), 'the action button should send a queued follow-up instead of only stopping')
+assert.ok(composerView.includes('hasQueuedFollowUp') && composerView.includes('onClick={sendNow}') && composerView.includes('onClick={onAbort}'), 'a working composer must expose both queued Send and reachable Stop controls')
+assert.match(composerView, /disabled=\{!selected \|\| !canAbortSession\}/, 'Stop must remain enabled while an active prompt is being cancelled')
+assert.match(app, /const canAbortSession = Boolean\(selectedSession && isWorking[\s\S]*?activeWorkingLease\.kind === "skill"/, 'Stop must be allowed only as an out-of-band action for active prompt, command, or skill work')
+assert.match(app, /const activeLease = mutationCoordinator\.getActiveLease\(\)[\s\S]*?const lease = activeLease \? null : acquireMutation\("abort"\)/, 'abort must not steal the active prompt lease or release it as if it owned it')
+assert.match(app, /session\.stop[\s\S]*?disabled: !canAbortSession/, 'native menu and palette Stop entries must use the abort-specific availability guard')
+assert.ok(app.includes('const abortInFlightRef = useRef(new Map<string, Promise<void>>())'), 'abort requests need a synchronous per-context in-flight registry')
+assert.match(app, /abortInFlightRef\.current\.has\(abortKey\)[\s\S]*?abortInFlightRef\.current\.set\(abortKey, operation\)/, 'repeated Stop must deduplicate and presentation must share handler availability')
+assert.match(app, /const abortContextGeneration = mutationCoordinator\.getContextGeneration\(\)[\s\S]*?isContextGenerationCurrent\(abortContextGeneration\)[\s\S]*?isContextCurrent\(abortContext\)/, 'abort completion and cleanup must reject an away-and-back ABA context')
+assert.match(app, /activeLease\.context\.profileID === abortContext\.profileID[\s\S]*?activeLease\.context\.configKey === abortContext\.configKey/, 'abort authorization must match the full active lease context')
+assert.match(app, /const isSessionMutationLocked = \(\) => mutationCoordinator\.getActiveLease\(\) !== null \|\| abortInFlightRef\.current\.size > 0/, 'an abort remains a mutation lock after the original lease releases')
+assert.ok(composerView.includes('canAbortSession'), 'composer Stop presentation must receive the abort availability guard')
+assert.match(app, /runtimeError && <div className="error fade-in" role="alert">/, 'runtime errors must be announced accessibly in the detail view')
+assert.equal(
+  app.slice(app.indexOf('async function activateSkill'), app.indexOf('async function send()')).includes('setAttachments([])'),
+  false,
+  'successful skills must preserve staged attachments because the skill API does not transmit them'
+)
+const commandDispatch = app.slice(app.indexOf('await api.sendCommand(config, selectedSession.id, command'), app.indexOf('    const promptLease'))
+assert.equal(commandDispatch.includes('setAttachments([])'), false, 'successful slash commands must preserve staged attachments')
+assert.equal(app.slice(app.indexOf('if (localCommand === "help"'), app.indexOf('let availableCommands = commands')).includes('setAttachments([])'), false, 'local help, commands, skills, and status views must preserve staged attachments')
+assert.match(commandDispatch, /api\.sendCommand[\s\S]*?let refreshFailed = false[\s\S]*?setActionNotice/, 'command refresh failures must be soft notices after dispatch commits')
+assert.match(app, /activateSkill\(skill: CommandInfo[\s\S]*?stagedAttachments[\s\S]*?setAttachments\(\(current\) => current\.length \? current : stagedAttachments\)/, 'failed skills must restore their staged attachments in the same context')
+assert.match(app, /api\.sendCommand[\s\S]*?setAttachments\(\(current\) => current\.length \? current : attachments\)/, 'failed slash commands must restore their staged attachments')
+assert.match(app, /abortInFlightRef\.current\.delete\(abortKey\)[\s\S]*?bumpMutationLock\(\(value\) => value \+ 1\)/, 'stale abort cleanup must repaint the mutation lock even outside the current context')
+assert.ok(app.includes('readSessionTombstones') && app.includes('persistSessionTombstones'), 'session tombstones must hydrate and persist safely')
 
 // A run bubble merges action groups that a message boundary split apart. Consecutive replies with
 // nothing groupable in them must stay separate, or two answers to two queued prompts render as one.
@@ -306,10 +521,11 @@ assert.ok(app.includes('autoComplete="username"') && app.includes('autoComplete=
 assert.ok(composerView.includes('enterKeyHint={softKeyboard ? "enter" : "send"}'), "the composer's action key should say send on a fine pointer and new line on a soft keyboard")
 assert.ok(composerView.includes('if (event.ctrlKey || event.metaKey)'), 'a soft keyboard must send with Ctrl/Cmd+Enter and newline with plain Enter')
 assert.ok(composerView.includes('if (!event.shiftKey)'), 'a fine pointer must keep Enter sends / Shift+Enter new line')
+assert.match(composerView, /if \(!mutationLocked && pendingPreparation === 0\) sendNow\(\)/, 'keyboard send must stay blocked while the mutation lease or attachment preparation is active')
 
 // A session card showed a full absolute path over three lines, a third of its height.
 assert.ok(sessionList.includes('function shortDirectory'), 'the card should shorten the directory it shows')
-assert.ok(sessionList.includes('<p title={session.directory}>{shortDirectory(session.directory)}</p>'), 'the full path should stay available as a title')
+assert.ok(sessionList.includes('<span className="session-card-directory" title={session.directory}>{shortDirectory(session.directory)}</span>'), 'the full path should stay available as a title on the styled directory span')
 assert.equal(sessionList.includes("t('sessions.noFileChanges')"), false, 'absence of changes needs no line of its own on a phone')
 
 // Hover is not a state a finger can produce.
@@ -339,7 +555,7 @@ assert.ok(
   'the offline state explains itself; the raw transport error must not repeat it'
 )
 assert.ok(sessionList.includes("t('sessions.retry')"), 'an offline state should offer a way out')
-assert.ok(sessionList.includes('disabled={creating || offline}'), 'an action that cannot succeed offline must not be offered')
+assert.ok(sessionList.includes('disabled={creating || mutationLocked || offline}'), 'an action that cannot succeed offline or under the mutation lock must not be offered')
 assert.ok(styles.includes('.empty-state-actions'), 'the offline actions should be styled')
 
 // The question tool's own parameter schema has no `custom` field at all, so a question always
@@ -506,12 +722,19 @@ assert.ok(api.includes('`/session/${sessionID}/action`'), 'session action discov
 assert.ok(api.includes('`/session/${sessionID}/action/${encodeURIComponent(actionID)}`'), 'action execution should use a structured endpoint rather than a chat prompt')
 assert.ok(app.includes('capabilities.actions ? api.listActions'), 'the selected session should discover actions only when the bridge supports them')
 assert.ok(app.includes('api.invokeAction(config, selectedSession.id, command, selectedSession.directory)'), 'OMP Undo/Redo should execute through the action API')
-assert.ok(app.includes('replaceMessages ? msg : mergeFetchedMessages(prev, msg)'), 'a successful Undo must be allowed to shrink the rendered conversation')
+assert.ok(app.includes('replaceMessages ? transcript : mergeFetchedMessages(prev, transcript)'), 'a successful Undo must be allowed to shrink the rendered conversation')
 assert.ok(app.includes('setExtensionActions(result.actions)'), 'action execution should apply the returned session-specific enabled state immediately')
 assert.ok(app.includes("if (result.applied === false)"), 'only an authoritative no-op result should show no-op feedback')
 assert.ok(app.includes('result.applied !== false'), 'unknown results should still refresh the active ACP context without being called no-ops')
 assert.ok(app.includes("command === \"undo\" ? 'detail.nothingToUndo' : 'detail.nothingToRedo'"), 'the no-op message should describe the attempted action')
-assert.ok(app.includes('{actionNotice && <div className=\"notice info fade-in\">'), 'no-op action feedback should render as visible information rather than an error')
+assert.match(app, /if \(!selectedSession \|\| busySending \|\| sessionActionPending !== null \|\| isSessionMutationLocked\(\)\) return/, 'native undo and redo must defensively no-op while a coordinator mutation is pending')
+assert.match(app, /id: "undo", label: t\('detail\.undo'\), disabled: mutationLocked \|\| sessionActionPending !== null/, 'message undo must share the coordinator lock and be disabled while a session action is pending')
+assert.match(app, /id: "redo", label: t\('detail\.redo'\), disabled: mutationLocked \|\| sessionActionPending !== null/, 'message redo must share the coordinator lock and be disabled while a session action is pending')
+assert.match(app, /case "session\.undo":\s*if \(sessionActionPending !== null\) return/, 'the menubar/native undo dispatcher must reject pending session actions')
+assert.match(app, /case "session\.redo":\s*if \(sessionActionPending !== null\) return/, 'the menubar/native redo dispatcher must reject pending session actions')
+assert.match(app, /action\.id === "undo" && !action\.disabled/, 'menubar and palette undo entries must use the action disabled state')
+assert.match(app, /action\.id === "redo" && !action\.disabled/, 'menubar and palette redo entries must use the action disabled state')
+assert.ok(app.includes('{actionNotice && <div className="notice info fade-in" role="status" aria-live="polite">'), 'no-op action feedback should render as visible information rather than an error')
 
 // Session actions in the header (issue #104): Undo can strip the transcript to nothing, leaving
 // Redo enabled but unreachable through the message context menu, which needs a bubble to exist.
@@ -531,6 +754,7 @@ assert.match(
 assert.match(app, /session-actions-menu/, 'the header actions menu should have its own styles')
 assert.match(styles, /\.session-actions-menu\s*\{[\s\S]*?position:\s*absolute/, 'the header actions menu must overlay the conversation rather than push its layout')
 assert.match(styles, /\.session-actions-menu\s*\{[\s\S]*?z-index:\s*var\(--z-menu\)/, 'the header actions menu must stack above the message list')
+assert.match(styles, /\.session-actions-menu button:hover:not\(:disabled\)/, 'disabled session actions must not receive hover styling')
 assert.match(app, /mobile-session-appbar[\s\S]*?mobile-back-button[\s\S]*?SessionActionsMenu/, 'mobile detail should use one contextual row for back, identity, and session actions')
 assert.match(app, /isDesktop && selectedSession && sessionHeaderActions\.length > 0/, 'on desktop the header actions menu should remain beside the session heading')
 assert.match(styles, /\.mobile-appbar \{[\s\S]*?display:\s*flex/, 'the mobile contextual app bar should keep its controls on one row')
@@ -588,5 +812,110 @@ assert.match(
   /for \(const \[command, binding\] of Object\.entries\(KEY_BINDINGS\)\) \{\s*if \(!bindingApplies\(binding\)\) continue/,
   'the keydown handler must skip bindings that do not apply to this build'
 )
+
+// Context changes are a hard synchronous boundary: stale leases and same-ID activity caches must
+// not bleed into the next profile/session, and refresh has its own latest-request ordering.
+assert.match(app, /const replaceMutationContext[\s\S]*?latestMessageTimesRef\.current\.clear\(\)/, 'context replacement must clear activity caches')
+assert.match(app, /const refreshRequestID = \+\+refreshRequestRef\.current/, 'refreshes need a monotonic request identity')
+assert.match(app, /refreshRequestID === refreshRequestRef\.current/, 'stale refresh responses must be ignored')
+assert.match(app, /const requestID = \+\+loadAgentsRequestRef\.current/, 'agent loads need a request identity')
+assert.match(app, /disabled=\{mutationLocked\}[\s\S]*?t\('detail\.refreshAi'\)/, 'mobile AI refresh must honor the mutation lock')
+assert.match(app, /onChange=\{\(event\) => changeAgent\(event\.target\.value\)\}[\s\S]*?disabled=\{isWorking \|\| mutationLocked\}/, 'mobile agent selection must honor the mutation lock')
+assert.match(app, /onClick=\{\(\) => changeModel\(optionKey\)\}[\s\S]*?disabled=\{isWorking \|\| mutationLocked\}/, 'mobile model selection must honor the mutation lock')
+assert.match(composerView, /const invalidateAttachmentPreparation[\s\S]*?generation \+= 1[\s\S]*?const sendNow/, 'attachment preparation must be invalidated synchronously before send')
+assert.match(composerView, /pendingPreparation > 0/, 'send must wait for attachment preparation to settle')
+assert.ok(!app.includes('removedSessionIDsRef.current.clear()'), 'session tombstones must survive session-only navigation and away/back namespace navigation')
+assert.match(app, /disabled=\{action\.disabled\}/, 'message context actions must honor disabled state')
+assert.match(app, /disabled=\{!selectedSession \|\| config\.backend !== "opencode2" \|\| busySending \|\| sessionActionPending === "fork" \|\| mutationLocked\}/, 'help skill buttons must honor the coordinator lock')
+assert.match(app, /onRefresh=\{\(\) => void refreshSessionsWithIndicator\(\)\.catch/, 'refresh remains wired while mutations are active')
+
+// --- Final review findings (PR #22) ------------------------------------------------------------
+// H1: session-only navigation must preserve the composer draft and staged attachments per session
+// within the current profile/config, restoring them on return and clearing the whole namespace
+// only when the profile or config actually changes. Mirrors the fork restore pattern.
+assert.ok(app.includes('const sessionDraftsRef = useRef(new Map<string, { text: string; attachments: AttachmentPart[] }>())'), 'composer drafts must be parked per session within the profile/config')
+assert.ok(app.includes('function sessionDraftKey(profileID: string, configKeyValue: string, sessionID: string | null)'), 'parked drafts must be keyed by profile, config, and session')
+assert.match(app, /const namespaceChanged = previousContext === null[\s\S]*?sessionDraftsRef\.current\.clear\(\)[\s\S]*?setComposer\(""\)[\s\S]*?setAttachments\(\[\]\)/, 'a profile/config change must clear the whole parked-draft namespace')
+assert.match(app, /if \(previousContext\.sessionID && \(composer\.trim\(\) \|\| attachments\.length > 0\)\) \{\s*sessionDraftsRef\.current\.set\(/, 'a session switch must park the outgoing draft under its own key')
+assert.match(app, /const saved = context\.sessionID[\s\S]*?sessionDraftsRef\.current\.get\(sessionDraftKey\(context\.profileID, context\.configKey, context\.sessionID\)\)[\s\S]*?setComposer\(saved \? saved\.text : ""\)/, 'a session switch must restore the incoming session\u2019s parked draft')
+// H2: the mobile New Session button must only show the Creating spinner/label while actually
+// creating; a mere mutation lock disables it with the plain New label.
+assert.ok(
+  /<SessionsPanel[\s\S]*?creating=\{creatingSession\}/.test(app) && /<SessionSidebar[\s\S]*?creating=\{creatingSession\}/.test(app),
+  'the New Session spinner must reflect only an actual create, never the generic mutation lock'
+)
+assert.equal(sessionList.includes('disabled={creating || offline}'), false, 'the New Session disabled state must also carry the mutation lock')
+assert.ok(sessionList.includes('{creating ? t(\'sessions.creating\') : t(\'sessions.new\')}'), 'the Creating label must be tied to the actual creating flag only')
+// F2: while the fork reconcile window is open (ref = synchronous authority), send and skill
+// activation must refuse dispatch so an in-flight prompt cannot be orphaned by reconcile navigation.
+assert.match(app, /async function send\(\)\s*\{[\s\S]*?sessionActionPendingRef\.current === "fork"\) return[\s\S]*?if \(!selectedSession \|\| isSessionMutationLocked\(\)\) return/, 'send must refuse dispatch during the fork reconcile window via the synchronous ref')
+assert.match(app, /async function activateSkill\([\s\S]*?sessionActionPendingRef\.current === "fork"\) return[\s\S]*?if \(isSessionMutationLocked\(\)\) return/, 'skill activation must refuse dispatch during the fork reconcile window')
+// M2: the open control renders its title and directory as styled spans, never flow content.
+const openControlMarkup = sessionList.match(/<button type="button" className="session-card-open"[\s\S]*?<\/button>/)
+assert.ok(openControlMarkup && openControlMarkup[0].includes('session-card-title') && openControlMarkup[0].includes('session-card-directory'), 'the open control must render title and directory spans')
+assert.ok(openControlMarkup && !/<h3|<p /.test(openControlMarkup[0]), 'a button must not contain heading/paragraph flow content')
+// M3: a back/view navigation during a pending fork must not be reversed by reconcile — the
+// confirmed child is inserted and announced, never forced open over the view the user chose.
+assert.match(app, /const mainViewRef = useRef\(mainView\)[\s\S]*?mainViewRef\.current = mainView/, 'reconciliation must read the current layout through a ref')
+assert.match(app, /if \(mainViewRef\.current !== "detail" \|\| selectedSessionRef\.current\?\.id !== original\.id\) \{[\s\S]*?sessionDraftsRef\.current\.set\([\s\S]*?childView\.id[\s\S]*?setActionNotice\(t\('detail\.forkCreated'\)\)[\s\S]*?return[\s\S]*?\}/, 'a reconcile that finds the child while the user left the detail view must insert it without forcing navigation')
+assert.ok(app.includes('forkFocusSessionRef.current = childView.id'), 'reconcile navigation must still focus the child when the user is still viewing the fork context')
+// M4: reconcile exhaustion (unconfirmed but committed) preserves the fork draft snapshot and
+// restores it when the child is subsequently opened manually, empty-composer guard, context-scoped.
+assert.match(app, /pendingForkDraftRef\.current = \{\s*namespace: `\$\{activeProfileID\}\\u0000\$\{configKey\(config\)\}`[\s\S]*?baselineChildIDs,[\s\S]*?text: forkDraft\.text,[\s\S]*?attachments: \[\.\.\.forkDraft\.attachments\][\s\S]*?setActionNotice\(t\('detail\.forkUnconfirmed'\)\)/, 'reconcile exhaustion must preserve the fork draft snapshot for a later manual open')
+assert.match(app, /const pendingForkDraft = pendingForkDraftRef\.current[\s\S]*?sessionID !== pendingForkDraft\.parentSessionID[\s\S]*?!pendingForkDraft\.baselineChildIDs\.has\(sessionID\)[\s\S]*?setComposer\(\(current\) => \(current === "" \? pendingForkDraft\.text : current\)\)[\s\S]*?setAttachments\(\(current\) => \(current\.length === 0 \? pendingForkDraft\.attachments : current\)\)/, 'a manual open of the unconfirmed child must restore the preserved fork draft with the empty-composer guard')
+// M5: after the compaction 45s deadline resolves the pending lock, a passive watcher on the exact
+// expected compaction id announces terminal completed/failed state without re-locking controls.
+assert.ok(app.includes('passive: false'), 'a fresh compaction observation must start in active (locking) mode')
+assert.match(app, /if \(!observation\.passive\) \{[\s\S]*?sessionActionPendingRef\.current = null[\s\S]*?setSessionActionPending\(null\)[\s\S]*?setActionNotice\(terminal\)[\s\S]*?\} else \{[\s\S]*?setActionNotice\(terminal\)[\s\S]*?\}/, 'the passive watcher must announce terminal state without re-locking the controls')
+assert.match(app, /const remaining = COMPACTION_PENDING_MAX_MS[\s\S]*?if \(remaining <= 0\) \{[\s\S]*?observation\.passive = true[\s\S]*?setSessionActionPending\(null\)[\s\S]*?setActionNotice\(t\('detail\.compactUnconfirmed'\)\)/, 'the deadline must resolve the pending lock while keeping the passive watch on the exact id')
+assert.match(app, /if \(observation\.passive\) return/, 'the passive watcher must not schedule a second deadline of its own')
+// M6: desktop row actions reveal when hovering the open control, never the whole card, and the
+// open control advertises hover on itself without the misleading full-card pointer. The actions
+// container is part of the hover match so the reveal survives the pointer's travel from the open
+// control to the icons — the hover-trap that collapsed the row mid-motion and made rename/delete
+// unreachable in one mouse movement.
+assert.match(styles, /\.sidebar-sessions \.session-card:has\(\.session-card-open:hover,\s*\.inline-actions:hover\) \.inline-actions/, 'desktop row actions must reveal when hovering the open control and stay revealed over the actions themselves')
+assert.match(styles, /\.sidebar-sessions \.session-card:has\(\.session-card-open:hover[\s\S]*?\) \.inline-actions[\s\S]*?\.sidebar-sessions \.session-card:focus-within \.inline-actions/, 'keyboard focus-within must keep revealing desktop row actions')
+assert.match(styles, /\.sidebar-sessions \.session-card-open:hover \{[^}]*background:/, 'the open control must advertise hover on itself')
+assert.equal(/\.session-card\s*\{[^}]*cursor:\s*pointer/.test(styles), false, 'the card must never reclaim the misleading full-card pointer')
+// M7: disabled session-action menu items explain themselves; the toggle has no inert aria-busy.
+assert.ok(app.includes('disabledReason'), 'session actions must be able to explain why they are disabled')
+assert.ok(app.includes("disabledReason: disabledReasonFor(mutationLocked || sessionActionPending !== null)"), 'undo/redo must explain their disabled state from the shared reason helper')
+assert.ok(app.includes("disabledReasonFor(compactDisabled)") && app.includes("disabledReasonFor(forkDisabled)"), 'compact/fork must explain their disabled state from the shared reason helper')
+assert.ok(app.includes("t('detail.actionLocked')") && app.includes("t('detail.requiresUserMessage')") && app.includes("t('detail.actionWhileWorking')"), 'disabled-action explanations must be translated')
+// M8: parity/consistency — optimistic and queued rows count for compact/fork availability,
+// revert shows disabled consistently in both bubble views, the pending label centres, and the
+// sidebar never repeats the directory already shown in its meta line.
+assert.match(app, /function hasAnyUserMessage\([\s\S]*?\[\.\.\.messages, \.\.\.optimisticUserMessages, \.\.\.queuedInboxMessages\]\.some/, 'the combined user-row check must include history, optimistic, and queued rows')
+assert.match(app, /disabled: revertDisabled, disabledReason: revertDisabled \? t\('detail\.actionLocked'\) : undefined/, 'MessageArticle must show the revert affordance disabled, aligned with the run view')
+assert.match(styles, /\.session-action-pending \{[^}]*text-align:\s*center/, 'the pending action label must centre under its toggle on narrow appbars')
+assert.match(styles, /\.sidebar-sessions \.session-card \.session-card-directory \{[^}]*display:\s*none/, 'the sidebar must not repeat the directory already shown in its meta line')
+
+// --- Second review findings (PR #22) ------------------------------------------------------------
+// N1: a successful send must retire the session's parked draft (prompt, command, and skill —
+// including a skill activation confirmed later by poll), and an empty outgoing composer must
+// delete a stale parked entry, so already-sent text never resurfaces on a session round-trip.
+assert.match(app, /function clearParkedDraft\(sessionID: string\) \{\s*sessionDraftsRef\.current\.delete\(sessionDraftKey\(activeProfileID, configKey\(config\), sessionID\)\)\s*\}/, 'a successful dispatch must be able to retire the session\u2019s parked draft')
+assert.match(app, /if \(previousContext\.sessionID && \(composer\.trim\(\) \|\| attachments\.length > 0\)\) \{\s*sessionDraftsRef\.current\.set\([\s\S]*?\} else if \(previousContext\.sessionID\) \{[\s\S]*?sessionDraftsRef\.current\.delete\(/, 'an empty outgoing composer must delete the stale parked draft instead of leaving it to resurrect')
+assert.ok(app.includes('clearParkedDraft(session.id)') && app.includes('clearParkedDraft(selectedSession.id)'), 'prompt, command, and skill sends must all retire the parked draft at their commit boundary')
+assert.ok(app.includes('clearParkedDraft(sessionID)'), 'a skill activation confirmed later by poll must retire the parked draft too')
+// N2: the sessions list view renders action notices (fork created/unconfirmed) so the mobile
+// no-hijack fork path actually announces its result where the user is standing.
+assert.match(app, /<SessionsPanel[\s\S]*?actionNotice=\{actionNotice\}/, 'the sessions list must receive the action notice')
+assert.ok(sessionList.includes('actionNotice && <div className="notice info fade-in" role="status" aria-live="polite">'), 'the sessions list must render the action notice as visible status information')
+// N3: the MessagesPane memo must not be defeated by an inline lease-change callback.
+assert.match(app, /const handleLeaseChanged = useCallback\(\(\) => bumpMutationLock\(\(value\) => value \+ 1\), \[\]\)/, 'the lease-change signal must be identity-stable for the memoized message list')
+assert.match(app, /onLeaseChanged=\{handleLeaseChanged\}/, 'MessagesPane must receive the stable lease-change callback')
+// N4: mutation-locked Send and New buttons explain themselves, consistent with the menu items.
+assert.match(composerView, /title=\{mutationLocked \? t\('detail\.actionLocked'\) : t\('detail\.send'\)\}/, 'the composer send button must explain the mutation lock in its tooltip')
+assert.ok(sessionList.includes("title={offline ? t('sessions.offlineHint') : mutationLocked ? t('detail.actionLocked') : t('sessions.new')}"), 'both New Session buttons must explain the mutation lock in their tooltip')
+// N5: queued "waiting to send" rows get a cancel affordance (mobile and desktop share the row
+// view) that calls the client's inbox cancel, removes the row optimistically, and refreshes.
+assert.match(app, /function queuedInboxItemID\([\s\S]*?message\.info\.durableID[\s\S]*?optimistic-/, 'a queued row must be cancelable only by a real server inbox id')
+assert.match(app, /await api\.cancelInboxItem\(config, session\.id, inboxID, session\.directory\)/, 'queued cancel must call the client inbox cancel method')
+assert.match(app, /setQueuedInboxMessages\(\(current\) => \{[\s\S]*?queuedInboxItemID\(candidate\) !== inboxID[\s\S]*?setOptimisticUserMessages\(\(current\) => \{[\s\S]*?queuedInboxItemID\(candidate\) !== inboxID/, 'a cancelled queued row must be removed optimistically from both the inbox rows and any optimistic twin')
+assert.ok(app.includes('className="message-cancel-queued"'), 'the queued row must render a clearly-labelled cancel control')
+assert.match(app, /className="message-cancel-queued"[\s\S]*?disabled=\{cancellingInboxIDs\.has\(cancelableInboxID\)\}/, 'the cancel control must disable itself while its request is in flight')
+assert.match(styles, /\.message-cancel-queued\s*\{/, 'the queued cancel control needs its own styles')
 
 console.log('ui regression tests passed')

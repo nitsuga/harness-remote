@@ -8,7 +8,6 @@ import type {
   DiffFile,
   FileStatusEntry,
   HealthResponse,
-  MessageEnvelope,
   ModelSelection,
   PathInfo,
   PermissionRequest,
@@ -32,6 +31,7 @@ import {
   toSkillActivationBody,
   toSkillCommand,
   type V2Form,
+  type V2InboxItem,
   type V2Message,
   type V2Session,
   type V2Skill
@@ -82,6 +82,59 @@ type RequestOptions = {
   readTimeout?: number
 }
 
+/** The server may durably admit a mutation before a broken connection reports failure. */
+export class IndeterminateDeliveryError extends Error {
+  readonly indeterminate = true
+  constructor(message: string) {
+    super(message)
+    this.name = "IndeterminateDeliveryError"
+  }
+}
+
+export function isIndeterminateDeliveryError(error: unknown): boolean {
+  return Boolean(error && typeof error === "object" && (error as { indeterminate?: boolean }).indeterminate === true)
+}
+
+/**
+ * Attach the HTTP status to a definite transport error. The v2 error contract loses the status by
+ * the time callers see it (only the parsed detail survives), but `409 Conflict` is the server's
+ * answer to a re-admission attempt with an id that was already durably recorded — the signal that
+ * makes an idempotent retry resolvable.
+ */
+function withStatus(error: Error, status: number): Error {
+  ;(error as Error & { status?: number }).status = status
+  return error
+}
+
+/** The server answers 409 when a request id was already durably admitted; re-sending the same id
+ *  then confirms the earlier transmission instead of duplicating it. Works across transports: the
+ *  status rides on the error when the transport kept it (web/Capacitor), and the message pattern
+ *  covers the desktop bridge, which only surfaces the error text. */
+export function isAdmissionConflict(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false
+  const candidate = error as { status?: unknown; message?: unknown }
+  if (candidate.status === 409) return true
+  const message = typeof candidate.message === "string" ? candidate.message : String(error)
+  return message.includes("conflicts with an existing durable record")
+}
+
+/**
+ * Stable client-generated v2 message id used as the durable admission key for prompt, command and
+ * compaction admissions. `Session.Message.ID` requires the `msg_` prefix; for those durably
+ * admitted endpoints a second admission carrying the same id answers 409 (already recorded), so
+ * retrying a lost transmission with the same id can never admit the input twice. The skill endpoint
+ * is NOT durably admitted by id — a duplicate event id can defect — so this id must never be used
+ * to retry a skill activation (see `sendSkill`).
+ */
+export function createMessageRequestID(): string {
+  return `msg_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`
+}
+
+/** Same idea for `POST /api/session` (create), whose optional id must start with `ses`. */
+export function createSessionRequestID(): string {
+  return `ses_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`
+}
+
 /** Append a v2 `location[directory]` query param so a request targets the selected session's project. */
 function withLocation(path: string, directory?: string): string {
   if (!directory) return path
@@ -98,12 +151,32 @@ function withLocation(path: string, directory?: string): string {
 async function v2Raw(config: ServerConfig, path: string, options: RequestOptions = {}): Promise<{ status: number; body: unknown }> {
   const method = options.method ?? "GET"
   if (isDesktopPlatform()) {
-    const response = await desktopRequest(config, {
-      path,
-      method,
-      body: options.body,
-      readTimeout: options.readTimeout
-    })
+    let response
+    try {
+      response = await desktopRequest(config, {
+        path,
+        method,
+        body: options.body,
+        readTimeout: options.readTimeout
+      })
+    } catch (error) {
+      // Any non-GET mutation whose answer never made it back is indeterminate: the server may have
+      // durably admitted the request before the connection broke. The bridge's `timeout` and
+      // `connection` codes (or a code-less failure) mean the answer never arrived, and
+      // `response-too-large` means the server answered but the response body was unreadable — the
+      // electron transport attaches no status to it, so the mutation's outcome is unknowable either
+      // way. A definite HTTP status — carried through from the electron transport for `http` and
+      // `redirect` — means the server answered with a status, so it surfaces as a definite error
+      // exactly like web/Capacitor, with the status preserved (409 admission conflicts keep
+      // resolving through isAdmissionConflict). The remaining bridge codes (`invalid-path`,
+      // `unknown-profile`, ...) fail before any request leaves the renderer, so nothing was
+      // admitted and they are definite too.
+      const status = (error as Error & { status?: number }).status
+      const code = (error as Error & { code?: string }).code
+      const lostAnswer = status === undefined && (code === undefined || code === "timeout" || code === "connection" || code === "response-too-large")
+      if (method !== "GET" && lostAnswer) throw new IndeterminateDeliveryError((error as Error).message)
+      throw error
+    }
     return { status: response.status, body: response.data }
   }
 
@@ -124,11 +197,11 @@ async function v2Raw(config: ServerConfig, path: string, options: RequestOptions
         readTimeout: options.readTimeout ?? 30_000
       })
     } catch {
-      throw new Error(`Cannot reach ${config.host}:${config.port}.`)
+      throw new IndeterminateDeliveryError(`Cannot reach ${config.host}:${config.port}.`)
     }
     if (response.status >= 400) {
-      if (response.status === 401) throw new Error(responseDetail(response.data) || unauthorizedDetail(config))
-      throw new Error(responseDetail(response.data) || `HTTP ${response.status}`)
+      if (response.status === 401) throw withStatus(new Error(responseDetail(response.data) || unauthorizedDetail(config)), response.status)
+      throw withStatus(new Error(responseDetail(response.data) || `HTTP ${response.status}`), response.status)
     }
     return { status: response.status, body: response.data }
   }
@@ -141,7 +214,7 @@ async function v2Raw(config: ServerConfig, path: string, options: RequestOptions
       body: options.body === undefined ? undefined : JSON.stringify(options.body)
     })
   } catch {
-    throw new Error(`Cannot reach ${config.host}:${config.port}.`)
+    throw new IndeterminateDeliveryError(`Cannot reach ${config.host}:${config.port}.`)
   }
 
   if (!response.ok) {
@@ -152,10 +225,18 @@ async function v2Raw(config: ServerConfig, path: string, options: RequestOptions
     } catch {
       // Keep the HTTP status when an interrupted stream cannot be read.
     }
-    throw new Error(detail)
+    throw withStatus(new Error(detail), response.status)
   }
   if (response.status === 204) return { status: 204, body: undefined }
-  return { status: response.status, body: await response.json() }
+  try {
+    return { status: response.status, body: await response.json() }
+  } catch (error) {
+    // The status was 2xx, so the server answered; an unreadable body on a mutation (POST, DELETE,
+    // PATCH) leaves its exact outcome unknown — the same reasoning as the desktop
+    // `response-too-large` case.
+    if (method !== "GET") throw new IndeterminateDeliveryError((error as Error).message)
+    throw error
+  }
 }
 
 /**
@@ -279,15 +360,16 @@ export const opencode2Api = {
     return (models ?? []).flatMap((model) => toModelOption(model as Parameters<typeof toModelOption>[0], defaultModelID))
   },
 
-  async createSession(config: ServerConfig, title?: string, model?: ModelSelection, directory?: string) {
-    const created = await v2Request<V2Session>(config, "/api/session", {
-      method: "POST",
-      body: {
-        title,
-        model: model ? { id: model.modelID, providerID: model.providerID, variant: model.variant } : undefined,
-        location: directory ? { directory } : undefined
-      }
-    })
+  async createSession(config: ServerConfig, title?: string, model?: ModelSelection, directory?: string, requestID?: string) {
+    const body: Record<string, unknown> = {
+      title,
+      model: model ? { id: model.modelID, providerID: model.providerID, variant: model.variant } : undefined,
+      location: directory ? { directory } : undefined
+    }
+    // The optional `id` (a `Session.ID`, `ses_` prefix) lets a lost create response be reconciled by
+    // fetching the session by that id instead of retrying the mutation blindly.
+    if (requestID) body.id = requestID
+    const created = await v2Request<V2Session>(config, "/api/session", { method: "POST", body })
     return toSession(created)
   },
 
@@ -313,6 +395,36 @@ export const opencode2Api = {
   async loadLatestMessage(config: ServerConfig, sessionID: string, directory?: string) {
     const messages = await v2Request<V2Message[]>(config, withLocation(`/api/session/${encodeURIComponent(sessionID)}/message?limit=1&order=desc`, directory))
     return (messages ?? []).map((message) => toMessageEnvelope(message, sessionID))
+  },
+
+  /** Durable enqueued session work (`GET /api/session/{id}/inbox`): the authoritative source for
+   *  queued delivery state, since the message list drops items until they are delivered. */
+  async listInbox(config: ServerConfig, sessionID: string, directory?: string) {
+    const items = await v2Request<V2InboxItem[]>(config, withLocation(`/api/session/${encodeURIComponent(sessionID)}/inbox`, directory))
+    return items ?? []
+  },
+
+  /** Cancel an inbox item that has not yet been delivered (`DELETE /api/session/{id}/inbox/{inboxID}`,
+   *  `v2.session.inbox.cancel`, the protocol's authoritative route). The server answers 204 and
+   *  rejects with 409 once the item can no longer be cancelled (already delivered or being
+   *  executed) or 404 for an unknown session — so a definite-status failure surfaces as a definite
+   *  error, never as an indeterminate delivery. */
+  async cancelInboxItem(config: ServerConfig, sessionID: string, inboxID: string, directory?: string) {
+    await v2Request<boolean>(config, withLocation(`/api/session/${encodeURIComponent(sessionID)}/inbox/${encodeURIComponent(inboxID)}`, directory), { method: "DELETE" })
+    return true
+  },
+
+  /** Paginated child listing (`GET /api/session?parentID=...`) used to reconcile a fork whose
+   *  acknowledgement was lost: children created by earlier forks are captured as a baseline, and a
+   *  child that appears after the request is the fork this client started. */
+  async listChildSessions(config: ServerConfig, parentID: string) {
+    const children = await v2ListAll<V2Session>(config, `/api/session?parentID=${encodeURIComponent(parentID)}`)
+    return children.map(toSession)
+  },
+
+  async getSession(config: ServerConfig, sessionID: string) {
+    const session = await v2Request<V2Session>(config, `/api/session/${encodeURIComponent(sessionID)}`)
+    return toSession(session)
   },
 
   async loadTodo(_config: ServerConfig, _sessionID: string, _directory?: string): Promise<TodoItem[]> {
@@ -355,7 +467,7 @@ export const opencode2Api = {
     return Promise.reject(new Error("Session actions are not supported on OpenCode 2"))
   },
 
-  async sendPrompt(config: ServerConfig, sessionID: string, text: string, _directory?: string, model?: ModelSelection, agentID?: string, attachments: AttachmentPart[] = []) {
+  async sendPrompt(config: ServerConfig, sessionID: string, text: string, _directory?: string, model?: ModelSelection, agentID?: string, attachments: AttachmentPart[] = [], delivery?: "steer" | "queue", requestID?: string) {
     // Model and agent are per-session on v2; apply them before prompting so the next turn uses them.
     if (model) {
       await v2Request<boolean>(config, `/api/session/${encodeURIComponent(sessionID)}/model`, {
@@ -369,20 +481,29 @@ export const opencode2Api = {
         body: { agent: agentID }
       }).catch(() => undefined)
     }
-    await v2Request<boolean>(config, `/api/session/${encodeURIComponent(sessionID)}/prompt`, {
+    const promptDelivery = delivery ?? "steer"
+    const promptRequestID = requestID ?? createMessageRequestID()
+    const body: Record<string, unknown> = {
+      text,
+      files: attachments.map((attachment) => ({ uri: attachment.url, name: attachment.filename || "attachment" })),
+      delivery: promptDelivery,
+      resume: true
+    }
+    // The stable `id` is the durable admission key: retrying a lost transmission with the same id
+    // makes the server answer 409 (already admitted) instead of admitting the prompt twice.
+    body.id = promptRequestID
+    // Success answers `{ data: Session.Inbox.User }` — the exact durable message id and the delivery
+    // the server recorded. Return that admission metadata instead of discarding it so callers can
+    // correlate the optimistic message without another round-trip.
+    const admitted = await v2Request<{ id?: string; delivery?: "steer" | "queue" }>(config, `/api/session/${encodeURIComponent(sessionID)}/prompt`, {
       method: "POST",
-      body: {
-        text,
-        files: attachments.map((attachment) => ({ uri: attachment.url, name: attachment.filename || "attachment" })),
-        delivery: "steer",
-        resume: true
-      },
+      body,
       readTimeout: 300_000
     })
-    return true
+    return { admitted: true, requestID: promptRequestID, messageID: admitted?.id, delivery: admitted?.delivery }
   },
 
-  async sendCommand(config: ServerConfig, sessionID: string, command: string, argumentsText: string, _directory?: string, model?: ModelSelection, agentID?: string) {
+  async sendCommand(config: ServerConfig, sessionID: string, command: string, argumentsText: string, _directory?: string, model?: ModelSelection, agentID?: string, requestID?: string) {
     if (model) {
       await v2Request<boolean>(config, `/api/session/${encodeURIComponent(sessionID)}/model`, {
         method: "POST",
@@ -395,24 +516,64 @@ export const opencode2Api = {
         body: { agent: agentID }
       }).catch(() => undefined)
     }
-    await v2Request<boolean>(config, `/api/session/${encodeURIComponent(sessionID)}/command`, {
+    const body: Record<string, unknown> = { command, arguments: argumentsText || undefined }
+    // The stable `id` is the durable admission key for the resolved prompt input (see sendPrompt).
+    if (requestID) body.id = requestID
+    // Success answers `{ data: Session.Inbox.User }` — the resolved prompt input with the exact
+    // durable message id and the delivery the server recorded. Return that admission metadata
+    // instead of the fabricated envelope this previously produced.
+    const admitted = await v2Request<{ id?: string; delivery?: "steer" | "queue" }>(config, `/api/session/${encodeURIComponent(sessionID)}/command`, {
       method: "POST",
-      body: { command, arguments: argumentsText || undefined },
+      body,
       readTimeout: 300_000
     })
-    return { info: { id: "", role: "user", sessionID, time: { created: Date.now() } }, parts: [] } as MessageEnvelope
+    return { admitted: true, requestID, messageID: admitted?.id, delivery: admitted?.delivery }
   },
 
-  async sendSkill(config: ServerConfig, sessionID: string, skill: string, _directory?: string) {
-    // `POST /api/session/{id}/skill` (`v2.session.skill`) activates a skill by appending a skill
-    // message and resuming execution. The body is exactly `{ skill, resume: true }` — the endpoint
-    // rejects extra properties — and the server answers 204, which `v2Request` resolves to `true`.
+  async sendSkill(config: ServerConfig, sessionID: string, skill: string, _directory?: string, requestID?: string) {
+    // `POST /api/session/{id}/skill` (`v2.session.skill`) activates a skill by publishing a skill
+    // activation event and resuming execution. The body is exactly `{ skill, resume: true }` (plus
+    // the optional `id`) — the endpoint rejects extra properties — and the server answers 204, which
+    // `v2Request` resolves to `true`. Unlike prompt/command/compact, the skill endpoint is NOT
+    // durably admitted by id: it derives an event id from the request id, and re-admitting a
+    // duplicate event id can defect. A lost skill acknowledgement must therefore never be retried
+    // automatically with the same id, and none is attempted here.
+    const body: Record<string, unknown> = { ...toSkillActivationBody(skill) }
+    if (requestID) body.id = requestID
     await v2Request<boolean>(config, `/api/session/${encodeURIComponent(sessionID)}/skill`, {
       method: "POST",
-      body: toSkillActivationBody(skill),
+      body,
       readTimeout: 300_000
     })
     return true
+  },
+
+  async compactSession(config: ServerConfig, sessionID: string, _directory?: string, requestID?: string) {
+    // `POST /api/session/{id}/compact` (`v2.session.compact`) durably admits one compaction request
+    // and answers `{ data: SessionInbox.Compaction }` — the exact compaction message id, which the
+    // UI correlates with the terminal compaction message in history. The client supplies its own
+    // stable `id` so a lost acknowledgement can be retried idempotently (the server answers 409
+    // when that id was already admitted) and the terminal state stays attributable to this request.
+    const compactRequestID = requestID ?? createMessageRequestID()
+    const body: Record<string, unknown> = { delivery: "queue" }
+    body.id = compactRequestID
+    const admitted = await v2Request<{ id?: string }>(config, `/api/session/${encodeURIComponent(sessionID)}/compact`, {
+      method: "POST",
+      body
+    })
+    return { id: admitted?.id ?? compactRequestID, requestID: compactRequestID }
+  },
+
+  async forkSession(config: ServerConfig, sessionID: string, _directory?: string) {
+    // `POST /api/session/{id}/fork` (`v2.session.fork`) creates a child session by copying projected
+    // history. The request boundary union requires a `messageID` only for `before`; `{ type:
+    // "through" }` stands alone. The endpoint answers `{ data: Session.Info }`, mapped like any
+    // other session.
+    const forked = await v2Request<V2Session>(config, `/api/session/${encodeURIComponent(sessionID)}/fork`, {
+      method: "POST",
+      body: { boundary: { type: "through" } }
+    })
+    return toSession(forked)
   },
 
   async revertMessage(config: ServerConfig, sessionID: string, messageID: string, _directory?: string) {

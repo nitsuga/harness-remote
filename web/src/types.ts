@@ -27,6 +27,10 @@ export type HarnessCapabilities = {
   sessionRename: boolean
   sessionDelete: boolean
   attachments: boolean
+  /** Native session compaction (OpenCode 2 `/api/session/{id}/compact`). */
+  compactSession: boolean
+  /** Native session forking (OpenCode 2 `/api/session/{id}/fork`). */
+  forkSession: boolean
 }
 
 export type MachineAgentHost = {
@@ -110,6 +114,7 @@ export type Session = {
     partID?: string
   }
   external?: boolean
+  parentID?: string
 }
 
 export type SessionStatus = {
@@ -154,6 +159,14 @@ export type MessageEnvelope = {
       created: number
       completed?: number
     }
+    /** V2 synthetic message metadata used by asynchronous compaction actions. */
+    type?: string
+    compactionStatus?: "running" | "completed" | "failed"
+    delivery?: "queue" | "steer"
+    /** Server-confirmed durable message id on optimistic rows: the admission response returns the
+     *  exact id the message will carry in history (and the inbox), so the optimistic bubble can be
+     *  retired by id instead of by text once the server confirms admission. */
+    durableID?: string
   }
   parts: MessagePart[]
 }

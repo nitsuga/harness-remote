@@ -136,6 +136,11 @@ test('request transport enforces approved profile target and HTTP contract', asy
   assert.equal(httpError.error.status, 422)
   assert.equal((await executeDesktopRequest(localProfile, { path: '/redirect' })).error.code, 'redirect')
   assert.equal((await executeDesktopRequest(localProfile, { path: '/large' })).error.code, 'response-too-large')
+  // The transport attaches no HTTP status to `response-too-large`: the server answered but the
+  // body could not be read, so the client cannot tell whether a mutation committed. The v2 client
+  // relies on this — a status-less response-too-large on a non-GET request is classified as an
+  // indeterminate delivery, never a definite failure.
+  assert.equal((await executeDesktopRequest(localProfile, { path: '/large' })).error.status, undefined)
   assert.equal((await executeDesktopRequest(localProfile, { path: 'http://example.com' })).error.code, 'invalid-path')
   assert.equal((await executeDesktopRequest(localProfile, { path: '//example.com' })).error.code, 'invalid-path')
   assert.equal((await executeDesktopRequest(localProfile, { path: '/slow', readTimeout: 10 })).error.code, 'timeout')
