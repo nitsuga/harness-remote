@@ -43,6 +43,12 @@ assert.ok(app.includes('removedSessionIDsRef.current.set(tombstoneKey, tombstone
 assert.ok(!app.includes('removedSessionIDsRef.current.clear()'), 'profile/server transitions must not globally clear tombstones')
 assert.ok(app.includes('REMOVED_SESSION_STORAGE_KEY'), 'tombstones need a durable storage namespace')
 assert.match(app, /authoritativeIDs = new Set\(hydratedItems\.map/, 'only an authoritative list may reconcile tombstones')
+// Per-session composer drafts follow the same namespace discipline as tombstones: they survive
+// session-only navigation and away/back navigation within a profile/config, and are dropped only
+// when the profile or config changes.
+assert.ok(app.includes('sessionDraftsRef'), 'composer drafts must be preserved per session across navigation')
+assert.ok(app.includes('pendingForkDraftRef'), 'an unconfirmed fork must preserve its draft snapshot for a later manual open')
+assert.match(app, /sessionDraftsRef\.current\.clear\(\)[\s\S]*?pendingForkDraftRef\.current = null/, 'a profile/config transition must drop parked drafts and pending fork snapshots together')
 assert.ok(app.includes('mergedSessionTombstones'), 'runtime and hydrated tombstones must be merged instead of shadowed')
 assert.match(app, /authoritativeGlobalListing[\s\S]*?if \(!refreshIsCurrent\(\)\) return true[\s\S]*?if \(authoritativeGlobalListing\)/, 'tombstones may retire only after an authoritative current refresh')
 assert.ok(app.includes('modelSearchText'), 'model picker should support searching models')

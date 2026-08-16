@@ -401,6 +401,13 @@ const apiV1 = {
     return Promise.reject(new Error("Session forking is only supported on OpenCode 2 servers"))
   },
 
+  cancelInboxItem(_config: ServerConfig, _sessionID: string, _inboxID: string, _directory?: string) {
+    // OpenCode 1 (and the other v1-shaped backends) expose no inbox endpoint — queued delivery
+    // state and cancellation exist only on the v2 server. Reject honestly rather than pretending
+    // the item was cancelled. Only the opencode2 client implements cancelInboxItem.
+    return Promise.reject(new Error("Inbox cancellation is only supported on OpenCode 2 servers"))
+  },
+
   revertMessage(config: ServerConfig, sessionID: string, messageID: string, directory?: string) {
     return request<Session>(config, withDirectory(`/session/${sessionID}/revert`, directory), {
       method: "POST",

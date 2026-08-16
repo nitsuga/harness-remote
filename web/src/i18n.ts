@@ -176,6 +176,10 @@ type TranslationKey =
   | 'detail.deliveryIndeterminate'
   | 'detail.deliveryAdmitted'
   | 'detail.forkUnconfirmed'
+  | 'detail.forkCreated'
+  | 'detail.actionLocked'
+  | 'detail.requiresUserMessage'
+  | 'detail.actionWhileWorking'
   | 'detail.queuedPrompt'
   | 'todo.title'
   | 'todo.hide'
@@ -494,6 +498,10 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.deliveryIndeterminate': 'Delivery status is unknown. The server is being reconciled; do not resend.',
     'detail.deliveryAdmitted': 'Delivery confirmed with the server; nothing was sent twice.',
     'detail.forkUnconfirmed': 'Could not confirm the forked session. Refresh the session list to find it.',
+    'detail.forkCreated': 'Fork created — find it in the session list.',
+    'detail.actionLocked': 'Another session action is in progress; wait for it to finish.',
+    'detail.requiresUserMessage': 'Needs at least one message in this session.',
+    'detail.actionWhileWorking': 'Available once the agent is idle.',
     'detail.queuedPrompt': 'Queued · waiting to send',
     'todo.title': 'Todo Items',
     'todo.hide': 'Hide',
@@ -811,6 +819,10 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.deliveryIndeterminate': 'Stato della consegna sconosciuto. Sincronizzazione in corso; non inviare di nuovo.',
     'detail.deliveryAdmitted': 'Consegna confermata con il server; nulla è stato inviato due volte.',
     'detail.forkUnconfirmed': 'Impossibile confermare la sessione duplicata. Aggiorna l’elenco delle sessioni per trovarla.',
+    'detail.forkCreated': 'Sessione duplicata creata: trovala nell’elenco delle sessioni.',
+    'detail.actionLocked': 'Un’altra azione della sessione è in corso; attendi che finisca.',
+    'detail.requiresUserMessage': 'Richiede almeno un messaggio in questa sessione.',
+    'detail.actionWhileWorking': 'Disponibile quando l’agente è inattivo.',
     'detail.queuedPrompt': 'In coda · in attesa di invio',
     'todo.title': 'Todo',
     'todo.hide': 'Nascondi',
@@ -1121,6 +1133,10 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.deliveryIndeterminate': '傳送狀態不明。正在與伺服器同步，請勿重送。',
     'detail.deliveryAdmitted': '已與伺服器確認傳送；沒有重複傳送。',
     'detail.forkUnconfirmed': '無法確認分叉的工作階段。請重新整理工作階段清單以尋找它。',
+    'detail.forkCreated': '已建立分叉的工作階段，請在清單中尋找。',
+    'detail.actionLocked': '另一個工作階段動作正在進行；請等待完成。',
+    'detail.requiresUserMessage': '此工作階段需要至少一則訊息。',
+    'detail.actionWhileWorking': '代理程式閒置後即可使用。',
     'detail.queuedPrompt': '已排隊 · 等待傳送',
     'todo.title': '待辦事項',
     'todo.hide': '隱藏',
@@ -1380,6 +1396,10 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.deliveryIndeterminate': '传送状态未知。正在与服务器同步，请勿重新发送。',
     'detail.deliveryAdmitted': '已与服务器确认传送；没有重复传送。',
     'detail.forkUnconfirmed': '无法确认分叉的会话。请刷新会话列表以找到它。',
+    'detail.forkCreated': '已创建分叉的会话，请在列表中查找。',
+    'detail.actionLocked': '另一个会话操作正在进行；请等待完成。',
+    'detail.requiresUserMessage': '此会话至少需要一条消息。',
+    'detail.actionWhileWorking': '代理空闲后即可使用。',
     'detail.queuedPrompt': '已排队 · 等待发送',
     'todo.title': '待办事项',
     'todo.hide': '隐藏',

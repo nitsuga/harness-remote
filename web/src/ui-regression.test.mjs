@@ -46,12 +46,12 @@ assert.match(
   /\.message-reasoning-summary > \*,\s*\.message-action-summary > \*,\s*\.message-tool-summary > \*\s*\{[^}]*min-width:\s*0;/,
   'the text inside a summary row must be allowed to shrink, or the flex item keeps its full width'
 )
-assert.match(styles, /^\.session-card h3\s*\{[^}]*overflow-wrap:\s*(break-word|anywhere);/m, 'a long session title must break rather than widen its card')
+assert.match(styles, /^\.session-card \.session-card-title\s*\{[^}]*overflow-wrap:\s*(break-word|anywhere);/m, 'a long session title must break rather than widen its card')
 assert.ok(
-  !/^\.session-card h3\s*\{[^}]*white-space:\s*nowrap/m.test(styles),
+  !/^\.session-card \.session-card-title\s*\{[^}]*white-space:\s*nowrap/m.test(styles),
   'the mobile session card title must stay free to wrap; only the compact desktop sidebar row truncates it'
 )
-assert.match(styles, /^\.sidebar-sessions \.session-card h3\s*\{[^}]*white-space:\s*nowrap;/m, 'the desktop sidebar row keeps its single-line ellipsised title')
+assert.match(styles, /^\.sidebar-sessions \.session-card \.session-card-title\s*\{[^}]*white-space:\s*nowrap;/m, 'the desktop sidebar row keeps its single-line ellipsised title')
 
 // The desktop shell used to hug the combined width of two fixed panels, which centred the whole app
 // in a narrow column and left dead space either side of it on any wide display. The pane fills the
@@ -191,7 +191,9 @@ assert.ok(sessionList.includes('className="session-card-open"'), 'session cards 
 assert.equal(/\.session-card\s*\{[^}]*cursor:\s*pointer/.test(styles), false, 'the article must not promise that non-action card content opens the session')
 assert.match(styles, /\.session-card-open\s*\{[\s\S]*?cursor:\s*pointer/, 'the primary session control must retain a pointer and keyboard affordance')
 assert.match(styles, /\.composer-chips[\s\S]*?overflow-x: auto/, 'attachment chips must remain reachable on narrow screens')
-assert.match(app, /aria-busy=\{pendingAction !== null\}/, 'pending session actions must expose busy state')
+assert.equal(app.includes('aria-busy={pendingAction !== null}'), false, 'the session-actions toggle must not carry inert aria-busy state')
+assert.match(app, /<span className="session-action-pending" role="status" aria-live="polite">/, 'pending session actions must announce through a live status region instead of aria-busy')
+assert.ok(app.includes('title={action.disabled ? action.disabledReason : undefined}'), 'disabled session-action menu items must carry an explanation in their title')
 assert.match(icons, /export const StopCircleIcon/, 'StopCircleIcon should exist in the shared SVG icon set')
 assert.ok(app.includes('api.loadDiff(config, sessionID, directory)'), 'detail view should load /session/:id/diff for changed-file details')
 assert.ok(app.includes('diffFiles.length > 0'), 'changed-file panel should be hidden when there are no changed files')
@@ -333,7 +335,7 @@ assert.match(
   'a stale fork completion must be discarded by lease, context, and fork validation before inserting or navigating'
 )
 assert.ok(
-  /const sessionHeaderActions = useMemo\([\s\S]*?id: "compact"[\s\S]*?disabled: mutationLocked \|\| sessionActionPending !== null \|\| !hasUserMessage \|\| isWorking \|\| busySending[\s\S]*?id: "fork"[\s\S]*?disabled: mutationLocked \|\| sessionActionPending !== null \|\| !hasUserMessage \|\| isWorking \|\| busySending[\s\S]*?\}, \[awaitingAssistantReply,/.test(app),
+  /const sessionHeaderActions = useMemo\([\s\S]*?const compactDisabled = mutationLocked \|\| sessionActionPending !== null \|\| !hasUserMessage \|\| isWorking \|\| busySending[\s\S]*?const forkDisabled = mutationLocked \|\| sessionActionPending !== null \|\| !hasUserMessage \|\| isWorking \|\| busySending[\s\S]*?\}, \[awaitingAssistantReply,/.test(app),
   'compact and fork must share the coordinator lock and retain the visible-message and active-work guards'
 )
 assert.ok(
@@ -342,9 +344,9 @@ assert.ok(
   'undo and redo must share the coordinator lock and be disabled while compact or fork is pending'
 )
 assert.ok(
-  /function compactCurrentSession\(\)[\s\S]*?config\.backend !== "opencode2"[\s\S]*?isWorking[\s\S]*?busySending[\s\S]*?isSessionMutationLocked\(\)[\s\S]*?!messages\.some\(\(message\) => message\.info\.role === "user"\)/.test(app)
-    && /function forkCurrentSession\(\)[\s\S]*?config\.backend !== "opencode2"[\s\S]*?isWorking[\s\S]*?busySending[\s\S]*?isSessionMutationLocked\(\)[\s\S]*?!messages\.some\(\(message\) => message\.info\.role === "user"\)/.test(app),
-  'compact and fork handlers must retain the backend, coordinator, visible-message, and active-work guards'
+  /function compactCurrentSession\(\)[\s\S]*?config\.backend !== "opencode2"[\s\S]*?isWorking[\s\S]*?busySending[\s\S]*?isSessionMutationLocked\(\)[\s\S]*?!hasAnyUserMessage\(messages, optimisticUserMessages, queuedInboxMessages\)/.test(app)
+    && /function forkCurrentSession\(\)[\s\S]*?config\.backend !== "opencode2"[\s\S]*?isWorking[\s\S]*?busySending[\s\S]*?isSessionMutationLocked\(\)[\s\S]*?!hasAnyUserMessage\(messages, optimisticUserMessages, queuedInboxMessages\)/.test(app),
+  'compact and fork handlers must retain the backend, coordinator, visible-message (including optimistic and queued rows), and active-work guards'
 )
 
 // A follow-up prompt can be queued while the agent is still working.
@@ -523,7 +525,7 @@ assert.match(composerView, /if \(!mutationLocked && pendingPreparation === 0\) s
 
 // A session card showed a full absolute path over three lines, a third of its height.
 assert.ok(sessionList.includes('function shortDirectory'), 'the card should shorten the directory it shows')
-assert.ok(sessionList.includes('<p title={session.directory}>{shortDirectory(session.directory)}</p>'), 'the full path should stay available as a title')
+assert.ok(sessionList.includes('<span className="session-card-directory" title={session.directory}>{shortDirectory(session.directory)}</span>'), 'the full path should stay available as a title on the styled directory span')
 assert.equal(sessionList.includes("t('sessions.noFileChanges')"), false, 'absence of changes needs no line of its own on a phone')
 
 // Hover is not a state a finger can produce.
@@ -553,7 +555,7 @@ assert.ok(
   'the offline state explains itself; the raw transport error must not repeat it'
 )
 assert.ok(sessionList.includes("t('sessions.retry')"), 'an offline state should offer a way out')
-assert.ok(sessionList.includes('disabled={creating || offline}'), 'an action that cannot succeed offline must not be offered')
+assert.ok(sessionList.includes('disabled={creating || mutationLocked || offline}'), 'an action that cannot succeed offline or under the mutation lock must not be offered')
 assert.ok(styles.includes('.empty-state-actions'), 'the offline actions should be styled')
 
 // The question tool's own parameter schema has no `custom` field at all, so a question always
@@ -826,5 +828,63 @@ assert.ok(!app.includes('removedSessionIDsRef.current.clear()'), 'session tombst
 assert.match(app, /disabled=\{action\.disabled\}/, 'message context actions must honor disabled state')
 assert.match(app, /disabled=\{!selectedSession \|\| config\.backend !== "opencode2" \|\| busySending \|\| sessionActionPending === "fork" \|\| mutationLocked\}/, 'help skill buttons must honor the coordinator lock')
 assert.match(app, /onRefresh=\{\(\) => void refreshSessionsWithIndicator\(\)\.catch/, 'refresh remains wired while mutations are active')
+
+// --- Final review findings (PR #22) ------------------------------------------------------------
+// H1: session-only navigation must preserve the composer draft and staged attachments per session
+// within the current profile/config, restoring them on return and clearing the whole namespace
+// only when the profile or config actually changes. Mirrors the fork restore pattern.
+assert.ok(app.includes('const sessionDraftsRef = useRef(new Map<string, { text: string; attachments: AttachmentPart[] }>())'), 'composer drafts must be parked per session within the profile/config')
+assert.ok(app.includes('function sessionDraftKey(profileID: string, configKeyValue: string, sessionID: string | null)'), 'parked drafts must be keyed by profile, config, and session')
+assert.match(app, /const namespaceChanged = previousContext === null[\s\S]*?sessionDraftsRef\.current\.clear\(\)[\s\S]*?setComposer\(""\)[\s\S]*?setAttachments\(\[\]\)/, 'a profile/config change must clear the whole parked-draft namespace')
+assert.match(app, /if \(previousContext\.sessionID && \(composer\.trim\(\) \|\| attachments\.length > 0\)\) \{\s*sessionDraftsRef\.current\.set\(/, 'a session switch must park the outgoing draft under its own key')
+assert.match(app, /const saved = context\.sessionID[\s\S]*?sessionDraftsRef\.current\.get\(sessionDraftKey\(context\.profileID, context\.configKey, context\.sessionID\)\)[\s\S]*?setComposer\(saved \? saved\.text : ""\)/, 'a session switch must restore the incoming session\u2019s parked draft')
+// H2: the mobile New Session button must only show the Creating spinner/label while actually
+// creating; a mere mutation lock disables it with the plain New label.
+assert.ok(
+  /<SessionsPanel[\s\S]*?creating=\{creatingSession\}/.test(app) && /<SessionSidebar[\s\S]*?creating=\{creatingSession\}/.test(app),
+  'the New Session spinner must reflect only an actual create, never the generic mutation lock'
+)
+assert.equal(sessionList.includes('disabled={creating || offline}'), false, 'the New Session disabled state must also carry the mutation lock')
+assert.ok(sessionList.includes('{creating ? t(\'sessions.creating\') : t(\'sessions.new\')}'), 'the Creating label must be tied to the actual creating flag only')
+// F2: while the fork reconcile window is open (ref = synchronous authority), send and skill
+// activation must refuse dispatch so an in-flight prompt cannot be orphaned by reconcile navigation.
+assert.match(app, /async function send\(\)\s*\{[\s\S]*?sessionActionPendingRef\.current === "fork"\) return[\s\S]*?if \(!selectedSession \|\| isSessionMutationLocked\(\)\) return/, 'send must refuse dispatch during the fork reconcile window via the synchronous ref')
+assert.match(app, /async function activateSkill\([\s\S]*?sessionActionPendingRef\.current === "fork"\) return[\s\S]*?if \(isSessionMutationLocked\(\)\) return/, 'skill activation must refuse dispatch during the fork reconcile window')
+// M2: the open control renders its title and directory as styled spans, never flow content.
+const openControlMarkup = sessionList.match(/<button type="button" className="session-card-open"[\s\S]*?<\/button>/)
+assert.ok(openControlMarkup && openControlMarkup[0].includes('session-card-title') && openControlMarkup[0].includes('session-card-directory'), 'the open control must render title and directory spans')
+assert.ok(openControlMarkup && !/<h3|<p /.test(openControlMarkup[0]), 'a button must not contain heading/paragraph flow content')
+// M3: a back/view navigation during a pending fork must not be reversed by reconcile — the
+// confirmed child is inserted and announced, never forced open over the view the user chose.
+assert.match(app, /const mainViewRef = useRef\(mainView\)[\s\S]*?mainViewRef\.current = mainView/, 'reconciliation must read the current layout through a ref')
+assert.match(app, /if \(mainViewRef\.current !== "detail" \|\| selectedSessionRef\.current\?\.id !== original\.id\) \{[\s\S]*?sessionDraftsRef\.current\.set\([\s\S]*?childView\.id[\s\S]*?setActionNotice\(t\('detail\.forkCreated'\)\)[\s\S]*?return[\s\S]*?\}/, 'a reconcile that finds the child while the user left the detail view must insert it without forcing navigation')
+assert.ok(app.includes('forkFocusSessionRef.current = childView.id'), 'reconcile navigation must still focus the child when the user is still viewing the fork context')
+// M4: reconcile exhaustion (unconfirmed but committed) preserves the fork draft snapshot and
+// restores it when the child is subsequently opened manually, empty-composer guard, context-scoped.
+assert.match(app, /pendingForkDraftRef\.current = \{\s*namespace: `\$\{activeProfileID\}\\u0000\$\{configKey\(config\)\}`[\s\S]*?baselineChildIDs,[\s\S]*?text: forkDraft\.text,[\s\S]*?attachments: \[\.\.\.forkDraft\.attachments\][\s\S]*?setActionNotice\(t\('detail\.forkUnconfirmed'\)\)/, 'reconcile exhaustion must preserve the fork draft snapshot for a later manual open')
+assert.match(app, /const pendingForkDraft = pendingForkDraftRef\.current[\s\S]*?sessionID !== pendingForkDraft\.parentSessionID[\s\S]*?!pendingForkDraft\.baselineChildIDs\.has\(sessionID\)[\s\S]*?setComposer\(\(current\) => \(current === "" \? pendingForkDraft\.text : current\)\)[\s\S]*?setAttachments\(\(current\) => \(current\.length === 0 \? pendingForkDraft\.attachments : current\)\)/, 'a manual open of the unconfirmed child must restore the preserved fork draft with the empty-composer guard')
+// M5: after the compaction 45s deadline resolves the pending lock, a passive watcher on the exact
+// expected compaction id announces terminal completed/failed state without re-locking controls.
+assert.ok(app.includes('passive: false'), 'a fresh compaction observation must start in active (locking) mode')
+assert.match(app, /if \(!observation\.passive\) \{[\s\S]*?sessionActionPendingRef\.current = null[\s\S]*?setSessionActionPending\(null\)[\s\S]*?setActionNotice\(terminal\)[\s\S]*?\} else \{[\s\S]*?setActionNotice\(terminal\)[\s\S]*?\}/, 'the passive watcher must announce terminal state without re-locking the controls')
+assert.match(app, /const remaining = COMPACTION_PENDING_MAX_MS[\s\S]*?if \(remaining <= 0\) \{[\s\S]*?observation\.passive = true[\s\S]*?setSessionActionPending\(null\)[\s\S]*?setActionNotice\(t\('detail\.compactUnconfirmed'\)\)/, 'the deadline must resolve the pending lock while keeping the passive watch on the exact id')
+assert.match(app, /if \(observation\.passive\) return/, 'the passive watcher must not schedule a second deadline of its own')
+// M6: desktop row actions reveal when hovering the open control, never the whole card, and the
+// open control advertises hover on itself without the misleading full-card pointer.
+assert.match(styles, /\.sidebar-sessions \.session-card:has\(\.session-card-open:hover\) \.inline-actions/, 'desktop row actions must reveal when hovering the open control, not the whole card')
+assert.match(styles, /\.sidebar-sessions \.session-card-open:hover \{[^}]*background:/, 'the open control must advertise hover on itself')
+assert.equal(/\.session-card\s*\{[^}]*cursor:\s*pointer/.test(styles), false, 'the card must never reclaim the misleading full-card pointer')
+// M7: disabled session-action menu items explain themselves; the toggle has no inert aria-busy.
+assert.ok(app.includes('disabledReason'), 'session actions must be able to explain why they are disabled')
+assert.ok(app.includes("disabledReason: disabledReasonFor(mutationLocked || sessionActionPending !== null)"), 'undo/redo must explain their disabled state from the shared reason helper')
+assert.ok(app.includes("disabledReasonFor(compactDisabled)") && app.includes("disabledReasonFor(forkDisabled)"), 'compact/fork must explain their disabled state from the shared reason helper')
+assert.ok(app.includes("t('detail.actionLocked')") && app.includes("t('detail.requiresUserMessage')") && app.includes("t('detail.actionWhileWorking')"), 'disabled-action explanations must be translated')
+// M8: parity/consistency — optimistic and queued rows count for compact/fork availability,
+// revert shows disabled consistently in both bubble views, the pending label centres, and the
+// sidebar never repeats the directory already shown in its meta line.
+assert.match(app, /function hasAnyUserMessage\([\s\S]*?\[\.\.\.messages, \.\.\.optimisticUserMessages, \.\.\.queuedInboxMessages\]\.some/, 'the combined user-row check must include history, optimistic, and queued rows')
+assert.match(app, /disabled: revertDisabled, disabledReason: revertDisabled \? t\('detail\.actionLocked'\) : undefined/, 'MessageArticle must show the revert affordance disabled, aligned with the run view')
+assert.match(styles, /\.session-action-pending \{[^}]*text-align:\s*center/, 'the pending action label must centre under its toggle on narrow appbars')
+assert.match(styles, /\.sidebar-sessions \.session-card \.session-card-directory \{[^}]*display:\s*none/, 'the sidebar must not repeat the directory already shown in its meta line')
 
 console.log('ui regression tests passed')

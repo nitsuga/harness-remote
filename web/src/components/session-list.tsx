@@ -124,8 +124,9 @@ export function SessionCard({
             </div>
           ) : (
             <button type="button" className="session-card-open" onClick={() => onOpen(session)} title={t('sessions.open')}>
-              <h3 title={session.title}>{session.title}</h3>
-              <p title={session.directory}>{shortDirectory(session.directory)}</p>
+              {/* Flow content inside a button is invalid; the title and directory are styled spans. */}
+              <span className="session-card-title" title={session.title}>{session.title}</span>
+              <span className="session-card-directory" title={session.directory}>{shortDirectory(session.directory)}</span>
             </button>
           )}
           {isRenaming && <p title={session.directory}>{shortDirectory(session.directory)}</p>}
@@ -166,6 +167,7 @@ export function SessionSidebar({
   sidebarSessionsRef,
   refreshing,
   creating,
+  mutationLocked,
   offline,
   width,
   t,
@@ -184,7 +186,10 @@ export function SessionSidebar({
   searchInputRef: RefObject<HTMLInputElement>
   sidebarSessionsRef: RefObject<HTMLDivElement>
   refreshing: boolean
+  /** True only while a session is actually being created; the spinner/label must not claim
+   *  creation while the button is merely disabled by the shared mutation lock (H2). */
   creating: boolean
+  mutationLocked: boolean
   offline: boolean
   width: number
   t: Translator
@@ -206,7 +211,7 @@ export function SessionSidebar({
         <button onClick={onRefresh} className="btn-secondary" disabled={refreshing} aria-label={t('sessions.refresh')} title={t('sessions.refresh')}>
           {refreshing ? <LoadingIcon size={16} /> : <RefreshIcon size={16} />}
         </button>
-        <button onClick={onNewSession} className="btn-primary" disabled={creating || offline} aria-label={t('sessions.new')} title={offline ? t('sessions.offlineHint') : t('sessions.new')}>
+        <button onClick={onNewSession} className="btn-primary" disabled={creating || mutationLocked || offline} aria-label={t('sessions.new')} title={offline ? t('sessions.offlineHint') : t('sessions.new')}>
           {creating ? <LoadingIcon size={16} /> : <PlusIcon size={16} />}
         </button>
       </div>
@@ -235,6 +240,7 @@ export function SessionsPanel({
   query,
   refreshing,
   creating,
+  mutationLocked,
   offline,
   connectionState,
   connectionStatusText,
@@ -255,7 +261,10 @@ export function SessionsPanel({
   changedSessions: number
   query: string
   refreshing: boolean
+  /** True only while a session is actually being created; the spinner/label must not claim
+   *  creation while the button is merely disabled by the shared mutation lock (H2). */
   creating: boolean
+  mutationLocked: boolean
   offline: boolean
   connectionState: string
   connectionStatusText: string
@@ -283,7 +292,7 @@ export function SessionsPanel({
         </div>
         <div className="inline-actions sessions-header-actions">
           <button onClick={onRefresh} className="btn-secondary" disabled={refreshing}>{refreshing ? <LoadingIcon size={18} /> : <RefreshIcon size={18} />}{t('sessions.refresh')}</button>
-          <button onClick={onNewSession} className="btn-primary" disabled={creating || offline} title={offline ? t('sessions.offlineHint') : undefined}>{creating ? <LoadingIcon size={18} /> : <PlusIcon size={18} />}{creating ? t('sessions.creating') : t('sessions.new')}</button>
+          <button onClick={onNewSession} className="btn-primary" disabled={creating || mutationLocked || offline} title={offline ? t('sessions.offlineHint') : undefined}>{creating ? <LoadingIcon size={18} /> : <PlusIcon size={18} />}{creating ? t('sessions.creating') : t('sessions.new')}</button>
         </div>
       </div>
       <div className="toolbar"><input placeholder={t('sessions.searchPlaceholder')} value={query} onChange={(event) => onQueryChange(event.target.value)} className="search" /></div>

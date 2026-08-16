@@ -1751,6 +1751,17 @@ function hasMatchingUserMessage(messages: MessageEnvelope[], optimistic: Message
   ))
 }
 
+/** M8: transcript-dependent availability must count every visible user row — fetched history,
+ *  optimistic bubbles, and server-admitted queued inbox rows. A just-sent or queued prompt
+ *  keeps Compact/Fork reachable instead of flashing them disabled until the next refresh. */
+function hasAnyUserMessage(
+  messages: MessageEnvelope[],
+  optimisticUserMessages: MessageEnvelope[],
+  queuedInboxMessages: MessageEnvelope[]
+): boolean {
+  return [...messages, ...optimisticUserMessages, ...queuedInboxMessages].some((message) => message.info.role === "user")
+}
+
 type RenderGroup =
   | { kind: "message"; message: MessageEnvelope & { text: string } }
   | {
@@ -1807,6 +1818,9 @@ type MessageMenuAction = {
   label: string
   onSelect: () => void
   disabled?: boolean
+  /** Tooltip text for a disabled item, so users understand why the action is unavailable
+   *  instead of staring at an unexplained greyed-out row. Never announced separately. */
+  disabledReason?: string
 }
 
 /** A ⋯ control in the conversation header exposing session-level actions from the connected
@@ -1853,7 +1867,6 @@ function SessionActionsMenu({
         onClick={() => setOpen((value) => !value)}
         aria-expanded={open}
         aria-haspopup="menu"
-        aria-busy={pendingAction !== null}
         aria-label={t('detail.sessionActions')}
         title={t('detail.sessionActions')}
       >
@@ -1867,6 +1880,7 @@ function SessionActionsMenu({
               type="button"
               role="menuitem"
               disabled={action.disabled}
+              title={action.disabled ? action.disabledReason : undefined}
               onClick={() => {
                 if (action.disabled) return
                 setOpen(false)
@@ -1986,7 +2000,7 @@ function MessageContextMenu({
           {text && <button type="button" role="menuitem" onClick={() => copy(true)}>{t('detail.copyMarkdown')}</button>}
           {text && actions.length > 0 && <div className="message-context-menu__separator" role="separator" />}
             {actions.map((action) => (
-             <button key={action.id} type="button" role="menuitem" disabled={action.disabled} onClick={() => {
+             <button key={action.id} type="button" role="menuitem" disabled={action.disabled} title={action.disabled ? action.disabledReason : undefined} onClick={() => {
                if (action.disabled) return
                setPosition(null)
                action.onSelect()
@@ -2035,7 +2049,7 @@ function ConversationRunView({
       text={runText}
       className="message assistant fade-in"
       t={t}
-       actions={fallback ? [...actions, ...(config.backend === "opencode" || config.backend === "opencode2" ? [{ id: "revert", label: t('detail.revertToMessage'), disabled: revertDisabled, onSelect: () => onRevertMessage(fallback.info.id) }] : [])] : actions}
+       actions={fallback ? [...actions, ...(config.backend === "opencode" || config.backend === "opencode2" ? [{ id: "revert", label: t('detail.revertToMessage'), disabled: revertDisabled, disabledReason: revertDisabled ? t('detail.actionLocked') : undefined, onSelect: () => onRevertMessage(fallback.info.id) }] : [])] : actions}
     >
       {items.map((item) =>
         item.kind === "action-group" ? (
@@ -2089,7 +2103,7 @@ const MessageArticle = memo(function MessageArticle({
       text={message.text}
       className={`message ${message.info.role} fade-in`}
       t={t}
-      actions={[...actions, ...(config.backend === "opencode" || config.backend === "opencode2" ? (revertDisabled ? [] : [{ id: "revert", label: t('detail.revertToMessage'), onSelect: () => onRevertMessage(message.info.id) }]) : [])]}
+      actions={[...actions, ...(config.backend === "opencode" || config.backend === "opencode2" ? [{ id: "revert", label: t('detail.revertToMessage'), disabled: revertDisabled, disabledReason: revertDisabled ? t('detail.actionLocked') : undefined, onSelect: () => onRevertMessage(message.info.id) }] : [])]}
     >
       {buildMessageTimeline(message.parts).map((item) =>
         item.kind === "action-group" ? (
@@ -2415,6 +2429,7 @@ function App() {
   const replaceMutationContext = (sessionID: string | null = selectedID, profileID = activeProfileID, nextConfig = config) => {
     const context = { profileID, configKey: configKey(nextConfig), sessionID }
     if (!mutationCoordinator.isContextCurrent(context)) {
+      const previousContext = mutationCoordinator.getContext()
       mutationCoordinator.replaceContext(context)
       bumpMutationLock((value) => value + 1)
       sessionActionPendingRef.current = null
@@ -2443,6 +2458,31 @@ function App() {
       pendingSkillRequestsRef.current.clear()
       setComposer("")
       setAttachments([])
+      // H1: session-only navigation must never silently destroy the draft/staged attachments.
+      // Park the outgoing session's draft under its own key and restore the incoming session's
+      // parked draft; only a profile/config change (different namespace) clears the whole map.
+      // The ref is the synchronous authority here — replaceContext has already committed.
+      const namespaceChanged = previousContext === null
+        || previousContext.profileID !== context.profileID
+        || previousContext.configKey !== context.configKey
+      if (namespaceChanged) {
+        sessionDraftsRef.current.clear()
+        pendingForkDraftRef.current = null
+        setComposer("")
+        setAttachments([])
+      } else {
+        if (previousContext.sessionID && (composer.trim() || attachments.length > 0)) {
+          sessionDraftsRef.current.set(
+            sessionDraftKey(previousContext.profileID, previousContext.configKey, previousContext.sessionID),
+            { text: composer, attachments: [...attachments] }
+          )
+        }
+        const saved = context.sessionID
+          ? sessionDraftsRef.current.get(sessionDraftKey(context.profileID, context.configKey, context.sessionID))
+          : undefined
+        setComposer(saved ? saved.text : "")
+        setAttachments(saved ? [...saved.attachments] : [])
+      }
       completionShouldPlayRef.current = false
       awaitingAssistantBaselineRef.current = ""
       latestMessageTimesRef.current.clear()
@@ -2512,6 +2552,27 @@ function App() {
   const [query, setQuery] = useState("")
   const [composer, setComposer] = useState("")
   const [attachments, setAttachments] = useState<AttachmentPart[]>([])
+  /** H1: composer drafts and staged attachments parked per session, scoped to the current
+   *  profile/config namespace. A session-only switch parks the outgoing draft under its own key
+   *  and restores the incoming session's parked draft; only a profile/config change clears the
+   *  whole namespace. This mirrors the fork restore pattern (empty-composer guard, context
+   *  scoped) for plain navigation, so switching sessions never silently destroys unsent input. */
+  const sessionDraftsRef = useRef(new Map<string, { text: string; attachments: AttachmentPart[] }>())
+  /** M4: the fork snapshot survives reconcile exhaustion. The child could not be confirmed, but
+   *  the fork may still have committed server-side; keeping the snapshot here lets a later manual
+   *  open of the child restore it (see openSession), so the draft is never lost. Scoped to the
+   *  profile/config the fork ran in and consumed on restore. */
+  const pendingForkDraftRef = useRef<{
+    namespace: string
+    parentSessionID: string
+    parentDirectory: string
+    baselineChildIDs: Set<string>
+    text: string
+    attachments: AttachmentPart[]
+  } | null>(null)
+  function sessionDraftKey(profileID: string, configKeyValue: string, sessionID: string | null): string {
+    return `${profileID}\u0000${configKeyValue}\u0000${sessionID ?? ""}`
+  }
   const attachmentInputRef = useRef<HTMLInputElement | null>(null)
   const [busySending, setBusySending] = useState(false)
   const [sessionActionPending, setSessionActionPending] = useState<"compact" | "fork" | null>(null)
@@ -2528,10 +2589,14 @@ function App() {
     context: string
     expectedID: string | null
     startedAt: number
+    /** M5: true once the bounded deadline resolved the pending lock. The observation then becomes a
+     *  passive watcher: it no longer locks controls, but it keeps watching for the exact expected
+     *  compaction id so the terminal result is still announced instead of silently vanishing. */
+    passive: boolean
   } | null>(null)
   useEffect(() => {
     const observation = compactObservationRef.current
-    if (!observation || sessionActionPending !== "compact") return
+    if (!observation) return
     const context = JSON.stringify({ profileID: activeProfileID, configKey: configKey(config), sessionID: selectedID })
     if (observation.context !== context || !selectedID) {
       // The compaction belongs to a context this view no longer owns. Clear the observation and the
@@ -2542,38 +2607,46 @@ function App() {
       return
     }
     const compactions = messages.filter((message) => message.info.type === "compaction")
-    const resolve = (terminal: MessageEnvelope) => {
-      compactObservationRef.current = null
-      setSessionActionPending(null)
-      sessionActionPendingRef.current = null
-      setActionNotice(terminal.info.compactionStatus === "failed" ? t('detail.compactFailed') : t('detail.compactCompleted'))
-    }
     // Exact correlation only: the terminal compaction message carries the same durable id the server
     // admitted under, so only a message with the expected id may release the pending action.
     const expected = observation.expectedID
       ? compactions.find((message) => message.info.id === observation.expectedID)
       : undefined
     if (expected && (expected.info.compactionStatus === "completed" || expected.info.compactionStatus === "failed")) {
-      resolve(expected)
+      const terminal = expected.info.compactionStatus === "failed" ? t('detail.compactFailed') : t('detail.compactCompleted')
+      compactObservationRef.current = null
+      if (!observation.passive) {
+        sessionActionPendingRef.current = null
+        setSessionActionPending(null)
+        setActionNotice(terminal)
+      } else {
+        // M5: the deadline already released the pending lock. Only announce the terminal result —
+        // re-locking the controls (or re-enabling a duplicate compaction) would be wrong here.
+        setActionNotice(terminal)
+      }
       return
     }
+    // A passive watcher has no deadline of its own: the lock already resolved, and it only waits
+    // for the exact expected id to reach terminal state (or for the context to change).
+    if (observation.passive) return
     // Bounded terminal recovery: the expected message never reached terminal state. Do not let the
     // pending action (and the compact button) block forever — check inline on every message change
     // AND schedule a timer for a quiet session that stops changing.
     const remaining = COMPACTION_PENDING_MAX_MS - (Date.now() - observation.startedAt)
     if (remaining <= 0) {
-      compactObservationRef.current = null
-      setSessionActionPending(null)
+      // M5: resolve the lock but keep the observation as a passive watcher on the exact id.
+      observation.passive = true
       sessionActionPendingRef.current = null
+      setSessionActionPending(null)
       setActionNotice(t('detail.compactUnconfirmed'))
       return
     }
     const deadlineTimer = setTimeout(() => {
       const active = compactObservationRef.current
       if (!active || active !== observation || sessionActionPendingRef.current !== "compact") return
-      compactObservationRef.current = null
-      setSessionActionPending(null)
+      active.passive = true
       sessionActionPendingRef.current = null
+      setSessionActionPending(null)
       setActionNotice(t('detail.compactUnconfirmed'))
     }, remaining)
     return () => clearTimeout(deadlineTimer)
@@ -2761,8 +2834,8 @@ function App() {
     const hasRedo = config.backend === "opencode" || config.backend === "opencode2" ? !!revertMessageID : redoAction ? redoAction.enabled : true
     const supportsUndo = config.backend === "opencode" || config.backend === "opencode2" || !!undoAction || supported.has("undo")
     const supportsRedo = config.backend === "opencode" || config.backend === "opencode2" || !!redoAction || supported.has("redo")
-    if (supportsUndo && hasUndo) actions.push({ id: "undo", label: t('detail.undo'), disabled: mutationLocked || sessionActionPending !== null, onSelect: () => void runNativeHistoryCommand("undo") })
-    if (supportsRedo && hasRedo) actions.push({ id: "redo", label: t('detail.redo'), disabled: mutationLocked || sessionActionPending !== null, onSelect: () => void runNativeHistoryCommand("redo") })
+    if (supportsUndo && hasUndo) actions.push({ id: "undo", label: t('detail.undo'), disabled: mutationLocked || sessionActionPending !== null, disabledReason: mutationLocked || sessionActionPending !== null ? t('detail.actionLocked') : undefined, onSelect: () => void runNativeHistoryCommand("undo") })
+    if (supportsRedo && hasRedo) actions.push({ id: "redo", label: t('detail.redo'), disabled: mutationLocked || sessionActionPending !== null, disabledReason: mutationLocked || sessionActionPending !== null ? t('detail.actionLocked') : undefined, onSelect: () => void runNativeHistoryCommand("redo") })
     return actions
   }, [commands, config.backend, extensionActions, messages, mutationLocked, selectedSession?.revertMessageID, sessionActionPending, t])
   /** Session-level actions for the header ⋯ menu. Unlike the message context menu, availability
@@ -2775,25 +2848,39 @@ function App() {
     const revertMessageID = selectedSession?.revertMessageID
     const undoAction = extensionActions.find((action) => action.id === "undo")
     const redoAction = extensionActions.find((action) => action.id === "redo")
-     const hasUserMessage = messages.some((message) => message.info.role === "user")
-     // Keep the visible-message guard explicit (and retain the legacy shape for source-level
-     // regression checks); mutationLocked is intentionally additive so every lease also disables it.
-     // id: "compact", disabled: sessionActionPending !== null || !hasUserMessage || isWorking || busySending
-     // id: "fork", disabled: sessionActionPending !== null || !hasUserMessage || isWorking || busySending
+    // M8: availability counts every visible user row (history, optimistic bubble, queued inbox),
+    // so a just-sent or queued prompt keeps Compact/Fork reachable.
+    const hasUserMessage = hasAnyUserMessage(messages, optimisticUserMessages, queuedInboxMessages)
+    // M7: a disabled item must be able to explain itself in its tooltip. The lock and pending
+    // action win over every other reason; compact/fork additionally need a user message and an
+    // idle agent. mutationLocked is intentionally additive so every lease also disables them.
+    const lockedReason = t('detail.actionLocked')
+    const emptyReason = t('detail.requiresUserMessage')
+    const workingReason = t('detail.actionWhileWorking')
+    const disabledReasonFor = (extraDisabled: boolean): string | undefined => {
+      if (extraDisabled) {
+        if (mutationLocked || sessionActionPending !== null) return lockedReason
+        if (!hasUserMessage) return emptyReason
+        return workingReason
+      }
+      return undefined
+    }
     const hasUndo = config.backend === "opencode" || config.backend === "opencode2"
       ? messages.some((message) => message.info.role === "user" && (!revertMessageID || message.info.id < revertMessageID))
       : undoAction ? undoAction.enabled : supported.has("undo")
     const hasRedo = config.backend === "opencode" || config.backend === "opencode2" ? !!revertMessageID : redoAction ? redoAction.enabled : supported.has("redo")
-     if (hasUndo) actions.push({ id: "undo", label: t('detail.undo'), disabled: mutationLocked || sessionActionPending !== null, onSelect: () => void runNativeHistoryCommand("undo") })
-     if (hasRedo) actions.push({ id: "redo", label: t('detail.redo'), disabled: mutationLocked || sessionActionPending !== null, onSelect: () => void runNativeHistoryCommand("redo") })
+     if (hasUndo) actions.push({ id: "undo", label: t('detail.undo'), disabled: mutationLocked || sessionActionPending !== null, disabledReason: disabledReasonFor(mutationLocked || sessionActionPending !== null), onSelect: () => void runNativeHistoryCommand("undo") })
+     if (hasRedo) actions.push({ id: "redo", label: t('detail.redo'), disabled: mutationLocked || sessionActionPending !== null, disabledReason: disabledReasonFor(mutationLocked || sessionActionPending !== null), onSelect: () => void runNativeHistoryCommand("redo") })
     if (selectedSession && config.backend === "opencode2" && capabilities.compactSession) {
-       actions.push({ id: "compact", label: t('detail.compactSession'), disabled: mutationLocked || sessionActionPending !== null || !hasUserMessage || isWorking || busySending, onSelect: () => void compactCurrentSession() })
+      const compactDisabled = mutationLocked || sessionActionPending !== null || !hasUserMessage || isWorking || busySending
+       actions.push({ id: "compact", label: t('detail.compactSession'), disabled: compactDisabled, disabledReason: disabledReasonFor(compactDisabled), onSelect: () => void compactCurrentSession() })
     }
     if (selectedSession && config.backend === "opencode2" && capabilities.forkSession) {
-       actions.push({ id: "fork", label: t('detail.forkSession'), disabled: mutationLocked || sessionActionPending !== null || !hasUserMessage || isWorking || busySending, onSelect: () => void forkCurrentSession() })
+      const forkDisabled = mutationLocked || sessionActionPending !== null || !hasUserMessage || isWorking || busySending
+       actions.push({ id: "fork", label: t('detail.forkSession'), disabled: forkDisabled, disabledReason: disabledReasonFor(forkDisabled), onSelect: () => void forkCurrentSession() })
     }
     return actions
-  }, [awaitingAssistantReply, busySending, capabilities.compactSession, capabilities.forkSession, commands, config.backend, extensionActions, isWorking, messages, selectedSession, sessionActionPending, t, mutationLocked])
+  }, [awaitingAssistantReply, busySending, capabilities.compactSession, capabilities.forkSession, commands, config.backend, extensionActions, isWorking, messages, optimisticUserMessages, queuedInboxMessages, selectedSession, sessionActionPending, t, mutationLocked])
   const selectedNewSessionDirectory = normalizeDirectory(newSessionDirectory)
 
   const renderedMessages = useMemo(() => {
@@ -2897,6 +2984,21 @@ function App() {
     const isCurrentOpen = () => mutationCoordinator.isContextGenerationCurrent(openContextGeneration)
       && mutationCoordinator.isContextCurrent(openContext)
     setSelectedID(sessionID)
+    // M4: restore a preserved fork draft when the child is subsequently opened manually. Only
+    // when the open stays in the fork's profile/config, targets a session that is not the fork's
+    // parent and not part of the pre-fork baseline, and matches the fork's directory; and only
+    // into an empty composer/attachment tray (the empty-composer guard from the fork restore
+    // pattern), so anything the user typed meanwhile is never overwritten. Consumed on restore.
+    const pendingForkDraft = pendingForkDraftRef.current
+    if (pendingForkDraft
+      && pendingForkDraft.namespace === `${activeProfileID}\u0000${configKey(config)}`
+      && sessionID !== pendingForkDraft.parentSessionID
+      && !pendingForkDraft.baselineChildIDs.has(sessionID)
+      && directory === pendingForkDraft.parentDirectory) {
+      pendingForkDraftRef.current = null
+      setComposer((current) => (current === "" ? pendingForkDraft.text : current))
+      setAttachments((current) => (current.length === 0 ? pendingForkDraft.attachments : current))
+    }
     setSelectedModelKey(readStoredModel(config.backend, sessionID))
     loadModelsRequestRef.current += 1
     setModelOptions([])
@@ -3449,7 +3551,7 @@ function App() {
   /** Compact is a queued current-session action: it must not replace the selected session. */
   async function compactCurrentSession() {
     if (config.backend !== "opencode2" || !selectedSession || sessionActionPending || sessionActionPendingRef.current || isWorking || busySending || isSessionMutationLocked()
-      || !messages.some((message) => message.info.role === "user")) return
+      || !hasAnyUserMessage(messages, optimisticUserMessages, queuedInboxMessages)) return
     const lease = acquireMutation("compact")
     if (!lease) return
     setSessionActionPending("compact")
@@ -3466,7 +3568,8 @@ function App() {
     const observation = {
       context: JSON.stringify({ profileID: activeProfileID, configKey: configKey(config), sessionID: selectedSession.id }),
       expectedID: compactRequestID as string | null,
-      startedAt: Date.now()
+      startedAt: Date.now(),
+      passive: false
     }
     compactObservationRef.current = observation
     try {
@@ -3519,7 +3622,7 @@ function App() {
 
   async function forkCurrentSession() {
     if (config.backend !== "opencode2" || !selectedSession || sessionActionPending || sessionActionPendingRef.current || isWorking || busySending || isSessionMutationLocked()
-      || !messages.some((message) => message.info.role === "user")) return
+      || !hasAnyUserMessage(messages, optimisticUserMessages, queuedInboxMessages)) return
     const original = selectedSession
     const forkDraft = { text: composer, attachments: [...attachments] }
     const forkContext = {
@@ -3596,6 +3699,19 @@ function App() {
             setSessions((current) => current.some((session) => session.id === childView.id)
               ? current
               : [childView, ...current].sort((a, b) => b.updated - a.updated))
+            // M3: a back/view navigation during a pending fork must not be reversed by reconcile.
+            // If the user left the fork context's detail view (mobile back/settings/help, or a
+            // different session on desktop), insert the confirmed child into the list and announce
+            // the result — never yank them back into the child. The fork draft is parked under the
+            // child's key so a later manual open restores it (H1 session drafts).
+            if (mainViewRef.current !== "detail" || selectedSessionRef.current?.id !== original.id) {
+              sessionDraftsRef.current.set(
+                sessionDraftKey(activeProfileID, configKey(config), childView.id),
+                { text: forkDraft.text, attachments: [...forkDraft.attachments] }
+              )
+              setActionNotice(t('detail.forkCreated'))
+              return
+            }
             forkFocusSessionRef.current = childView.id
             await openSession(childView.id, childView.directory)
             restoreForkDraft(childView.id)
@@ -3604,7 +3720,21 @@ function App() {
         }
         // Bounded terminal recovery: the child could not be confirmed. Resolve the pending state and
         // leave a resolvable path (refresh the session list) instead of blocking the menu forever.
-        if (isReconcileCurrent()) setActionNotice(t('detail.forkUnconfirmed'))
+        if (isReconcileCurrent()) {
+          // M4: the fork may still have committed server-side even though the child was not found.
+          // Preserve the fork draft snapshot (context-scoped) so opening the child manually later
+          // restores it instead of losing it; openSession consumes the record with the empty
+          // composer guard. It is cleared by replaceMutationContext on any profile/config change.
+          pendingForkDraftRef.current = {
+            namespace: `${activeProfileID}\u0000${configKey(config)}`,
+            parentSessionID: original.id,
+            parentDirectory: original.directory,
+            baselineChildIDs,
+            text: forkDraft.text,
+            attachments: [...forkDraft.attachments]
+          }
+          setActionNotice(t('detail.forkUnconfirmed'))
+        }
       } finally {
         // Always release the pending state on exhaustion (and on confirmed navigation, where the
         // child open already cleared it). When the context changed mid-reconciliation, navigation
@@ -3964,6 +4094,9 @@ function App() {
   }
 
   async function activateSkill(skill: CommandInfo, input = `/${skill.name}`, stagedAttachments = attachments) {
+    // F2: refuse dispatch during the fork reconcile window (ref = synchronous authority), so an
+    // activation started in the same tick as a fork cannot be orphaned by the reconcile navigation.
+    if (sessionActionPendingRef.current === "fork") return
     if (isSessionMutationLocked()) return
     if (!selectedSession) {
       setRuntimeError(t('help.skillRequiresSession'))
@@ -4051,6 +4184,10 @@ function App() {
     // Read the ref here as well as after awaited work. The render-state check would
     // narrow sessionActionPending for the rest of this function, even though the ref
     // is the live guard needed to catch a fork that starts while this send is pending.
+    // F2: while a fork is pending (reconcile window), refuse dispatch outright — an in-flight
+    // prompt could otherwise be orphaned by the reconcile navigation that follows. Compaction
+    // deliberately keeps its queue window instead (see promptDelivery below).
+    if (sessionActionPendingRef.current === "fork") return
     if (!selectedSession || isSessionMutationLocked()) return
     const text = composer.trim()
     // An image with no caption is a complete prompt, so emptiness is about both.
@@ -4527,6 +4664,10 @@ function App() {
   // handler is registered once and must not capture a stale view.
   const backStateRef = useRef({ view, activeDetailSheet, sessionToDelete, renamingSessionID })
   backStateRef.current = { view, activeDetailSheet, sessionToDelete, renamingSessionID }
+  /** M3: fork reconciliation runs detached from renders, so it reads navigation state through refs —
+   *  mainView (which layout is on screen) and selectedSession (which session is open). */
+  const mainViewRef = useRef(mainView)
+  mainViewRef.current = mainView
 
   useEffect(() => {
     if (!isAndroidPlatform(Capacitor.getPlatform())) return
@@ -5413,7 +5554,8 @@ function App() {
           searchInputRef={searchInputRef}
           sidebarSessionsRef={sidebarSessionsRef}
             refreshing={refreshingSessions}
-           creating={creatingSession || mutationLocked}
+           creating={creatingSession}
+          mutationLocked={mutationLocked}
           offline={isOffline}
           width={viewportSidebarWidth}
           t={t}
@@ -5655,7 +5797,8 @@ function App() {
           changedSessions={changedSessions}
           query={query}
             refreshing={refreshingSessions}
-           creating={creatingSession || mutationLocked}
+           creating={creatingSession}
+          mutationLocked={mutationLocked}
           offline={isOffline}
           connectionState={connectionState}
           connectionStatusText={connectionStatusText}

@@ -200,6 +200,11 @@ export async function desktopRequest(config: ServerConfig, request: DesktopReque
     // Keep the HTTP status when the bridge transport surfaced one, so the v2 client can recognize
     // an idempotent admission conflict (409) on the desktop build as well as on web/Capacitor.
     if (result.error.status) (error as Error & { status?: number }).status = result.error.status
+    // Keep the transport code too, so the v2 client can tell a definite failure (an HTTP status,
+    // or a client-side validation code that never reached the server) from a genuinely
+    // indeterminate transport loss (`timeout`/`connection`) that may have durably admitted a
+    // mutation before the connection broke.
+    ;(error as Error & { code?: string }).code = result.error.code
     throw error
   }
   return result.response

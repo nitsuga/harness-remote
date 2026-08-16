@@ -590,4 +590,46 @@ for (const language of ['en', 'it', 'zh-TW', 'zh-CN']) {
   assert.notEqual(t('detail.forkUnconfirmed'), 'detail.forkUnconfirmed', `${language} forkUnconfirmed notice`)
 }
 
+// --- Desktop definite-error classification (issue #22) ---------------------------------------
+
+// The desktop bridge surfaces transport failures as thrown Errors carrying the electron transport's
+// code and (for HTTP failures) status. The v2 client must wrap only genuine transport loss — a POST
+// whose outcome the server may have durably admitted before the connection broke — as
+// IndeterminateDeliveryError. A definite HTTP status means the server answered, so 4xx/5xx on the
+// desktop build surface as definite errors exactly like web/Capacitor, with the status preserved so
+// the 409 admission-conflict signal keeps resolving through isAdmissionConflict.
+const desktopBridgeSource = readFileSync(new URL('./desktopBridge.ts', import.meta.url), 'utf8')
+assert.match(desktopBridgeSource, /\.status = result\.error\.status/, 'the desktop bridge must keep the HTTP status from the electron transport')
+assert.match(desktopBridgeSource, /\.code = result\.error\.code/, 'the desktop bridge must carry the electron transport error code onto the thrown error')
+const desktopBranch = clientSource.slice(clientSource.indexOf('  if (isDesktopPlatform()) {'), clientSource.indexOf('  const target = `${baseUrl(config)}${path}`'))
+assert.ok(
+  desktopBranch.includes('const transportLoss = status === undefined && (code === undefined || code === "timeout" || code === "connection")'),
+  'only bridge timeout/connection (or code-less) transport loss may be classified as indeterminate'
+)
+assert.match(desktopBranch, /if \(method === "POST" && transportLoss\) throw new IndeterminateDeliveryError/, 'the desktop POST wrap must apply only to genuine transport loss, never to a definite HTTP status')
+assert.ok(
+  !desktopBranch.includes('if (method === "POST") throw new IndeterminateDeliveryError((error as Error).message)'),
+  'the desktop branch must not blanket-wrap every POST error as indeterminate'
+)
+assert.ok(
+  desktopBranch.includes('throw error') && desktopBranch.includes('const status = (error as Error & { status?: number }).status'),
+  'a desktop error with a definite HTTP status must rethrow as-is, keeping its status'
+)
+
+// --- Queued inbox cancellation (issue #22) ---------------------------------------------------
+
+// `v2.session.inbox.cancel` (protocol-authoritative: `HttpApiEndpoint.delete` on
+// `/api/session/:sessionID/inbox/:inboxID`) answers 204 NoContent, rejecting 409 once the item can
+// no longer be cancelled and 404 for an unknown session. The client must issue that DELETE (never a
+// body-carrying POST) and resolve on the bare acknowledgement, scoping it to the selected project.
+assert.ok(
+  clientSource.includes('`/api/session/${encodeURIComponent(sessionID)}/inbox/${encodeURIComponent(inboxID)}`, directory), { method: "DELETE" }'),
+  'cancel must DELETE the inbox item through the protocol cancel route'
+)
+assert.match(clientSource, /async cancelInboxItem\(config: ServerConfig, sessionID: string, inboxID: string, directory\?: string\)/, 'the v2 client must expose a queued-inbox cancel method')
+assert.ok(
+  apiSource.includes('return Promise.reject(new Error("Inbox cancellation is only supported on OpenCode 2 servers"))'),
+  'v1 cancelInboxItem must reject honestly'
+)
+
 console.log('OpenCode 2 client mapping tests passed')

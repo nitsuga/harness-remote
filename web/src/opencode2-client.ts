@@ -160,7 +160,18 @@ async function v2Raw(config: ServerConfig, path: string, options: RequestOptions
         readTimeout: options.readTimeout
       })
     } catch (error) {
-      if (method === "POST") throw new IndeterminateDeliveryError((error as Error).message)
+      // Only genuine transport loss is indeterminate for a mutation: the bridge's `timeout` and
+      // `connection` codes (or a code-less failure) mean the server may have durably admitted the
+      // request before the connection broke. A definite HTTP status — which desktopBridge carries
+      // through from the electron transport for `http`, `redirect` and `response-too-large` — means
+      // the server answered, so it surfaces as a definite error exactly like web/Capacitor, with
+      // the status preserved (409 admission conflicts keep resolving through isAdmissionConflict).
+      // The remaining bridge codes (`invalid-path`, `unknown-profile`, ...) fail before any request
+      // leaves the renderer, so nothing was admitted and they are definite too.
+      const status = (error as Error & { status?: number }).status
+      const code = (error as Error & { code?: string }).code
+      const transportLoss = status === undefined && (code === undefined || code === "timeout" || code === "connection")
+      if (method === "POST" && transportLoss) throw new IndeterminateDeliveryError((error as Error).message)
       throw error
     }
     return { status: response.status, body: response.data }
@@ -385,6 +396,16 @@ export const opencode2Api = {
   async listInbox(config: ServerConfig, sessionID: string, directory?: string) {
     const items = await v2Request<V2InboxItem[]>(config, withLocation(`/api/session/${encodeURIComponent(sessionID)}/inbox`, directory))
     return items ?? []
+  },
+
+  /** Cancel an inbox item that has not yet been delivered (`DELETE /api/session/{id}/inbox/{inboxID}`,
+   *  `v2.session.inbox.cancel`, the protocol's authoritative route). The server answers 204 and
+   *  rejects with 409 once the item can no longer be cancelled (already delivered or being
+   *  executed) or 404 for an unknown session — so a definite-status failure surfaces as a definite
+   *  error, never as an indeterminate delivery. */
+  async cancelInboxItem(config: ServerConfig, sessionID: string, inboxID: string, directory?: string) {
+    await v2Request<boolean>(config, withLocation(`/api/session/${encodeURIComponent(sessionID)}/inbox/${encodeURIComponent(inboxID)}`, directory), { method: "DELETE" })
+    return true
   },
 
   /** Paginated child listing (`GET /api/session?parentID=...`) used to reconcile a fork whose

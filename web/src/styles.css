@@ -1445,15 +1445,19 @@ a:focus-visible,
    with the min-width above. Breaking it contains it and keeps the wrapped two-line titles the
    cards have always shown; nowrap plus an ellipsis contains it just as well but collapses every
    one of them to a single truncated line, which costs real information on a phone. The desktop
-   sidebar overrides this back to one ellipsised line on purpose. */
-.session-card h3 {
+   sidebar overrides this back to one ellipsised line on purpose. The title and directory are
+   spans — a <button> may not contain heading/paragraph flow content — so block layout is explicit. */
+.session-card .session-card-title {
+  display: block;
   overflow-wrap: break-word;
   font-size: var(--font-md);
   font-weight: 600;
 }
 
 .session-card-main p,
-.session-card > p {
+.session-card > p,
+.session-card .session-card-directory {
+  display: block;
   margin-top: var(--space-1);
   overflow-wrap: anywhere;
   color: var(--muted);
@@ -1552,7 +1556,7 @@ a:focus-visible,
   min-width: 0;
 }
 
-.sidebar-sessions .session-card h3 {
+.sidebar-sessions .session-card .session-card-title {
   margin: 0;
   font-size: var(--font-sm);
   font-weight: 550;
@@ -1561,12 +1565,16 @@ a:focus-visible,
   white-space: nowrap;
 }
 
-.sidebar-sessions .session-card.active h3 {
+.sidebar-sessions .session-card.active .session-card-title {
   font-weight: 650;
 }
 
+/* The sidebar's meta line surfaces the shortened directory next to the timestamp; the open
+   button's own copy would repeat it, so it is hidden here (M8 parity: exactly one directory
+   per card per layout). */
 .sidebar-sessions .session-card-main p,
-.sidebar-sessions .session-card > p {
+.sidebar-sessions .session-card > p,
+.sidebar-sessions .session-card .session-card-directory {
   display: none;
 }
 
@@ -1613,8 +1621,9 @@ a:focus-visible,
 }
 
 /* Collapsed to zero width so the title's column reclaims the space, rather than just hiding
-   still-layout-reserving buttons behind invisible pixels. */
-.sidebar-sessions .session-card:hover .inline-actions,
+   still-layout-reserving buttons behind invisible pixels. The reveal is scoped to hovering the
+   open control itself (M6): hovering dead card padding must not advertise row actions. */
+.sidebar-sessions .session-card:has(.session-card-open:hover) .inline-actions,
 .sidebar-sessions .session-card:focus-within .inline-actions {
   width: auto;
   opacity: 1;
@@ -2728,6 +2737,9 @@ a:focus-visible,
   color: var(--muted-strong);
   font-size: var(--font-xs);
   white-space: nowrap;
+  /* The pending label hangs under the ⋯ control; centering keeps it readable on narrow
+     appbars where it is wider than the toggle that hosts it (M8). */
+  text-align: center;
 }
 
 @media (hover: hover) {
@@ -2747,6 +2759,13 @@ a:focus-visible,
   .session-actions-toggle:hover:not(:disabled) {
     color: var(--text);
     background: var(--surface-strong);
+  }
+
+  /* M6: the open control answers to the pointer itself — a soft highlight that says "this row
+     opens", without the misleading full-card pointer (the article must not look clickable). */
+  .sidebar-sessions .session-card-open:hover {
+    background: var(--surface-strong);
+    border-radius: var(--radius-sm);
   }
 
   .message-reasoning-summary:hover,

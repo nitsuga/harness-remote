@@ -90,4 +90,16 @@ assert.equal(en('settings.deleteServerTitle'), 'Delete saved server?')
 assert.equal(it('settings.deleteServerTitle'), 'Eliminare il server salvato?')
 assert.equal(zh('settings.deleteServerTitle'), '刪除已儲存的伺服器？')
 
+// Disabled session-action explanations and the fork-created notice must exist in every language,
+// so a greyed-out Compact/Fork/Undo/Redo can always explain itself in the user's own language.
+for (const translator of [en, it, zh, zhCN]) {
+  assert.notEqual(translator('detail.actionLocked'), 'detail.actionLocked')
+  assert.notEqual(translator('detail.requiresUserMessage'), 'detail.requiresUserMessage')
+  assert.notEqual(translator('detail.actionWhileWorking'), 'detail.actionWhileWorking')
+  assert.notEqual(translator('detail.forkCreated'), 'detail.forkCreated')
+}
+assert.ok(en('detail.requiresUserMessage').includes('message'), 'the user-message requirement must be stated in the explanation')
+assert.ok(en('detail.actionWhileWorking').includes('idle'), 'the working-state explanation must name the idle condition')
+assert.ok(en('detail.forkCreated').includes('session list'), 'the fork-created notice must point at the session list')
+
 console.log('i18n tests passed')
