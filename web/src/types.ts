@@ -115,6 +115,8 @@ export type Session = {
   }
   external?: boolean
   parentID?: string
+  /** The active agent id (v2 sessions carry it on the wire; v1/bridge sessions do not). */
+  agent?: string
 }
 
 export type SessionStatus = {
@@ -291,6 +293,14 @@ export type PermissionRequest = {
   }
 }
 
+/** One durable allow-always grant (`GET /api/permission/saved`), for the revoke UI. */
+export type SavedPermission = {
+  id: string
+  projectID: string
+  action: string
+  resource: string
+}
+
 export type DiffFile = {
   file: string
   additions: number
@@ -353,6 +363,8 @@ export type SessionView = {
   model?: ModelSelection
   revertMessageID?: string
   external?: boolean
+  /** The active agent id; only the v2 mapper lane populates it (see toSessionView in App.tsx). */
+  agent?: string
 }
 
 export type CommandInfo = {

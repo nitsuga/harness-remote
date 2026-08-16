@@ -46,6 +46,7 @@ assert.deepEqual(toSession(liveSession), {
   time: { created: 1786641617238, updated: 1786710305014 },
   model: { id: 'deepseek-v4-flash', providerID: 'opencode-go', variant: 'high' },
   project: { id: 'global', worktree: '/home/eric' },
+  agent: 'build',
   revert: undefined,
   summary: undefined,
   external: false
@@ -449,6 +450,7 @@ assert.deepEqual(toSession(forkedInfo), {
   time: { created: 1786641617238, updated: 1786710305014 },
   model: { id: 'deepseek-v4-flash', providerID: 'opencode-go', variant: 'high' },
   project: { id: 'global', worktree: '/home/eric' },
+  agent: 'build',
   revert: undefined,
   summary: undefined,
   external: false

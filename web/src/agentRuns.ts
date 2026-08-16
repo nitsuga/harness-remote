@@ -25,6 +25,8 @@ export type AgentRun = {
   attention?: AgentAttention
   projectId?: string
   machineId?: string
+  /** The session's active agent id when the session model carried one (v2 sessions). */
+  agent?: string
   startedAt?: number
   updatedAt?: number
 }
@@ -103,6 +105,8 @@ export function toAgentRun(
   if (attention) run.attention = attention
   if (signals.projectId) run.projectId = signals.projectId
   if (signals.machineId) run.machineId = signals.machineId
+  // Only when present, so strict-shape fixtures without an agent stay stable (issue #9).
+  if (session.agent) run.agent = session.agent
   if (signals.startedAt !== undefined) run.startedAt = signals.startedAt
 
   return run

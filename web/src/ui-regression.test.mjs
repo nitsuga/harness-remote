@@ -12,6 +12,9 @@ const sessionList = readFileSync(new URL('./components/session-list.tsx', import
 const composerView = readFileSync(new URL('./components/session-composer.tsx', import.meta.url), 'utf8')
 const agentRuns = readFileSync(new URL('./agentRuns.ts', import.meta.url), 'utf8')
 const sessionStatus = readFileSync(new URL('./sessionStatus.ts', import.meta.url), 'utf8')
+const attentionInbox = readFileSync(new URL('./attentionInbox.ts', import.meta.url), 'utf8')
+const opencode2Client = readFileSync(new URL('./opencode2-client.ts', import.meta.url), 'utf8')
+const opencode2Mappers = readFileSync(new URL('./opencode2-mappers.ts', import.meta.url), 'utf8')
 
 assert.match(styles, /button\s*\{[\s\S]*?cursor:\s*pointer;/, 'enabled buttons must advertise that they can be pressed')
 assert.match(styles, /button:disabled\s*\{[\s\S]*?cursor:\s*not-allowed;/, 'disabled buttons must retain the blocked cursor')
@@ -1097,5 +1100,27 @@ assert.match(
   /function statusLabel\(status: string, t: Translator\): string \{\s*const key = STATUS_LABEL_KEYS\[status\]\s*return key \? t\(key\) : status\s*\}/,
   'unknown status words must fall back to the raw status'
 )
+
+// --- Attention inbox data layer (issue #9, Lane A) ------------------------------------------
+// The pure projection module must keep the four attention kinds and the q:/p:/f:/c: id scheme: the
+// renderer lane dedups by those ids and the dismissal layer keys generations off them.
+assert.match(
+  attentionInbox,
+  /export type AttentionItemKind = "question" \| "permission" \| "failure" \| "completion"/,
+  'attentionInbox.ts must define exactly the four attention kinds'
+)
+assert.match(attentionInbox, /return `q:\$\{requestId[^`]*\}`/, 'question items must dedup by q:<requestId>')
+assert.match(attentionInbox, /return `p:\$\{requestId[^`]*\}`/, 'permission items must dedup by p:<requestId>')
+assert.match(attentionInbox, /return `f:\$\{sessionId\}`/, 'failure items must dedup by f:<sessionId>')
+assert.match(attentionInbox, /return `c:\$\{sessionId\}`/, 'completion items must dedup by c:<sessionId>')
+// Saved permissions: the mapper must keep normal permission patterns (a usable revoke UI needs
+// them) and mask only resources that themselves look like credentials.
+assert.match(opencode2Mappers, /\[redacted\]/, 'toSavedPermission must contain the secret-like resource redaction branch')
+// The v2 client must expose the saved-permission list and the steer/queue inbox routes.
+assert.ok(opencode2Client.includes('"/api/permission/saved"'), 'the v2 client must expose the saved-permission route')
+assert.ok(opencode2Client.includes('/steer`'), 'the v2 client must expose the inbox steer route')
+assert.ok(opencode2Client.includes('/queue`'), 'the v2 client must expose the inbox queue route')
+// The run projection must carry the session agent so inbox cards can name the agent.
+assert.match(agentRuns, /if \(session\.agent\) run\.agent = session\.agent/, 'agentRuns.ts must map the session agent onto the run')
 
 console.log('ui regression tests passed')

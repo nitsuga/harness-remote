@@ -5,6 +5,7 @@ type TranslationKey =
   | 'notification.title'
   | 'notification.body'
   | 'notification.overlayDescription'
+  | 'notification.attentionBody'
   | 'app.jumpToTop'
   | 'app.jumpToBottom'
   | 'nav.settings'
@@ -212,6 +213,21 @@ type TranslationKey =
   | 'session.renameTitle'
   | 'session.renamePlaceholder'
   | 'session.renameConfirm'
+  | 'inbox.title'
+  | 'inbox.empty'
+  | 'inbox.question'
+  | 'inbox.permission'
+  | 'inbox.failure'
+  | 'inbox.completion'
+  | 'inbox.dismiss'
+  | 'inbox.open'
+  | 'inbox.queued'
+  | 'inbox.cancelPrompt'
+  | 'inbox.steerPrompt'
+  | 'inbox.queuePrompt'
+  | 'savedPermission.title'
+  | 'savedPermission.empty'
+  | 'savedPermission.revoke'
   | 'status.busy'
   | 'status.completed'
   | 'status.failed'
@@ -359,6 +375,7 @@ export const translations: Record<LanguageCode, Partial<Record<TranslationKey, s
     'notification.title': 'Harness Remote',
     'notification.body': 'Agent completed a task',
     'notification.overlayDescription': 'Agent completed a task',
+    'notification.attentionBody': '{kind}: {session}',
     'app.jumpToTop': 'Jump to top',
     'app.jumpToBottom': 'Jump to bottom',
     'nav.settings': 'Settings',
@@ -572,6 +589,21 @@ export const translations: Record<LanguageCode, Partial<Record<TranslationKey, s
     'status.needsAttention': 'Needs attention',
     'status.retrying': 'Retrying',
     'status.waiting': 'Waiting',
+    'inbox.title': 'Attention',
+    'inbox.empty': 'Nothing needs your attention',
+    'inbox.question': 'Question',
+    'inbox.permission': 'Permission request',
+    'inbox.failure': 'Failed',
+    'inbox.completion': 'Completed',
+    'inbox.dismiss': 'Dismiss',
+    'inbox.open': 'Open',
+    'inbox.queued': 'Queued',
+    'inbox.cancelPrompt': 'Cancel',
+    'inbox.steerPrompt': 'Send now',
+    'inbox.queuePrompt': 'Queue',
+    'savedPermission.title': 'Saved permissions',
+    'savedPermission.empty': 'No saved permissions',
+    'savedPermission.revoke': 'Revoke',
     'help.title': 'Help & Documentation',
     'help.overview': 'Overview',
     'help.server': 'Server',
@@ -711,6 +743,7 @@ export const translations: Record<LanguageCode, Partial<Record<TranslationKey, s
     'notification.title': 'Harness Remote',
     'notification.body': 'Agente ha completato un’attività',
     'notification.overlayDescription': 'Attività agente completata',
+    'notification.attentionBody': '{kind}: {session}',
     'app.jumpToTop': 'Vai in alto',
     'app.jumpToBottom': 'Vai in basso',
     'nav.settings': 'Impostazioni',
@@ -924,6 +957,21 @@ export const translations: Record<LanguageCode, Partial<Record<TranslationKey, s
     'status.needsAttention': 'Richiede attenzione',
     'status.retrying': 'Riprovando',
     'status.waiting': 'In attesa',
+    'inbox.title': 'Attenzione',
+    'inbox.empty': 'Nulla richiede la tua attenzione',
+    'inbox.question': 'Domanda',
+    'inbox.permission': 'Richiesta di permesso',
+    'inbox.failure': 'Non riuscito',
+    'inbox.completion': 'Completato',
+    'inbox.dismiss': 'Ignora',
+    'inbox.open': 'Apri',
+    'inbox.queued': 'In coda',
+    'inbox.cancelPrompt': 'Annulla',
+    'inbox.steerPrompt': 'Invia ora',
+    'inbox.queuePrompt': 'Metti in coda',
+    'savedPermission.title': 'Permessi salvati',
+    'savedPermission.empty': 'Nessun permesso salvato',
+    'savedPermission.revoke': 'Revoca',
     'help.title': 'Aiuto e documentazione',
     'help.overview': 'Panoramica',
     'help.server': 'Server',
@@ -1059,6 +1107,7 @@ export const translations: Record<LanguageCode, Partial<Record<TranslationKey, s
     'notification.title': 'Harness Remote',
     'notification.body': '代理程式已完成工作',
     'notification.overlayDescription': '代理程式工作已完成',
+    'notification.attentionBody': '{kind}：{session}',
     'nav.sessions': '工作階段',
     'nav.detail': '詳情',
     'nav.help': '說明',
@@ -1269,6 +1318,21 @@ export const translations: Record<LanguageCode, Partial<Record<TranslationKey, s
     'status.needsAttention': '需要關注',
     'status.retrying': '重試中',
     'status.waiting': '等待中',
+    'inbox.title': '關注',
+    'inbox.empty': '沒有需要你關注的事項',
+    'inbox.question': '問題',
+    'inbox.permission': '權限請求',
+    'inbox.failure': '失敗',
+    'inbox.completion': '已完成',
+    'inbox.dismiss': '忽略',
+    'inbox.open': '開啟',
+    'inbox.queued': '已排隊',
+    'inbox.cancelPrompt': '取消',
+    'inbox.steerPrompt': '立即傳送',
+    'inbox.queuePrompt': '排入佇列',
+    'savedPermission.title': '已儲存權限',
+    'savedPermission.empty': '沒有已儲存權限',
+    'savedPermission.revoke': '撤銷',
     'help.title': '說明與文件',
     'help.overview': '總覽',
     'help.server': '伺服器',
@@ -1355,6 +1419,7 @@ export const translations: Record<LanguageCode, Partial<Record<TranslationKey, s
     'notification.title': 'Harness Remote',
     'notification.body': '代理已完成任务',
     'notification.overlayDescription': '代理任务已完成',
+    'notification.attentionBody': '{kind}：{session}',
     'nav.sessions': '会话',
     'nav.detail': '详情',
     'nav.help': '帮助',
@@ -1563,6 +1628,21 @@ export const translations: Record<LanguageCode, Partial<Record<TranslationKey, s
     'status.needsAttention': '需要关注',
     'status.retrying': '重试中',
     'status.waiting': '等待中',
+    'inbox.title': '关注',
+    'inbox.empty': '没有需要你关注的事项',
+    'inbox.question': '问题',
+    'inbox.permission': '权限请求',
+    'inbox.failure': '失败',
+    'inbox.completion': '已完成',
+    'inbox.dismiss': '忽略',
+    'inbox.open': '打开',
+    'inbox.queued': '已排队',
+    'inbox.cancelPrompt': '取消',
+    'inbox.steerPrompt': '立即发送',
+    'inbox.queuePrompt': '排入队列',
+    'savedPermission.title': '已保存权限',
+    'savedPermission.empty': '没有已保存权限',
+    'savedPermission.revoke': '撤销',
     'help.title': '帮助与文档',
     'help.overview': '概览',
     'help.server': '服务器',

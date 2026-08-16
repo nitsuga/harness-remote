@@ -170,4 +170,38 @@ for (const language of ['en', 'it', 'zh-TW', 'zh-CN']) {
   }
 }
 
+// The attention inbox and saved-permission revoke UI (issue #9): every label must exist in every
+// language, asserted on the raw tables (not via the translator, whose English fallback would mask a
+// missing locale entry), exactly like the STATUS_KEYS walk above. notification.attentionBody has no
+// dedicated notification walk, so it rides here with the inbox keys it belongs to.
+const INBOX_KEYS = [
+  'notification.attentionBody',
+  'inbox.title', 'inbox.empty', 'inbox.question', 'inbox.permission', 'inbox.failure',
+  'inbox.completion', 'inbox.dismiss', 'inbox.open', 'inbox.queued', 'inbox.cancelPrompt',
+  'inbox.steerPrompt', 'inbox.queuePrompt'
+]
+const SAVED_PERMISSION_KEYS = [
+  'savedPermission.title', 'savedPermission.empty', 'savedPermission.revoke'
+]
+for (const language of ['en', 'it', 'zh-TW', 'zh-CN']) {
+  for (const key of INBOX_KEYS) {
+    assert.ok(
+      translations[language][key] !== undefined,
+      `${key} must exist in the ${language} table (no English fallback)`
+    )
+  }
+  for (const key of SAVED_PERMISSION_KEYS) {
+    assert.ok(
+      translations[language][key] !== undefined,
+      `${key} must exist in the ${language} table (no English fallback)`
+    )
+  }
+}
+assert.equal(en('inbox.title'), 'Attention')
+assert.equal(en('inbox.steerPrompt'), 'Send now')
+assert.equal(en('savedPermission.title'), 'Saved permissions')
+assert.equal(en('notification.attentionBody', { kind: 'Failed', session: 'Fix build' }), 'Failed: Fix build')
+assert.equal(zh('inbox.title'), '關注')
+assert.equal(zhCN('inbox.title'), '关注')
+
 console.log('i18n tests passed')
