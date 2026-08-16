@@ -3329,10 +3329,17 @@ function App() {
       notified: [...notifiedRef.current]
     })
   }
-  /** The inbox-entry badge counts actionable items whose generation was never notified. Kept fresh
-   *  by the poll derivation and by dismissal; the panel lane wires the visual. */
+  /** The membership key the notified set uses for an item — the SAME form dismissals use, or
+   *  dedup and badge counting diverge: q:/p: by bare id (their `at` is session.updated and churns
+   *  on unrelated activity, so a generation key would re-notify the same request on the next
+   *  poll), f:/c: by generation (a re-failure gets a new `at` and re-alerts). */
+  const notifiedKeyFor = (item: AttentionItem): string =>
+    item.kind === "question" || item.kind === "permission" ? item.id : itemGeneration(item)
+
+  /** The inbox-entry badge counts actionable items never notified. Kept fresh by the poll
+   *  derivation and by dismissal; the panel lane wires the visual. */
   const updateInboxBadge = (items: readonly AttentionItem[]) => {
-    setInboxBadge(items.filter((item) => item.kind !== "completion" && !notifiedRef.current.has(itemGeneration(item))).length)
+    setInboxBadge(items.filter((item) => item.kind !== "completion" && !notifiedRef.current.has(notifiedKeyFor(item))).length)
   }
   /** Dismiss one inbox item. f:/c: items are dismissed by generation (a re-failure gets a new `at`
    *  and re-alerts); q:/p: items are dismissed by bare id (their `at` is session.updated, which
@@ -3954,16 +3961,33 @@ function App() {
       // lists the rest. The dismissed set is applied FIRST: a dismissed item (the user has seen
       // it) must never fire just because its generation was never notified.
       const fresh = filteredItems.filter((item) =>
-        item.kind !== "completion" && item.sessionId !== selectedID && !notifiedRef.current.has(itemGeneration(item)))
-      // A generation is marked notified ONLY where an alert was actually delivered. Desktop fires
-      // the OS notification (marking everything fresh, one alert for the newest); on web/mobile
-      // the badge IS the alert surface, so nothing is marked and every actionable item stays
-      // counted until dismissed or resolved. Marking without delivery would zero the badge and
-      // silently drop cross-session items on platforms with no notification surface.
-      if (fresh.length > 0 && isDesktopPlatform()) {
+        item.kind !== "completion" && item.sessionId !== selectedID && !notifiedRef.current.has(notifiedKeyFor(item)))
+      // The Electron main process suppresses the OS notification while its window is focused and
+      // not minimized (electron/main.ts), so the renderer mirrors that condition: a focused window
+      // has NO delivery surface, so nothing is marked and the badge carries the alert on the
+      // collapsed header. When the window is not focused, everything fresh is marked and one OS
+      // notification fires for the newest item (the rest of the batch is covered by the badge).
+      const windowFocused = document.visibilityState === "visible" && document.hasFocus()
+      let markedFocusedSession = false
+      if (isDesktopPlatform()) {
+        // Focused-session q/p items are already on screen in the transcript: on a focused desktop
+        // window they count as delivered (mark them so the badge does not double-count the form
+        // the user is looking at); on an unfocused window the fresh filter above still alerts for
+        // them via the next poll's fire block below. Web/mobile keep the badge semantics — the
+        // badge IS the alert surface there, so nothing is marked for the focused session either.
+        if (windowFocused) {
+          for (const item of filteredItems) {
+            if ((item.kind === "question" || item.kind === "permission") && item.sessionId === selectedID) {
+              notifiedRef.current.add(notifiedKeyFor(item))
+              markedFocusedSession = true
+            }
+          }
+        }
+      }
+      if (fresh.length > 0 && isDesktopPlatform() && !windowFocused) {
         const newest = fresh[0]
-        for (const item of fresh) notifiedRef.current.add(itemGeneration(item))
-        persistAttentionState()
+        for (const item of fresh) notifiedRef.current.add(notifiedKeyFor(item))
+        markedFocusedSession = true
         const sessionLabel = truncateForTitle(newest.sessionTitle)
         notifyDesktopNotification({
           title: t("inbox.title"),
@@ -3971,6 +3995,7 @@ function App() {
           overlayDescription: sessionLabel
         })
       }
+      if (markedFocusedSession) persistAttentionState()
       updateInboxBadge(filteredItems)
       // Bounded-growth guard: drop persisted dismissed/notified entries whose id no longer has a
       // live occurrence (sessions/requests that are gone), so the storage never grows unbounded.

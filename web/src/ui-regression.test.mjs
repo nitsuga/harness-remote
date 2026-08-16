@@ -1139,24 +1139,32 @@ assert.ok(
 assert.ok(app.includes('attentionNamespaceKey'), 'attention state must be namespaced per profile/config like tombstones')
 assert.ok(app.includes('attentionStorageKey(attentionNamespaceKey('), 'attention state must persist under the hashed namespace key')
 // The notification fire condition must skip completions, the focused session, dismissed items, and
-// dedup by generation (the persisted notified set is load-bearing against reconnect re-fires).
+// dedup via the shared membership key (bare id for q/p — session.updated churns, so a generation
+// key would re-notify the same request — generation for f/c).
 assert.match(
   app,
-  /item\.kind !== "completion"[\s\S]*?item\.sessionId !== selectedID[\s\S]*?!notifiedRef\.current\.has\(itemGeneration\(item\)\)/,
-  'attention notifications must skip completions and the focused session and dedup by generation'
+  /item\.kind !== "completion"[\s\S]*?item\.sessionId !== selectedID[\s\S]*?!notifiedRef\.current\.has\(notifiedKeyFor\(item\)\)/,
+  'attention notifications must skip completions and the focused session and dedup via the shared membership key'
 )
 assert.match(
   app,
   /const fresh = filteredItems\.filter/,
   'attention notifications must only fire for items not dismissed by the user'
 )
-// A generation is marked notified ONLY where an alert was actually delivered: desktop fires the OS
-// notification, web/mobile keep the badge as their alert surface (marking without delivery would
-// zero the badge and silently drop cross-session items).
+// Desktop fires the OS notification only when the window is NOT focused — Electron suppresses the
+// toast on a focused window, so marking without delivery would zero the badge and silently drop
+// the item; the badge carries the alert on the collapsed header instead.
 assert.match(
   app,
-  /if \(fresh\.length > 0 && isDesktopPlatform\(\)\) \{\s*const newest = fresh\[0\]/,
-  'attention generations must be marked notified only where the alert was delivered (desktop)'
+  /if \(fresh\.length > 0 && isDesktopPlatform\(\) && !windowFocused\)/,
+  'desktop must fire and mark notifications only while the window is not focused'
+)
+// The notified membership key must match the dismissal key form (bare id for q/p, generation for
+// f/c) or dedup and badge counting diverge.
+assert.match(
+  app,
+  /const notifiedKeyFor = \(item: AttentionItem\): string =>\s*item\.kind === "question" \|\| item\.kind === "permission" \? item\.id : itemGeneration\(item\)/,
+  'the notified set must use bare ids for q/p and generations for f/c, like dismissals'
 )
 // Dismissal must write the key form filterDismissed honors: bare id for q/p (their at churns with
 // session.updated), generation for f/c — a wrong key silently no-ops the dismissal.
