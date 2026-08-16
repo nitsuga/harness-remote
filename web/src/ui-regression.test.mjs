@@ -1385,4 +1385,38 @@ assert.ok(app.includes('listSavedPermissions(config'), 'the saved-permission lis
 assert.ok(app.includes('loadSavedPermissions'), 'the context must expose an on-demand saved-permission loader')
 assert.ok(!refreshRegion.includes('listSavedPermissions'), 'saved permissions must never load inside the poll')
 
+// --- Event-flood coalescing and foreign-session gating ------------------------------------------
+// A long-transcript session takes seconds to reload, and the global v2 stream floods with
+// session.* events while anything runs (child subagent sessions included). Each event used to
+// abort the in-flight reload via the request-id bump, so the selected transcript stayed blank
+// until the flood stopped. The event-driven reload is now coalesced (one in flight + exactly one
+// trailing rerun) and foreign-session events only refresh the live child output.
+assert.ok(app.includes('import { createRefreshCoalescer } from "./refresh-coalescer"'), 'App must import the refresh coalescer')
+assert.ok(app.includes('const refreshCoalescerRef = useRef(createRefreshCoalescer())'), 'the coalescer must live in a stable ref')
+assert.ok(app.includes('const refreshSelectedSession = (sessionID: string, directory: string | undefined) => {'), 'the coalesced wrapper must take the session identity next to loadSelected')
+assert.ok(app.includes('refreshCoalescerRef.current.run(key, () =>'), 'the wrapper must route the event-driven reload through the coalescer')
+assert.ok(app.includes('REFRESH_HOLD_TIMEOUT_MS'), 'the coalesced reload must bound its hold so a wedged fetch cannot freeze the slot')
+assert.ok(app.includes('refreshSelectedSession(selected.id, selected.directory).catch(() => undefined)'), 'the SSE debounced refresh must run through the coalescer')
+assert.ok(app.includes('refreshSelectedSession(selectedSession.id, selectedSession.directory).catch(() => undefined)'), 'the 3.5s poll must run through the coalescer')
+// onEvent tail: selected-session or session-less (global) events keep scheduling the full refresh;
+// foreign-session events (a running child's stream) must NOT — they only refresh the live output,
+// which is exactly what those events move.
+const refreshGateTail = app.slice(app.indexOf('lastEventBySessionRef.current.set(sessionID, Date.now())'), app.indexOf('const onStatus = (status: EventStreamStatus) => {'))
+assert.ok(refreshGateTail, 'the onEvent refresh tail should be findable for the foreign-session gate check')
+assert.match(
+  refreshGateTail,
+  /if \(sessionID && sessionID !== selectedSessionRef\.current\?\.id\) \{/,
+  'foreign-session events must be told apart from selected-session and global events'
+)
+assert.match(
+  refreshGateTail,
+  /refreshLiveSubagentOutput\(\)\.catch\(\(\) => undefined\)/,
+  'foreign-session events must refresh only the live child output'
+)
+assert.match(
+  refreshGateTail,
+  /else \{\s*scheduleRefresh\(\)/,
+  'selected-session and global events must keep scheduling the full refresh'
+)
+
 console.log('ui regression tests passed')

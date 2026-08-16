@@ -55,6 +55,7 @@ import {
   type ChildOutput
 } from "./subagentLive"
 import { stripMarkdownDirectives } from "./markdownDirectives"
+import { createRefreshCoalescer } from "./refresh-coalescer"
 import { isQuestionActive, applyInboxDelivery, type V2InboxItem } from "./opencode2-mappers"
 import { DEFAULT_HARNESS_CAPABILITIES } from "./backendCapabilities"
 import { BACKEND_CLIENTS } from "./backendClient"
@@ -3458,6 +3459,7 @@ function App() {
   const wasRunningRef = useRef(false)
   const awaitingAssistantBaselineRef = useRef("")
   const loadSelectedRequestRef = useRef(0)
+  const refreshCoalescerRef = useRef(createRefreshCoalescer())
   const loadCommandsRequestRef = useRef(0)
   const loadAgentsRequestRef = useRef(0)
   const loadModelsRequestRef = useRef(0)
@@ -4464,6 +4466,29 @@ function App() {
     setSelectedAgentID(nextAgentID)
     localStorage.setItem(AGENT_STORAGE_KEY, nextAgentID)
     releaseMutation(lease)
+  }
+
+  /** Event-driven transcript refresh (scheduleRefresh + poll): coalesced so a session.* event flood
+   *  cannot starve the reload of a long transcript (each in-flight load is currently aborted by the
+   *  next event's request-id bump, so nothing ever renders until the flood stops). Explicit callers
+   *  (open session, send/command flows) keep the eager `loadSelected` so their await semantics are
+   *  unchanged. The hold is bounded: a wedged loadSelected (a hung fetch has no request timeout on
+   *  the web path) must not freeze the slot forever, or the transcript would stay blank until a
+   *  session switch or restart — the timeout rejects the coalesced run, the slot clears, and the
+   *  next poll starts a fresh attempt. The threshold sits well above the measured ~14s reload of a
+   *  150-message transcript and the Android per-request 30s read timeout; the late fetch's commit
+   *  stays guarded by its request-id check. */
+  const REFRESH_HOLD_TIMEOUT_MS = 60_000
+  const refreshSelectedSession = (sessionID: string, directory: string | undefined) => {
+    const key = `${activeProfileID}\u0000${configKey(config)}\u0000${sessionID}\u0000${directory ?? ""}`
+    return refreshCoalescerRef.current.run(key, () =>
+      Promise.race([
+        loadSelected(sessionID, directory ?? ""),
+        new Promise<never>((_, reject) => {
+          setTimeout(() => reject(new Error("Transcript reload held the refresh slot for 60s")), REFRESH_HOLD_TIMEOUT_MS)
+        })
+      ])
+    )
   }
 
   async function loadSelected(sessionID: string, directory: string, refreshHistory = false, replaceMessages = false) {
@@ -6093,7 +6118,7 @@ function App() {
       }
       refreshSessions(true).catch(() => undefined)
       if (selectedSession) {
-        loadSelected(selectedSession.id, selectedSession.directory).catch(() => undefined)
+        refreshSelectedSession(selectedSession.id, selectedSession.directory).catch(() => undefined)
       }
       refreshLiveSubagentOutput().catch(() => undefined)
     }, 3500)
@@ -6139,7 +6164,7 @@ function App() {
         refreshTimer = undefined
         refreshSessions(true).catch(() => undefined)
         const selected = selectedSessionRef.current
-        if (selected) loadSelected(selected.id, selected.directory).catch(() => undefined)
+        if (selected) refreshSelectedSession(selected.id, selected.directory).catch(() => undefined)
         // Issue #47: events that touch the selected session are exactly when a running child's
         // output is likely to have moved (the child's own events arrive on this global stream),
         // so refresh the live output on the same cadence — cheap, and throttled inside.
@@ -6254,7 +6279,16 @@ function App() {
         const sessionID = body?.sessionID ?? body?.sessionId ?? body?.info?.sessionID ?? body?.info?.id
         if (sessionID) lastEventBySessionRef.current.set(sessionID, Date.now())
         setLiveEventCount((count) => count + 1)
-        scheduleRefresh()
+        if (sessionID && sessionID !== selectedSessionRef.current?.id) {
+          // Foreign-session activity (a running child subagent's events arrive on this same global
+          // stream): the child's transcript cannot change the selected session's, and while the
+          // child runs its event flood used to abort every in-flight reload (request-id bump), so
+          // the selected session stayed blank until the flood stopped. Refresh only the live child
+          // output — exactly what these events DO move — and leave the coalesced reload alone.
+          refreshLiveSubagentOutput().catch(() => undefined)
+        } else {
+          scheduleRefresh()
+        }
       }
     }
     const onStatus = (status: EventStreamStatus) => {
