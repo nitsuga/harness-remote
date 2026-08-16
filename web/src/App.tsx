@@ -4065,8 +4065,12 @@ function App() {
           if (!refreshIsCurrent()) return
           const next = new Map<string, QueuedSessionEntry>()
           for (const { session, items } of results) {
-            if (items.length === 0) continue
-            next.set(session.id, { sessionID: session.id, title: session.title, backend: config.backend, agent: session.agent, items })
+            // Only still-queued prompts belong in the panel: a steered item stays in the server
+            // inbox as `delivery: steer` until the next step boundary promotes it, and re-listing
+            // it made a row "come back" after Send now (live report), with Send now then 409ing.
+            const queued = items.filter((item) => item.delivery === "queue")
+            if (queued.length === 0) continue
+            next.set(session.id, { sessionID: session.id, title: session.title, backend: config.backend, agent: session.agent, items: queued })
           }
           setQueuedInboxBySession(next)
         })

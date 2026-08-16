@@ -435,6 +435,14 @@ assert.match(
   /if \(!lease\) \{ setActionNotice\(t\('detail\.actionLocked'\)\); return \}/,
   'a blocked queued op must announce itself instead of returning silently'
 )
+// The queued fan-out must list only still-queued prompts. A steered item remains in the server
+// inbox as `delivery: steer` until the next step boundary promotes it; re-listing it made a row
+// "come back" after Send now (live report) with Send now then 409ing on the already-steered item.
+assert.match(
+  app,
+  /const queued = items\.filter\(\(item\) => item\.delivery === "queue"\)/,
+  'the queued fan-out must filter to still-queued prompts so a steered item cannot reappear'
+)
 
 // Compaction correlates terminal state ONLY with the exact admission/request id — no baseline or
 // any-terminal heuristic — including the double-indeterminate path where the request id is the only
