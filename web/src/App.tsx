@@ -1,4 +1,4 @@
-import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react"
+import { Fragment, memo, useCallback, createContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react"
 import { App as CapacitorApp } from "@capacitor/app"
 import { Capacitor, type PluginListenerHandle } from "@capacitor/core"
 import ReactMarkdown from "react-markdown"
@@ -14,9 +14,13 @@ import {
   subagentCompletionDescription,
   subagentRunFromCompletion,
   subagentRunFromTool,
+  toAgentRun,
+  type AgentRunSignals,
   type AgentRunStatus,
   type SubagentRun
 } from "./agentRuns"
+import { collectAttentionItems, filterDismissed, itemGeneration, type AttentionItem } from "./attentionInbox"
+import { attentionStorageKey, loadAttentionState, pruneAttentionState, saveAttentionState } from "./attentionPersistence"
 import { deriveSessionStatus, executionEventKind, reduceExecutionEvent, type SessionExecutionMemory } from "./sessionStatus"
 import {
   createDesktopOpenCodeEventSubscription,
@@ -24,6 +28,7 @@ import {
   isAndroidPlatform,
   isDesktopPlatform,
   notifyDesktopCompletion,
+  notifyDesktopNotification,
   openDesktopExternalUrl,
   desktopUsesNativeMenu,
   setDesktopApplicationMenu,
@@ -99,6 +104,29 @@ function tombstoneNamespaceKey(profileID: string, namespace: string): string {
   for (const char of `${profileID}\u0000${namespace}`) hash = Math.imul(hash ^ char.charCodeAt(0), 16777619)
   return (hash >>> 0).toString(16)
 }
+
+/** The profile/config namespace attention-inbox state is scoped to, mirroring the tombstone
+ *  namespace. Never persisted raw: `attentionStorageKey` hashes it exactly like the tombstone keys
+ *  hash theirs, so server credentials (part of configKey) never reach localStorage keys. */
+function attentionNamespaceKey(profileID: string, configKeyValue: string): string {
+  return `${profileID}\u0000${configKeyValue}`
+}
+
+/** How many hydrated sessions the per-poll queued-inbox fan-out may ask in parallel, bounding the
+ *  poll cost on machines running many sessions. */
+const INBOX_QUEUED_FANOUT_CAP = 50
+
+/** Cross-session attention inbox (issue #9, Lane B). The panel lane (phase 2) consumes this
+ *  context so App.tsx owns the derivation, persistence and notifications while the designer owns
+ *  the presentation. */
+export type AttentionInboxContextValue = {
+  items: readonly AttentionItem[]
+  queuedBySession: ReadonlyMap<string, V2InboxItem[]>
+  badge: number
+  dismiss(item: AttentionItem): void
+}
+
+export const AttentionInboxContext = createContext<AttentionInboxContextValue | null>(null)
 
 function readSessionTombstones(): Map<string, Set<string>> {
   const result = new Map<string, Set<string>>()
@@ -1955,7 +1983,10 @@ function toSessionView(session: Session, status?: SessionStatus, activityTime = 
     deletions: session.summary?.deletions ?? 0,
     model: session.model ? { providerID: session.model.providerID, modelID: session.model.id, variant: session.model.variant } : undefined,
     revertMessageID: session.revert?.messageID,
-    external: session.external
+    external: session.external,
+    // The v2 mapper carries the active agent id on the wire; the inbox cards (issue #9) name the
+    // agent from it. v1/bridge sessions never set it.
+    agent: session.agent
   }
   // The v2 mapper attaches `parentID` non-enumerably (it must never leak into wire payloads or
   // equality comparisons), so a plain field copy would silently drop it — the session list badge
@@ -2910,6 +2941,16 @@ function App() {
 
   const [sessions, setSessions] = useState<SessionView[]>([])
   const [selectedID, setSelectedID] = useState<string | null>(null)
+  /** Cross-session attention inbox items (issue #9): one per pending question/permission request,
+   *  one per (session, kind) for failures/completions, newest first. Replaced on every poll. */
+  const [inboxItems, setInboxItems] = useState<AttentionItem[]>([])
+  /** Per-session queued-prompt listings (`GET /api/session/{id}/inbox`) for the queued-prompt
+   *  operations (steer/queue/cancel); sessions with nothing queued are absent. v2 only. */
+  const [queuedInboxBySession, setQueuedInboxBySession] = useState<Map<string, V2InboxItem[]>>(new Map())
+  /** Un-notified attention count shown as a badge on the inbox entry (web/mobile; the designer
+   *  wires the visual in the panel lane). Completions never count: they are list items, not
+   *  demands on the user. */
+  const [inboxBadge, setInboxBadge] = useState(0)
   // This ref, rather than React state, is the synchronous authority for session mutations. State is
   // only a paint signal so every alternate affordance sees the lock in the same tick.
   const mutationCoordinatorRef = useRef<SessionMutationCoordinator | null>(null)
@@ -2976,6 +3017,14 @@ function App() {
         // the user browsed away. Only a profile/config change (different namespace, possibly a
         // different server) discards it.
         executionMemoryRef.current.clear()
+        // Attention state is per profile/config namespace too: reload the new namespace's
+        // dismissed/notified generations synchronously so a race cannot apply the old namespace's
+        // dismissed set to the new namespace's items. The refresh that follows replaces the items
+        // themselves (the derivation re-runs via the bumped refresh request).
+        const attentionState = loadAttentionState(attentionStorageKey(attentionNamespaceKey(profileID, configKey(nextConfig))))
+        dismissedRef.current = new Set(attentionState.dismissed)
+        notifiedRef.current = new Set(attentionState.notified)
+        setInboxItems((items) => filterDismissed(items, dismissedRef.current))
       } else {
         if (previousContext.sessionID && (composer.trim() || attachments.length > 0)) {
           sessionDraftsRef.current.set(
@@ -3266,6 +3315,40 @@ function App() {
   if (!tombstonesHydratedRef.current) {
     for (const [key, ids] of readSessionTombstones()) removedSessionIDsRef.current.set(key, ids)
     tombstonesHydratedRef.current = true
+  }
+  // Attention-inbox dismissed/notified generations (issue #9): per profile/config namespace,
+  // hydrated once like the tombstones. `notifiedRef` is load-bearing — it prevents re-firing a
+  // notification for server-reconciled q/p items after a reconnect or restart.
+  const dismissedRef = useRef(new Set<string>())
+  const notifiedRef = useRef(new Set<string>())
+  const attentionStateHydratedRef = useRef(false)
+  if (!attentionStateHydratedRef.current) {
+    const attentionState = loadAttentionState(attentionStorageKey(attentionNamespaceKey(activeProfileID, configKey(config))))
+    dismissedRef.current = new Set(attentionState.dismissed)
+    notifiedRef.current = new Set(attentionState.notified)
+    attentionStateHydratedRef.current = true
+  }
+  /** Persist both attention sets under the active profile/config namespace. Called whenever either
+   *  set changes, so a restart (or namespace round-trip) restores exactly what was seen/dismissed. */
+  const persistAttentionState = () => {
+    saveAttentionState(attentionStorageKey(attentionNamespaceKey(activeProfileID, configKey(config))), {
+      dismissed: [...dismissedRef.current],
+      notified: [...notifiedRef.current]
+    })
+  }
+  /** The inbox-entry badge counts actionable items whose generation was never notified. Kept fresh
+   *  by the poll derivation and by dismissal; the panel lane wires the visual. */
+  const updateInboxBadge = (items: readonly AttentionItem[]) => {
+    setInboxBadge(items.filter((item) => item.kind !== "completion" && !notifiedRef.current.has(itemGeneration(item))).length)
+  }
+  /** Dismiss one inbox item. f:/c: items are dismissed by generation (a re-failure gets a new `at`
+   *  and re-alerts); q:/p: items are dismissed by bare id (their `at` is session.updated, which
+   *  churns on unrelated activity) — filterDismissed applies the right semantics. */
+  const dismissAttentionItem = (item: AttentionItem) => {
+    dismissedRef.current.add(itemGeneration(item))
+    persistAttentionState()
+    setInboxItems((current) => filterDismissed(current, dismissedRef.current))
+    updateInboxBadge(filterDismissed(inboxItems, dismissedRef.current))
   }
   const selectedSessionRef = useRef<SessionView | null>(null)
   /** The session `openSession` is currently working on, so its retry can tell it is still wanted. */
@@ -3759,6 +3842,97 @@ function App() {
       // this snapshot historical. Never let it replace a newer list (especially the just-inserted
       // child row).
       if (!refreshIsCurrent()) return true
+      // Attention inbox (issue #9, Lane B): project the hydrated session views plus the live
+      // pending questions/permissions into cross-session attention items. Backend-neutral — v1/
+      // bridge statuses (busy/retry/waiting) carry no terminal attention, so their runs only
+      // surface the questions/permissions signals; v2 terminal states come from the derived
+      // statuses above (completed → completed, failed → failed, needs-attention → needsAttention).
+      const pendingQuestionsAll = formLists.flat()
+      const pendingPermissionsAll = permissionLists.flat()
+      const runs = mapped.map((session) => {
+        const derivedStatus = statuses[session.id]
+        const terminalStatus = derivedStatus?.type === "failed"
+          ? "failed"
+          : derivedStatus?.type === "completed"
+            ? "completed"
+            : undefined
+        const signals: AgentRunSignals = {
+          machineId: activeProfileID,
+          questions: pendingQuestionsAll,
+          permissions: pendingPermissionsAll,
+          ...(terminalStatus ? { terminalStatus } : {}),
+          ...(derivedStatus?.type === "needs-attention" ? { needsAttention: true } : {})
+        }
+        return toAgentRun(session, config.backend, signals)
+      })
+      const attentionItems = collectAttentionItems(runs, { questions: pendingQuestionsAll, permissions: pendingPermissionsAll }, {
+        machineId: activeProfileID,
+        // Only f:/c: items consult the execution-memory generation; q:/p: items use session.updated
+        // internally, so this callback is invoked only for sessions that actually have attention.
+        attentionAt: (sessionId) => executionMemoryRef.current.get(sessionId)?.latest?.at,
+        failureMessage: (sessionId) => {
+          const status = statuses[sessionId]
+          return status?.type === "failed" || status?.type === "needs-attention" ? status.message : undefined
+        }
+      })
+      const filteredItems = filterDismissed(attentionItems, dismissedRef.current)
+      // A focused-session question/permission is already visible in the transcript, so it stays in
+      // the inbox (cross-session view) but must not fire a second demand for attention.
+      setInboxItems(filteredItems)
+      // Notifications (desktop) / badge (web, mobile): fire once per generation for question,
+      // permission and failure items of sessions OTHER than the focused one. Completions never
+      // notify — the completion chime covers the focused session and the inbox lists the rest.
+      // Every fired generation is persisted so a reconnect/restart cannot re-fire a
+      // server-reconciled q/p item. The dismissed set is applied FIRST: a dismissed item (the user
+      // has seen it) must never re-fire just because its generation was never notified.
+      const fresh = filteredItems.filter((item) =>
+        item.kind !== "completion" && item.sessionId !== selectedID && !notifiedRef.current.has(itemGeneration(item)))
+      if (fresh.length > 0) {
+        for (const item of fresh) notifiedRef.current.add(itemGeneration(item))
+        persistAttentionState()
+        if (isDesktopPlatform()) {
+          const newest = fresh[0]
+          const sessionLabel = truncateForTitle(newest.sessionTitle)
+          notifyDesktopNotification({
+            title: t("inbox.title"),
+            body: t("notification.attentionBody", { kind: t(`inbox.${newest.kind}`), session: sessionLabel }),
+            overlayDescription: sessionLabel
+          })
+        }
+      }
+      updateInboxBadge(filteredItems)
+      // Bounded-growth guard: drop persisted dismissed/notified entries whose id no longer has a
+      // live occurrence (sessions/requests that are gone), so the storage never grows unbounded.
+      const liveGenerations = new Set<string>()
+      for (const item of attentionItems) {
+        liveGenerations.add(itemGeneration(item))
+        if (item.kind === "question" || item.kind === "permission") liveGenerations.add(item.id)
+      }
+      const pruned = pruneAttentionState(
+        { dismissed: [...dismissedRef.current], notified: [...notifiedRef.current] },
+        liveGenerations
+      )
+      if (pruned.dismissed.length !== dismissedRef.current.size || pruned.notified.length !== notifiedRef.current.size) {
+        dismissedRef.current = new Set(pruned.dismissed)
+        notifiedRef.current = new Set(pruned.notified)
+        persistAttentionState()
+      }
+      // Queued-prompt fan-out (v2 only, silent-fail): the queued operations (steer/queue/cancel)
+      // target server inbox items, so keep a per-session listing for a bounded subset of sessions.
+      // Sessions with nothing queued stay absent from the map. Never blocks the poll: it resolves
+      // in the background and only lands when this refresh is still current.
+      if (config.backend === "opencode2") {
+        const queuedTargets = mapped.slice(0, INBOX_QUEUED_FANOUT_CAP)
+        void Promise.all(queuedTargets.map(async (session) => {
+          const items = await listInboxV2(config, session.id, session.directory).catch(() => [] as V2InboxItem[])
+          return { sessionID: session.id, items } as const
+        })).then((results) => {
+          if (!refreshIsCurrent()) return
+          const next = new Map<string, V2InboxItem[]>()
+          for (const result of results) if (result.items.length > 0) next.set(result.sessionID, result.items)
+          setQueuedInboxBySession(next)
+        })
+      }
       // Retirement needs both halves of the proof: the global endpoint really answered, and this
       // refresh still belongs to the current context/generation. Scoped fallbacks and stale
       // snapshots may hide rows, but can never erase durable deletion evidence.
@@ -6205,6 +6379,12 @@ function App() {
   }
 
   return (
+    <AttentionInboxContext.Provider value={{
+      items: inboxItems,
+      queuedBySession: queuedInboxBySession,
+      badge: inboxBadge,
+      dismiss: dismissAttentionItem
+    }}>
     <div className={`app-shell${isDesktop ? " app-shell-desktop" : ""}`}>
       {isDesktop ? (
         <MenuBar
@@ -7377,6 +7557,7 @@ http://YOUR_PC_IP:4096/global/health</pre>
         ))}
       </nav>}
     </div>
+    </AttentionInboxContext.Provider>
   )
 }
 

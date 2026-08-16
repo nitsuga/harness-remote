@@ -13,6 +13,8 @@ const composerView = readFileSync(new URL('./components/session-composer.tsx', i
 const agentRuns = readFileSync(new URL('./agentRuns.ts', import.meta.url), 'utf8')
 const sessionStatus = readFileSync(new URL('./sessionStatus.ts', import.meta.url), 'utf8')
 const attentionInbox = readFileSync(new URL('./attentionInbox.ts', import.meta.url), 'utf8')
+const attentionPersistence = readFileSync(new URL('./attentionPersistence.ts', import.meta.url), 'utf8')
+const mutationCoordinator = readFileSync(new URL('./session-mutation-coordinator.ts', import.meta.url), 'utf8')
 const opencode2Client = readFileSync(new URL('./opencode2-client.ts', import.meta.url), 'utf8')
 const opencode2Mappers = readFileSync(new URL('./opencode2-mappers.ts', import.meta.url), 'utf8')
 
@@ -1122,5 +1124,37 @@ assert.ok(opencode2Client.includes('/steer`'), 'the v2 client must expose the in
 assert.ok(opencode2Client.includes('/queue`'), 'the v2 client must expose the inbox queue route')
 // The run projection must carry the session agent so inbox cards can name the agent.
 assert.match(agentRuns, /if \(session\.agent\) run\.agent = session\.agent/, 'agentRuns.ts must map the session agent onto the run')
+
+// --- Attention inbox wiring (issue #9, Lane B) -------------------------------------------------
+// The view model must carry the session agent end to end, or inbox cards cannot name the agent.
+assert.match(app, /function toSessionView[\s\S]*?agent: session\.agent/, 'toSessionView must carry the session agent onto the view')
+// The inbox derivation must run after the v2 status derivation inside refreshSessions (the statuses
+// merge feeds the terminal signals), mirroring the #8 gate.
+const refreshRegion = app.slice(app.indexOf('async function refreshSessions'), app.indexOf('async function refreshSessionsWithIndicator'))
+assert.ok(
+  refreshRegion.indexOf('deriveSessionStatus(') !== -1 && refreshRegion.indexOf('deriveSessionStatus(') < refreshRegion.indexOf('collectAttentionItems('),
+  'the attention derivation must run after the v2 status derivation in refreshSessions'
+)
+// Dismissed/notified persistence must use the hashed namespace key pattern, exactly like tombstones.
+assert.ok(app.includes('attentionNamespaceKey'), 'attention state must be namespaced per profile/config like tombstones')
+assert.ok(app.includes('attentionStorageKey(attentionNamespaceKey('), 'attention state must persist under the hashed namespace key')
+// The notification fire condition must skip completions, the focused session, dismissed items, and
+// dedup by generation (the persisted notified set is load-bearing against reconnect re-fires).
+assert.match(
+  app,
+  /item\.kind !== "completion"[\s\S]*?item\.sessionId !== selectedID[\s\S]*?!notifiedRef\.current\.has\(itemGeneration\(item\)\)/,
+  'attention notifications must skip completions and the focused session and dedup by generation'
+)
+assert.match(
+  app,
+  /const fresh = filteredItems\.filter/,
+  'attention notifications must only fire for items not dismissed by the user'
+)
+// The queued-prompt operations need an inbox lease kind in the coordinator.
+assert.ok(mutationCoordinator.includes('"inbox"'), 'the mutation coordinator must have an inbox lease kind')
+// The v2 client surface the wiring depends on must keep its inbox routes.
+assert.ok(opencode2Client.includes('listInbox('), 'the v2 client must keep the per-session inbox listing route')
+// Lane A's persistence module must keep the prune contract the poll uses to bound storage growth.
+assert.ok(attentionPersistence.includes('export function pruneAttentionState'), 'attentionPersistence.ts must expose the prune helper')
 
 console.log('ui regression tests passed')
