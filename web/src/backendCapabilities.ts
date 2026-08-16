@@ -30,7 +30,8 @@ export const DEFAULT_HARNESS_CAPABILITIES: Record<BackendKind, HarnessCapabiliti
     streaming: true,
     models: true,
     agents: true,
-    todos: false,
+    // v2 has no todo endpoint; the panel shows state derived from `todowrite` parts in the transcript.
+    todos: true,
     diff: true,
     filesystemBrowser: true,
     questions: true,

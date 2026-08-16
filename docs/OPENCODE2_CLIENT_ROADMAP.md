@@ -35,7 +35,7 @@ The remaining work is primarily richer visibility and control. Model execution a
 | 1 | [#24](https://github.com/nitsuga/harness-remote/issues/24) | Surface fork result when it arrives after navigation | Planned | #4 |
 | 1 | [#5](https://github.com/nitsuga/harness-remote/issues/5) | Support session import and export | Planned | - |
 | 1 | [#6](https://github.com/nitsuga/harness-remote/issues/6) | Show and manage MCP server status | Planned | - |
-| 2 | [#7](https://github.com/nitsuga/harness-remote/issues/7) | Derive and display persistent session todos | Planned | - |
+| 2 | [#7](https://github.com/nitsuga/harness-remote/issues/7) | Derive and display persistent session todos | In progress | - |
 | 2 | [#8](https://github.com/nitsuga/harness-remote/issues/8) | Expose richer session activity and attention states | Shipped | - |
 | 2 | [#9](https://github.com/nitsuga/harness-remote/issues/9) | Build a cross-session attention inbox | Shipped | #8 |
 | 2 | [#37](https://github.com/nitsuga/harness-remote/issues/37) | Aggregate the attention inbox across multiple machines (multi-profile) | Planned | #9, fleet ([#146](https://github.com/nitsuga/harness-remote/issues/146)) |
