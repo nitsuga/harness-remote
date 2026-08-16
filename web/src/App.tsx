@@ -4866,7 +4866,16 @@ function App() {
         await api.cancelInboxItem(config, session.id, inboxID, session.directory)
         if (!mutationCoordinator.isContextCurrent(cancelContext)) return
         // Definite success (204): drop the row now — both the server-inbox row and any optimistic
-        // twin carrying the same durable id — then reconcile so the transcript converges.
+        // twin carrying the same durable id — then reconcile so the transcript converges. Also
+        // clear the queued map so the attention panel never shows a stale row for a delivered item.
+        setQueuedInboxBySession((current) => {
+          const next = new Map(current)
+          const entry = next.get(session.id)
+          if (!entry) return current
+          const items = entry.items.filter((item) => item.id !== inboxID)
+          if (items.length) next.set(session.id, { ...entry, items }); else next.delete(session.id)
+          return next
+        })
         setQueuedInboxMessages((current) => {
           const remaining = current.filter((candidate) => queuedInboxItemID(candidate) !== inboxID)
           return remaining.length === current.length ? current : remaining
@@ -4912,7 +4921,16 @@ function App() {
         await api.steerInboxItem(config, session.id, inboxID, session.directory)
         if (!mutationCoordinator.isContextCurrent(steerContext)) return
         // Definite success (204): drop the row now (the steered message arrives as history through
-        // the reload), then reconcile so the transcript converges.
+        // the reload), then reconcile so the transcript converges. Also clear the queued map so the
+        // attention panel never shows a stale row for a delivered item.
+        setQueuedInboxBySession((current) => {
+          const next = new Map(current)
+          const entry = next.get(session.id)
+          if (!entry) return current
+          const items = entry.items.filter((item) => item.id !== inboxID)
+          if (items.length) next.set(session.id, { ...entry, items }); else next.delete(session.id)
+          return next
+        })
         setQueuedInboxMessages((current) => {
           const remaining = current.filter((candidate) => queuedInboxItemID(candidate) !== inboxID)
           return remaining.length === current.length ? current : remaining
