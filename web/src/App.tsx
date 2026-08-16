@@ -3388,10 +3388,12 @@ function App() {
    *  the button state never lies; the outcome is announced with an existing i18n key. */
   const mutateQueuedPrompt = async (sessionID: string, inboxID: string, op: "cancel" | "steer" | "queue") => {
     const lease = acquireMutation("inbox", sessionID)
-    if (!lease) return
+    // Never swallow a blocked press: a held lease or a missing session used to return silently,
+    // which read as "the button did nothing" while the server item stayed queued.
+    if (!lease) { setActionNotice(t('detail.actionLocked')); return }
     try {
       const session = sessions.find((candidate) => candidate.id === sessionID)
-      if (!session) return
+      if (!session) { setActionNotice(t('settings.connectionFailed', { message: t('inbox.sessionMissing') })); return }
       if (op === "cancel") await api.cancelInboxItem(config, sessionID, inboxID, session.directory)
       else if (op === "steer") await api.steerInboxItem(config, sessionID, inboxID, session.directory)
       else await api.queueInboxItem(config, sessionID, inboxID, session.directory)
@@ -3403,6 +3405,17 @@ function App() {
         const items = entry.items.filter((item) => item.id !== inboxID)
         if (items.length) next.set(sessionID, { ...entry, items }); else next.delete(sessionID)
         return next
+      })
+      // The panel ops must also clear the transcript's queued rows (mirroring the transcript ops'
+      // success path): without this, a panel steer that delivered the item left the chat row
+      // showing it as still queued — the reverse of the stale-row report fixed in #41.
+      setQueuedInboxMessages((current) => {
+        const remaining = current.filter((candidate) => queuedInboxItemID(candidate) !== inboxID)
+        return remaining.length === current.length ? current : remaining
+      })
+      setOptimisticUserMessages((current) => {
+        const remaining = current.filter((candidate) => queuedInboxItemID(candidate) !== inboxID)
+        return remaining.length === current.length ? current : remaining
       })
       setActionNotice(t(op === "cancel" ? 'inbox.cancelPrompt' : op === "steer" ? 'inbox.steerPrompt' : 'inbox.queuePrompt'))
     } catch (err) {

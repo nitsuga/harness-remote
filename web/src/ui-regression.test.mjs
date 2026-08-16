@@ -420,6 +420,21 @@ assert.ok(
   queuedMapClears.length >= 3,
   'every queued-op success path (panel ops + transcript cancel + transcript steer) must clear the queued map'
 )
+// The reverse stale-row direction: a PANEL op that delivered the item must also clear the
+// transcript's queued rows — otherwise the chat keeps showing the row as queued after the panel
+// steer succeeded (live report: "the button registered a press... the message still queued").
+assert.match(
+  app,
+  /const mutateQueuedPrompt = async[\s\S]*?setQueuedInboxMessages\(\(current\) => \{\s*const remaining = current\.filter\(\(candidate\) => queuedInboxItemID\(candidate\) !== inboxID\)/,
+  'panel queued ops must clear the transcript rows on definite success'
+)
+// A blocked queued op must not be silent: a held lease or a vanished session used to return
+// without feedback, which read as "the button did nothing".
+assert.match(
+  app,
+  /if \(!lease\) \{ setActionNotice\(t\('detail\.actionLocked'\)\); return \}/,
+  'a blocked queued op must announce itself instead of returning silently'
+)
 
 // Compaction correlates terminal state ONLY with the exact admission/request id — no baseline or
 // any-terminal heuristic — including the double-indeterminate path where the request id is the only
