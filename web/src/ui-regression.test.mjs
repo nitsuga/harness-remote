@@ -413,6 +413,13 @@ assert.match(
   /await api\.steerInboxItem\(config, session\.id, inboxID, session\.directory\)[\s\S]*?setQueuedInboxMessages\(/,
   'inline Send now must steer the server inbox item and drop the row on definite success'
 )
+// Transcript Send now/Cancel must ALSO clear the panel's queued map on definite success, or the
+// panel shows a stale row for an already-delivered item (re-steering it 409s "no longer queued").
+const queuedMapClears = app.match(/entry\.items\.filter\(\(item\) => item\.id !== inboxID\)/g) ?? []
+assert.ok(
+  queuedMapClears.length >= 3,
+  'every queued-op success path (panel ops + transcript cancel + transcript steer) must clear the queued map'
+)
 
 // Compaction correlates terminal state ONLY with the exact admission/request id — no baseline or
 // any-terminal heuristic — including the double-indeterminate path where the request id is the only
