@@ -3434,6 +3434,135 @@ a:focus-visible,
   margin-top: 0;
 }
 
+/* --- Session tree (feature: tree-structured session list) -----------------
+   Children render nested under their parent, file-explorer style. Each node is a row
+   [toggle column | card]; expanding a parent reveals its children block, indented by one
+   guide column. A continuous vertical guide (border-strong, a step up from the hairline
+   borders) runs down the gutter and elbows out into each child's chevron, so the parent's
+   toggle column visibly owns each child row. Child cards get a quiet recessed surface of
+   their own (surface-subtle tint plus a soft inset left edge echoing the guide), so an
+   expanded parent reads as a grouped block — the selected card's primary-soft `active`
+   fill is untouched. The chevron is a real <button> (never inside the card's own open
+   button) so it toggles independently and cannot open the session. Leaves get a hidden
+   spacer so every row aligns on the guide. */
+
+.session-tree {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.session-tree-node {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.session-tree-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.session-tree-row > .session-card {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.session-tree-toggle {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: var(--tap-min);
+  height: var(--tap-min);
+  margin-top: 0.25rem; /* aligns with the card title's first line */
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted);
+  transition: color var(--motion-fast) var(--ease), background var(--motion-fast) var(--ease);
+}
+
+.session-tree-toggle:hover {
+  color: var(--text);
+  background: var(--surface-strong);
+}
+
+.session-tree-toggle:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.session-tree-toggle svg {
+  transition: transform var(--motion-base) var(--ease);
+}
+
+.session-tree-toggle.expanded svg {
+  transform: rotate(90deg);
+}
+
+.session-tree-toggle--spacer {
+  visibility: hidden;
+}
+
+.session-tree-children {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+  padding-left: 1rem; /* half the toggle width, so child chevrons align under their parent's */
+  border-left: 1px solid var(--border-strong);
+}
+
+/* Horizontal elbow joining each child row to the vertical guide line. It runs from the guide
+   (1rem to the row's left, where the children block's border-left sits) out past the child's
+   toggle, meeting its chevron dead center — so every child visibly hangs off the parent's
+   gutter. pointer-events: none keeps the connector from ever intercepting the toggle. */
+.session-tree-children > .session-tree-node > .session-tree-row {
+  position: relative;
+}
+
+.session-tree-children > .session-tree-node > .session-tree-row::before {
+  content: "";
+  position: absolute;
+  top: 1.25rem; /* vertical center of the row's toggle (0.25rem margin + 1rem half-height) */
+  left: -1rem;
+  width: 2rem; /* guide to the child's chevron center (1rem padding + half the 2rem toggle) */
+  height: 1px;
+  background: var(--border-strong);
+  pointer-events: none;
+}
+
+/* Child rows get their own quiet surface: a slightly recessed tint (panel) or a faintly
+   tinted block (sidebar), crowned by a soft inset left edge that echoes the guide line above
+   it. The inset rides inside the card's border, so an unselected child reads as nested while
+   the selected card keeps its primary-soft `active` fill exactly as before. */
+.session-tree-children .session-card:not(.active) {
+  background: var(--surface-subtle);
+  box-shadow: inset 2px 0 0 var(--border-strong);
+}
+
+/* Compact sidebar rows: tighter rhythm to match the flush card stack. */
+.sidebar-sessions .session-tree {
+  gap: 0;
+}
+
+.sidebar-sessions .session-tree-toggle {
+  margin-top: 0.125rem; /* aligns with the single-line compact row title */
+}
+
+.sidebar-sessions .session-tree-children {
+  gap: 0;
+  margin-top: 0;
+}
+
+.sidebar-sessions .session-tree-children > .session-tree-node > .session-tree-row::before {
+  top: 1.125rem; /* matches the sidebar toggle center (0.125rem margin + 1rem half-height) */
+}
+
 .composer-chip strong {
   min-width: 0;
   overflow: hidden;

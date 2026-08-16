@@ -155,6 +155,27 @@ assert.equal(en('detail.childSessionOf', { parent: 'Fix the build' }), 'Child se
 assert.equal(en('detail.showMore'), 'Show more')
 assert.equal(en('detail.subagentTask'), 'Subagent task')
 
+// Session-tree expand/collapse (feature: tree-structured session list): the tree toggle is a
+// button whose only accessible name is its aria-label, so both labels must exist in every
+// language — asserted on the raw tables, exactly like the SUBAGENT_KEYS walk above.
+const TREE_KEYS = ['sessions.expandChildren', 'sessions.collapseChildren']
+for (const language of ['en', 'it', 'zh-TW', 'zh-CN']) {
+  for (const key of TREE_KEYS) {
+    assert.ok(
+      translations[language][key] !== undefined,
+      `${key} must exist in the ${language} table (no English fallback)`
+    )
+  }
+}
+for (const translator of [en, it, zh, zhCN]) {
+  for (const key of TREE_KEYS) {
+    assert.notEqual(translator(key), key, `${key} must be translated in every language`)
+  }
+}
+assert.equal(en('sessions.expandChildren'), 'Expand children')
+assert.equal(en('sessions.collapseChildren'), 'Collapse children')
+assert.equal(it('sessions.expandChildren'), 'Espandi le sessioni figlie')
+
 // Richer session activity states (issue #8): every status label must exist in every language. The
 // raw tables are asserted directly (not via the translator, whose English fallback would mask a
 // missing locale entry), exactly like the SUBAGENT_KEYS walk above.

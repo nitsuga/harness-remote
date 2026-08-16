@@ -88,6 +88,8 @@ type TranslationKey =
   | 'sessions.folderPickerEmpty'
   | 'sessions.projectDirectoryInvalid'
   | 'sessions.searchPlaceholder'
+  | 'sessions.expandChildren'
+  | 'sessions.collapseChildren'
   | 'sessions.emptyTitle'
   | 'sessions.emptyHint'
   | 'sessions.noFileChanges'
@@ -459,6 +461,8 @@ export const translations: Record<LanguageCode, Partial<Record<TranslationKey, s
     'sessions.folderPickerEmpty': 'No folders here.',
     'sessions.projectDirectoryInvalid': '{directory} is not a backend project folder. Pick a project/worktree folder, or use the server default.',
     'sessions.searchPlaceholder': 'Search sessions by title or directory...',
+    'sessions.expandChildren': 'Expand children',
+    'sessions.collapseChildren': 'Collapse children',
     'sessions.emptyTitle': 'No sessions found',
     'sessions.emptyHint': 'Create a new session to get started',
     'sessions.loadingTitle': 'Connecting to backend',
@@ -832,6 +836,8 @@ export const translations: Record<LanguageCode, Partial<Record<TranslationKey, s
     'sessions.folderPickerEmpty': 'Nessuna cartella qui.',
     'sessions.projectDirectoryInvalid': '{directory} non è una cartella progetto del backend. Scegli una cartella progetto/worktree oppure usa il default del server.',
     'sessions.searchPlaceholder': 'Cerca sessioni per titolo o cartella...',
+    'sessions.expandChildren': 'Espandi le sessioni figlie',
+    'sessions.collapseChildren': 'Comprimi le sessioni figlie',
     'sessions.emptyTitle': 'Nessuna sessione trovata',
     'sessions.emptyHint': 'Crea una nuova sessione per iniziare',
     'sessions.loadingTitle': 'Connessione al backend',
@@ -1198,6 +1204,8 @@ export const translations: Record<LanguageCode, Partial<Record<TranslationKey, s
     'sessions.folderPickerEmpty': '這裡沒有資料夾。',
     'sessions.projectDirectoryInvalid': '{directory} 不是後端專案資料夾。請選擇專案/worktree 資料夾，或使用伺服器預設。',
     'sessions.searchPlaceholder': '依標題或目錄搜尋工作階段...',
+    'sessions.expandChildren': '展開子工作階段',
+    'sessions.collapseChildren': '收合子工作階段',
     'sessions.emptyTitle': '找不到工作階段',
     'sessions.emptyHint': '建立新的工作階段以開始',
     'sessions.loadingTitle': '正在連線到後端',
@@ -1515,6 +1523,8 @@ export const translations: Record<LanguageCode, Partial<Record<TranslationKey, s
     'sessions.folderPickerEmpty': '这里没有文件夹。',
     'sessions.projectDirectoryInvalid': '{directory} 不是后端项目文件夹。请选择项目/工作树文件夹，或使用服务器默认。',
     'sessions.searchPlaceholder': '按标题或目录搜索会话...',
+    'sessions.expandChildren': '展开子会话',
+    'sessions.collapseChildren': '收起子会话',
     'sessions.emptyTitle': '未找到会话',
     'sessions.emptyHint': '创建新会话即可开始',
     'sessions.loadingTitle': '正在连接到后端',

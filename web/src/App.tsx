@@ -67,6 +67,7 @@ import { CommandPalette, MenuBar, ServerSwitcher, type MenuDefinition, type Menu
 import { ConnectServerWizard, NewSessionDialog } from "./components/panels"
 import { SessionComposer } from "./components/session-composer"
 import { createSessionMutationCoordinator, type MutationKind, type MutationLease, type SessionMutationCoordinator } from "./session-mutation-coordinator"
+import { buildSessionTree } from "./sessionTree"
 import { SessionSidebar, SessionsPanel, formatTime, projectLabel, shortDirectory, type SessionRenameState } from "./components/session-list"
 import { createServerProfile, loadActiveServerProfile, loadServerProfiles, persistServerProfiles, type SavedServerProfile } from "./serverProfiles"
 import type { DesktopMenuCommand, DesktopMenuTemplate } from "../electron/ipc-contract"
@@ -3716,6 +3717,11 @@ function App() {
     }
     return info
   }, [sessions])
+  // The filtered list restructured as a tree: children nest under their parents (recursively)
+  // and a child whose parent was filtered out by the query renders at root level. A child of
+  // the tree builder lives in sessionTree.ts; the helper degrades to the flat list whenever no
+  // session carries a parentID (the normal case on v1/ACP backends).
+  const sessionTree = useMemo(() => buildSessionTree(filteredSessions), [filteredSessions])
   const displayedCommands = useMemo(() => {
     if (commandFilter === "skill") return commands.filter((command) => command.source === "skill")
     return commands
@@ -6978,6 +6984,12 @@ function App() {
     else groups.push({ directory: session.directory, sessions: [session] })
     return groups
   }, [])
+  // Each directory group gets its own tree, so children nest under parents within the group; a
+  // child whose parent lives in another directory renders at root level of its own group.
+  const sidebarTreeGroups = useMemo(
+    () => sidebarGroups.map((group) => ({ ...group, nodes: buildSessionTree(group.sessions) })),
+    [sidebarGroups]
+  )
 
   const sessionRenameState: SessionRenameState = {
     sessionID: renamingSessionID,
@@ -7080,7 +7092,7 @@ function App() {
 
       {isDesktop && (
         <SessionSidebar
-          groups={sidebarGroups}
+          groups={sidebarTreeGroups}
           query={query}
           searchInputRef={searchInputRef}
           sidebarSessionsRef={sidebarSessionsRef}
@@ -7324,6 +7336,7 @@ function App() {
         <SessionsPanel
           sessions={sessions}
           filteredSessions={filteredSessions}
+          sessionTree={sessionTree}
           activeSessions={activeSessions}
           changedSessions={changedSessions}
           query={query}
