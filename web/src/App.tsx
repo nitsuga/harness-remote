@@ -1327,21 +1327,26 @@ function modelRefLabel(model: { id: string; providerID?: string; variant?: strin
 /** The localized one-line summary for a `switch` part. The wire's own English text stays out of the
  *  visible label — it is only kept as the row's aria-label fallback for screen readers. */
 function switchPartLabel(part: MessagePart, t: Translator): string {
+  // Live v2 transcripts carry `previous === value` (e.g. `{"type":"agent-switched","agent":"build",
+  // "previous":"build"}`): only render the "a → b" arrow when the previous value actually differs,
+  // mirroring the mapper's `switchPartText` instead of showing a self-referential "build → build".
+  // For model switches both sides are ref ids, so the equality check lands on `part.value` too.
+  const switchedFrom = part.previous !== undefined && part.previous !== part.value ? part.previous : undefined
   if (part.kind === "model") {
     const to = modelRefLabel(part.model) || part.value || ""
-    return part.previous
-      ? t('detail.switchModel', { from: part.previous, to })
+    return switchedFrom
+      ? t('detail.switchModel', { from: switchedFrom, to })
       : t('detail.switchModelTo', { to })
   }
   const subpath = part.kind === "location" && part.subpath ? ` (${part.subpath})` : ""
   const to = `${part.value || ""}${subpath}`
   if (part.kind === "agent") {
-    return part.previous
-      ? t('detail.switchAgent', { from: part.previous, to })
+    return switchedFrom
+      ? t('detail.switchAgent', { from: switchedFrom, to })
       : t('detail.switchAgentTo', { to })
   }
-  return part.previous
-    ? t('detail.switchLocation', { from: part.previous, to })
+  return switchedFrom
+    ? t('detail.switchLocation', { from: switchedFrom, to })
     : t('detail.switchLocationTo', { to })
 }
 

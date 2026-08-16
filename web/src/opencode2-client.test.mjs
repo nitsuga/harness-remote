@@ -119,6 +119,7 @@ assert.equal(toolEnvelope.parts[0].state?.status, 'completed')
 assert.deepEqual(toolEnvelope.parts[0].state?.input, { command: "stat -c '%n: %y' /tmp/x" })
 assert.ok(toolEnvelope.parts[0].state?.output?.includes('Command exited with code 0.'))
 assert.deepEqual(toolEnvelope.parts[0].state?.metadata, { status: 'completed', truncated: false, exit: 0 })
+assert.equal(toolEnvelope.parts[0].state?.exitCode, 0, 'a completed shell tool call must lift metadata.exit onto the state')
 
 assert.deepEqual(toToolState({ status: 'error', error: { message: 'boom' } }), {
   status: 'error',
@@ -993,6 +994,72 @@ const errorEnvelope = toMessageEnvelope(errorTool, 'ses_x')
 assert.equal(errorEnvelope.parts[0].state?.status, 'error')
 assert.equal(errorEnvelope.parts[0].state?.error, 'permission denied')
 assert.ok(errorEnvelope.parts[0].state?.output?.includes('partial output'))
+
+// Shells run as TOOL CALLS on the wire, with the outcome in `state.metadata` — `exit` for the exit
+// code, `timeout: true` when the shell was stopped by its timeout — never as a `type:"shell"`
+// message. `toToolState` must lift those onto the tool state so the exit-code and timeout badges
+// fire for real shell usage, while the fields stay absent for every other tool.
+const shellExitTool = {
+  id: 'msg_tool_exit',
+  time: { created: 1, completed: 2 },
+  type: 'assistant',
+  content: [{
+    type: 'tool',
+    id: 'call_shell_exit',
+    name: 'shell',
+    state: {
+      status: 'completed',
+      input: { command: 'echo hi' },
+      metadata: { status: 'completed', truncated: false, exit: 0 }
+    },
+    time: { created: 1, ran: 2, completed: 3 }
+  }]
+}
+const shellExitEnvelope = toMessageEnvelope(shellExitTool, 'ses_x')
+assert.equal(shellExitEnvelope.parts[0].state?.status, 'completed')
+assert.equal(shellExitEnvelope.parts[0].state?.exitCode, 0)
+
+const shellTimeoutTool = {
+  id: 'msg_tool_timeout',
+  time: { created: 1, completed: 2 },
+  type: 'assistant',
+  content: [{
+    type: 'tool',
+    id: 'call_shell_timeout',
+    name: 'shell',
+    state: {
+      status: 'completed',
+      input: { command: 'sleep 100' },
+      metadata: { status: 'completed', truncated: true, timeout: true }
+    },
+    time: { created: 1, ran: 2, completed: 3 }
+  }]
+}
+const shellTimeoutEnvelope = toMessageEnvelope(shellTimeoutTool, 'ses_x')
+assert.equal(shellTimeoutEnvelope.parts[0].state?.status, 'timeout')
+assert.equal('exitCode' in shellTimeoutEnvelope.parts[0].state, false, 'a timed-out shell carries no exit code')
+
+// `exit` is shell metadata: a non-shell tool that happens to carry it must not get an `exitCode`,
+// so the exit badge never fires for e.g. a read tool.
+const readExitTool = {
+  id: 'msg_tool_read',
+  time: { created: 1, completed: 2 },
+  type: 'assistant',
+  content: [{
+    type: 'tool',
+    id: 'call_read_1',
+    name: 'read',
+    state: {
+      status: 'completed',
+      input: { path: 'notes.md' },
+      metadata: { status: 'completed', truncated: false, exit: 0 }
+    },
+    time: { created: 1, ran: 2, completed: 3 }
+  }]
+}
+const readExitEnvelope = toMessageEnvelope(readExitTool, 'ses_x')
+assert.equal('exitCode' in readExitEnvelope.parts[0].state, false, 'exitCode must only be lifted for the shell tool')
+assert.equal(readExitEnvelope.parts[0].state?.status, 'completed')
 
 // `toFileContentPart` turns one `Tool.Content` file entry into a standalone transcript part.
 assert.deepEqual(toFileContentPart({ uri: 'file:///tmp/a.md', mime: 'text/markdown', name: 'a.md' }, 'msg_x', 'call_1'), {

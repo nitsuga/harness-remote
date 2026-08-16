@@ -118,7 +118,7 @@ export type V2ToolState = {
   metadata?: Record<string, unknown>
 }
 
-export function toToolState(state: V2ToolState): ToolState {
+export function toToolState(state: V2ToolState, tool?: string): ToolState {
   const status = state?.status ?? "pending"
   const textOutput = (state?.content ?? [])
     .filter((part): part is { type: "text"; text: string } => part.type === "text" && typeof part.text === "string")
@@ -128,8 +128,16 @@ export function toToolState(state: V2ToolState): ToolState {
     .filter((part): part is { type: "file"; uri: string; mime?: string; name?: string } => part.type === "file" && typeof part.uri === "string")
     .map((part) => ({ uri: part.uri, mime: part.mime ?? "", name: part.name }))
   const rawInput = state?.input
+  const metadata = state?.metadata
+  // Shells run as TOOL CALLS on the wire, with the outcome in `state.metadata` (`exit` for the exit
+  // code, `timeout: true` when the shell was stopped by its timeout) — not as `type:"shell"`
+  // messages. Lift those onto the tool state so the exit-code and timeout badges fire for real
+  // shell usage. Both fields stay ABSENT otherwise (non-shell tools, no exit/timeout metadata), so
+  // strict shape fixtures see no new fields where they do not belong.
+  const exitCode = tool === "shell" && typeof metadata?.exit === "number" ? metadata.exit : undefined
+  const timedOut = tool === "shell" && status === "completed" && metadata?.timeout === true
   return {
-    status,
+    status: timedOut ? "timeout" : status,
     // The streaming state's input is a plain string (a one-line description of the in-flight
     // invocation), not a JSON record — wrap it as `{ command }` so it stays record-shaped for
     // consumers that render `state.input` generically.
@@ -139,10 +147,11 @@ export function toToolState(state: V2ToolState): ToolState {
     time: state?.time
       ? { start: state.time.created ?? 0, end: state.time.completed }
       : undefined,
-    metadata: state?.metadata,
+    metadata,
     // Only surface `outputFiles` when a tool actually produced files, so consumers doing strict
     // field-level comparisons against older parts see no shape change.
-    ...(outputFiles.length > 0 ? { outputFiles } : {})
+    ...(outputFiles.length > 0 ? { outputFiles } : {}),
+    ...(exitCode !== undefined ? { exitCode } : {})
   }
 }
 
@@ -343,7 +352,7 @@ export function toMessageEnvelope(message: V2Message, sessionID: string): Messag
           type: "tool",
           tool: part.name ?? "tool",
           callID: part.id,
-          state: toToolState(part.state ?? {})
+          state: toToolState(part.state ?? {}, part.name)
         })
       }
     }

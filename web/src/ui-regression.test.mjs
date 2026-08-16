@@ -931,6 +931,16 @@ assert.ok(app.includes('function FileContentView'), 'tool output files and file-
 assert.ok(app.includes('function SwitchPartView'), 'switch parts need their own non-interactive summary row')
 // The switch row is informational: it must not be a button that opens a modal.
 assert.match(app, /function SwitchPartView[\s\S]*?<div className="message-switch-summary"[\s\S]*?>/, 'the switch row must render as a plain div, not a button')
+// The switch label renders the "a → b" arrow only when the previous value actually differs from the
+// new one: live v2 transcripts carry `previous === value` (e.g. `{"type":"agent-switched",
+// "agent":"build","previous":"build"}`), and the renderer must mirror the mapper's `switchPartText`
+// arrow-dropping instead of showing "build → build". Anchored on `part.` so the mapper's own
+// parameter-named check cannot satisfy it.
+assert.match(
+  app,
+  /function switchPartLabel[\s\S]*?part\.previous !== undefined && part\.previous !== part\.value/,
+  'the switch label must compare previous against the new value before rendering the arrow'
+)
 // The fallback summary opens a modal with the sanitized payload and nothing else.
 assert.match(
   app,
