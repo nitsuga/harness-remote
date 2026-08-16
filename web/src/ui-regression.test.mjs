@@ -1021,6 +1021,11 @@ assert.match(
   /function toSessionView[\s\S]*?Object\.defineProperty\(view, "parentID"/,
   'the view model must carry the non-enumerable parent id for the list badge'
 )
+assert.match(
+  app,
+  /const hydratedItems = items\.map\(\(session\) => \{[\s\S]*?const parentID = session\.parentID[\s\S]*?Object\.defineProperty\(hydrated, "parentID"/,
+  'refresh hydration must capture the non-enumerable parent id before the spread drops it, or child badges vanish on the next poll'
+)
 assert.ok(sessionList.includes('session-child-badge'), 'child sessions must get a badge in the session list')
 assert.ok(app.includes('parentInfo,'), 'the session list must receive the child-session badge data')
 assert.ok(sessionList.includes("t('detail.childSessionOf'"), 'the child badge must explain itself with the parent title when available')

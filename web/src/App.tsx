@@ -3705,7 +3705,17 @@ function App() {
           ])
       const scopedSessions = new Map(sessionLists.flat().map((session) => [session.id, session]))
       const statuses = Object.assign({}, ...statusMaps)
-      const hydratedItems = items.map((session) => ({ ...session, ...scopedSessions.get(session.id), project: session.project }))
+      // The v2 mapper attaches `parentID` non-enumerably (it must never leak into wire payloads or
+      // equality comparisons), so the spread below would silently drop it — object spread copies only
+      // enumerable own properties. Child sessions reach the list only through this hydration path
+      // (a refresh replaces their just-inserted rows), and the badge reads `parentID` from the view,
+      // so surface it the same non-enumerable way `toSessionView` does.
+      const hydratedItems = items.map((session) => {
+        const parentID = session.parentID
+        const hydrated = { ...session, ...scopedSessions.get(session.id), project: session.project }
+        if (parentID) Object.defineProperty(hydrated, "parentID", { value: parentID, enumerable: false })
+        return hydrated
+      })
       const activityTimes = await loadSessionActivityTimes(hydratedItems)
       const tombstoneKey = refreshContext.profileID + "\u0000" + refreshContext.configKey
       const persistedTombstoneKey = tombstoneNamespaceKey(refreshContext.profileID, refreshContext.configKey)
