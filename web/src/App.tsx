@@ -12,7 +12,9 @@ import {
 } from "./opencode2-client"
 import {
   isLiveSubagentStatus,
+  isSubagentCompletionWrapper,
   subagentCompletionDescription,
+  subagentCompletionOutput,
   subagentRunFromCompletion,
   subagentRunFromTool,
   toAgentRun,
@@ -1440,7 +1442,11 @@ function FallbackPartView({ part, timestamp, t }: { part: MessagePart; timestamp
  *  and an explicit "open child session" control. While the child works (issue #47), a monospace
  *  window below the headline follows the child's latest output — the child session id exists only
  *  on the ephemeral progress event, so the live area degrades to a quiet placeholder until the
- *  first output arrives, and to the result view the moment the run turns terminal. While the run
+ *  first output arrives, and to the result view the moment the run turns terminal. The result
+ *  block is gated on the run being terminal: a background launch's tool output is only the launch
+ *  notice ("The subagent is working in the background..."), which must never render as a second
+ *  RESULT window under the live area — once the synthetic completion lands, its extracted output
+ *  replaces the notice. While the run
  *  is live, a status row under the live area keeps the shared typing-dot working animation
  *  right-aligned on the same line as the Show more/Show less toggle, so a run with no output yet
  *  still reads as in flight at a glance. The card itself is deliberately NOT a button — unlike the
@@ -1538,7 +1544,7 @@ function SubagentRunCard({
       {run.error && (
         <div className="subagent-run-error">{run.error}</div>
       )}
-      {run.output && run.status !== "failed" && (
+      {!liveRun && run.output && run.status !== "failed" && (
         <>
           <div className={`subagent-run-result${expanded ? " expanded" : ""}`}>
             <span className="subagent-run-result-caption">{t('detail.subagentResult')}</span>
@@ -1597,6 +1603,10 @@ function MessagePartView({
 }) {
   if (part.type === "text") {
     if (!part.text) return null
+    // A synthetic subagent completion without a description maps to a plain text part whose text is
+    // exactly the raw `<subagent ...>...</subagent>` wrapper (issue #47); the run card renders the
+    // actual result, so the XML itself must never surface as chat prose.
+    if (isSubagentCompletionWrapper(part.text)) return null
     return (
       <div className="message-content">
         <ReactMarkdown remarkPlugins={REMARK_PLUGINS}>{normalizeMessageMarkdown(part.text)}</ReactMarkdown>
@@ -1658,6 +1668,11 @@ function MessagePartView({
   }
 
   if (part.type === "system") {
+    // A synthetic subagent completion's system part carries the raw `<subagent ...>` wrapper on
+    // `text` (with the child's short description on `description`); the run card owns the result,
+    // so the wrapper must never render as XML in the transcript (issue #47). Normal system messages
+    // are not complete wrappers and render exactly as before.
+    if (isSubagentCompletionWrapper(part.text)) return null
     return (
       <div className="message-system-row">
         {part.text && <span className="message-system-text">{part.text}</span>}
@@ -1711,13 +1726,16 @@ function formatRunDuration(ms: number): string {
 /** Merge a synthetic terminal completion (`info.subagent`, injected by the opencode `subagent`
  *  tool when its child finishes) over a tool-derived run for the same child session id. The
  *  completion's state is the server's own terminal word and wins; the tool run keeps supplying
- *  the description/output/error/timing the completion signal does not carry. The agent stays the
+ *  the description/error/timing the completion signal does not carry. The agent stays the
  *  tool input's stable agent id when the tool run carries one — the completion's `agent` is only
- *  a fallback for a run whose tool part never surfaced an id. */
+ *  a fallback for a run whose tool part never surfaced an id. The completion's extracted output —
+ *  the child's actual final result — replaces the tool part's launch notice for a background
+ *  launch, so the terminal card shows the real output (issue #47). */
 function mergeSubagentCompletion(run: SubagentRun, completion: SubagentRun | undefined): SubagentRun {
   if (!completion) return run
   const merged: SubagentRun = { ...run, status: completion.status, endedAt: completion.endedAt ?? run.endedAt }
   if (!merged.agent && completion.agent) merged.agent = completion.agent
+  if (completion.output) merged.output = completion.output
   return merged
 }
 
@@ -1754,6 +1772,11 @@ function collectSubagentCompletions(messages: readonly MessageEnvelope[]): Map<s
     // `<subagent ...>` block on `text`), so plain text extraction alone would come back empty.
     const description = subagentCompletionDescription(message.parts)
     if (!run.description && description) run.description = description
+    // The completion's own text carries the child's actual final output inside the
+    // `<subagent ...>` wrapper; a background launch's tool output is only the launch notice, so
+    // the extracted payload keeps the terminal card (merged or orphan) showing the real result.
+    const output = subagentCompletionOutput(message.parts)
+    if (output) run.output = output
     completions.set(run.childID, run)
   }
   return completions

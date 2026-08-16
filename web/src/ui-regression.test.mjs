@@ -1129,6 +1129,41 @@ assert.match(
 )
 assert.ok(styles.includes('.subagent-run-live-status'), 'the live status row needs its flex treatment')
 
+// --- PR #47 fixes: launch notice vs live output, and synthetic wrapper suppression -------------
+// A background launch's tool output is OpenCode's launch notice ("The subagent is working in the
+// background..."). While the run is live the card must show only the live window/placeholder, so
+// the RESULT block — which would render that notice — is gated on the run being terminal.
+assert.match(
+  app,
+  /\{!liveRun && run\.output && run\.status !== "failed" && \(/,
+  'the terminal result block must not render while the run is live, or the launch notice shows as a second RESULT window'
+)
+// When the run turns terminal, the child's actual final output comes from the synthetic completion
+// payload: completion collection keeps it on the completion run, and the merge prefers it over the
+// tool part's launch notice — including orphan completion cards, which read the same completions.
+assert.match(
+  app,
+  /const output = subagentCompletionOutput\(message\.parts\)[\s\S]*?if \(output\) run\.output = output/,
+  'completion collection must keep the child\u2019s actual final output on the completion run'
+)
+assert.match(
+  app,
+  /if \(completion\.output\) merged\.output = completion\.output/,
+  'the synthetic completion\u2019s actual output must win over the tool part\u2019s launch notice'
+)
+// The raw `<subagent ...>...</subagent>` wrapper must never render as chat prose: MessagePartView
+// skips a system (and text) part whose payload is exactly a complete wrapper. Normal system
+// messages are not complete wrappers and keep rendering as before.
+assert.match(
+  app,
+  /if \(part\.type === "system"\) \{[\s\S]*?if \(isSubagentCompletionWrapper\(part\.text\)\) return null/,
+  'a system part carrying the raw synthetic wrapper must be skipped, not rendered as XML'
+)
+assert.ok(
+  /if \(part\.type === "text"\) \{\s*if \(!part\.text\) return null[\s\S]*?if \(isSubagentCompletionWrapper\(part\.text\)\) return null/.test(app),
+  'a text part carrying the raw synthetic wrapper must be skipped too, so the XML stays out of the transcript'
+)
+
 // --- Richer session activity states (issue #8) -------------------------------------------------
 // The v2 execution memory must be cleared only on a profile/config namespace change, never on a
 // mere session switch: terminal/error facts must survive browsing away and back (gate 2 decision —

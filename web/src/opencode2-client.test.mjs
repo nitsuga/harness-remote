@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { isLiveSubagentStatus, subagentCompletionDescription, subagentRunFromCompletion, subagentRunFromTool } from './agentRuns.ts'
+import { isLiveSubagentStatus, isSubagentCompletionWrapper, subagentCompletionDescription, subagentCompletionOutput, subagentRunFromCompletion, subagentRunFromTool } from './agentRuns.ts'
 import { applyStreamedToolProgress, extractChildOutputLines, liveSubagentChildIDs } from './subagentLive.ts'
 import { createTranslator } from './i18n.ts'
 import {
@@ -1308,6 +1308,35 @@ assert.equal(subagentCompletionDescription([
   { id: 'x:text', type: 'text', text: `<subagent id="ses_child">\n${'long '.repeat(100)}\n</subagent>` }
 ]), undefined, 'an over-long completion payload is not a card headline')
 assert.equal(subagentCompletionDescription([]), undefined, 'an empty envelope carries no description')
+
+// The completion's inner payload — the child's actual final output — must be extracted for the run
+// card (issue #47): only the outer `<subagent ...>`/`</subagent>` tags are stripped, a normal
+// system/text message passes through as undefined, and an empty payload surfaces nothing.
+assert.equal(subagentCompletionOutput([
+  { id: 'msg_sub_done:system', messageID: 'msg_sub_done', type: 'system', text: '<subagent id="ses_child" state="completed" description="Do the thing">\nDone\n</subagent>', description: 'Do the thing' }
+]), 'Done', 'the structured system part must yield the child\u2019s actual final output')
+assert.equal(subagentCompletionOutput([
+  { id: 'msg:text', type: 'text', text: '<subagent id="ses_child" state="completed">\nFinished the task\n</subagent>' }
+]), 'Finished the task', 'a plain-text completion without a description must extract the same way')
+assert.equal(subagentCompletionOutput([
+  { id: 'msg:system', type: 'system', text: "Today's date is now: Sat Aug 15 2026", description: 'Instructions updated: core/date' }
+]), undefined, 'a normal system message is not a synthetic wrapper and must be untouched')
+assert.equal(subagentCompletionOutput([
+  { id: 'msg:text', type: 'text', text: 'Move to /home/eric/work.' }
+]), undefined, 'a normal text message is not a synthetic wrapper and must be untouched')
+assert.equal(subagentCompletionOutput([
+  { id: 'msg:system', type: 'system', text: '<subagent id="ses_child">\n</subagent>', description: 'Do the thing' }
+]), undefined, 'an empty wrapper payload has no output to surface')
+assert.equal(subagentCompletionOutput([]), undefined, 'no parts carry no output')
+
+// The recognition predicate is strict about the wrapper spanning the whole payload: inline tag
+// mentions and partial blocks are ordinary content and must keep rendering as before.
+assert.equal(isSubagentCompletionWrapper('<subagent id="ses_child" state="completed" description="Do the thing">\nDone\n</subagent>'), true)
+assert.equal(isSubagentCompletionWrapper('  <subagent id="ses_child">Done</subagent>\n'), true, 'surrounding whitespace is still a complete wrapper')
+assert.equal(isSubagentCompletionWrapper('The subagent finished.'), false, 'plain prose is not a wrapper')
+assert.equal(isSubagentCompletionWrapper('See <subagent id="x">inline</subagent> in text'), false, 'a wrapper must span the whole payload to be the injected completion')
+assert.equal(isSubagentCompletionWrapper('<subagent id="x">unclosed'), false, 'an unclosed tag is not the injected completion')
+assert.equal(isSubagentCompletionWrapper(undefined), false)
 
 // --- Feature #47 lane: live running-subagent summary ------------------------------------------
 // Synthetic fixtures only — every id was invented here. The shapes mirror the opencode v2
