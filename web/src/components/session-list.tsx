@@ -1,6 +1,7 @@
-import { useContext, useState } from "react"
+import { useContext, useEffect, useMemo, useState } from "react"
 import type { PointerEvent as ReactPointerEvent, RefObject, ReactNode } from "react"
 import {
+  ChevronRightIcon,
   CloseIcon,
   FolderIcon,
   HelpIcon,
@@ -16,6 +17,7 @@ import {
 } from "../Icons"
 import { AttentionInboxContext } from "../attentionInboxContext"
 import type { Translator } from "../i18n"
+import type { SessionTreeNode } from "../sessionTree"
 import type { HarnessCapabilities, SessionView } from "../types"
 import { AttentionInboxButton, AttentionInboxPanel } from "./attention-inbox"
 
@@ -84,6 +86,7 @@ export function SessionCard({
   language,
   t,
   parentInfo,
+  treeNested,
   onOpen,
   onRenameValueChange,
   onRename,
@@ -102,6 +105,11 @@ export function SessionCard({
   /** Child sessions (spawned by subagents or forks) get a small badge; the value carries the
    *  parent's id and title (when the parent row is loaded) for the badge's explanatory hint. */
   parentInfo: ReadonlyMap<string, { parentID: string; parentTitle?: string }>
+  /** True when the card renders as a visibly nested child inside the session tree. The badge is
+   *  then redundant — the nesting already says "child of the row above" — so tree mode hides it
+   *  and keeps it for rows where the parent is NOT visible (a child whose parent was filtered
+   *  out by a query, which the tree renders at root level). */
+  treeNested?: boolean
   onOpen: (session: SessionView) => void
   onRenameValueChange: (value: string) => void
   onRename: (session: SessionView) => void
@@ -154,7 +162,7 @@ export function SessionCard({
             <button type="button" className="session-card-open" onClick={() => onOpen(session)} title={t('sessions.open')}>
               {/* Flow content inside a button is invalid; the title, badge and directory are styled spans. */}
               <span className="session-card-title" title={session.title}>{session.title}</span>
-              {parent && (
+              {parent && !treeNested && (
                 <span
                   className="session-child-badge"
                   title={parent.parentTitle ? t('detail.childSessionOf', { parent: parent.parentTitle }) : t('detail.childSession')}
@@ -197,6 +205,137 @@ export function SessionCard({
 
 type SessionCardProps = Omit<Parameters<typeof SessionCard>[0], "session">
 
+/* --- Session tree ---------------------------------------------------------
+   Children (subagents, forks) render nested under their parent, recursively, like a file
+   explorer. The tree is a presentation layer over the already-filtered session list:
+   `buildSessionTree` (sessionTree.ts) groups children under their parent when it is present,
+   and lifts a child whose parent was filtered out by the query to root level — where it keeps
+   its child badge, since its parent is not visible in the list.
+   Expand state is local to one tree instance (the panel and the sidebar each keep their own)
+   and keyed by session id, so refreshes preserve what the user opened. Keys for sessions that
+   disappear are pruned so the set cannot grow stale. All parents start collapsed. */
+
+function SessionTreeNodeView({
+  node,
+  depth,
+  sessionCardProps,
+  t,
+  expanded,
+  onToggle
+}: {
+  node: SessionTreeNode
+  depth: number
+  sessionCardProps: SessionCardProps
+  t: Translator
+  expanded: ReadonlySet<string>
+  onToggle: (id: string) => void
+}) {
+  const { session, children } = node
+  const hasChildren = children.length > 0
+  const isExpanded = hasChildren && expanded.has(session.id)
+  const childrenID = `session-tree-children-${session.id}`
+  return (
+    <div className="session-tree-node">
+      <div className="session-tree-row">
+        {hasChildren ? (
+          <button
+            type="button"
+            className={`session-tree-toggle${isExpanded ? " expanded" : ""}`}
+            aria-expanded={isExpanded}
+            aria-controls={childrenID}
+            aria-label={isExpanded ? t('sessions.collapseChildren') : t('sessions.expandChildren')}
+            title={isExpanded ? t('sessions.collapseChildren') : t('sessions.expandChildren')}
+            onClick={() => onToggle(session.id)}
+          >
+            <ChevronRightIcon size={14} />
+          </button>
+        ) : (
+          <span className="session-tree-toggle session-tree-toggle--spacer" aria-hidden="true" />
+        )}
+        <SessionCard session={session} {...sessionCardProps} treeNested={depth > 0} />
+      </div>
+      {hasChildren && isExpanded && (
+        <div className="session-tree-children" id={childrenID}>
+          {children.map((child) => (
+            <SessionTreeNodeView
+              key={child.session.id}
+              node={child}
+              depth={depth + 1}
+              sessionCardProps={sessionCardProps}
+              t={t}
+              expanded={expanded}
+              onToggle={onToggle}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+export function SessionTreeList({
+  nodes,
+  sessionCardProps,
+  t
+}: {
+  nodes: SessionTreeNode[]
+  sessionCardProps: SessionCardProps
+  t: Translator
+}) {
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set())
+  // Collect every session id in the current tree so the expand state can drop keys whose
+  // sessions disappeared (deleted, or filtered out of the list).
+  const nodeIDs = useMemo(() => {
+    const ids = new Set<string>()
+    const visit = (items: SessionTreeNode[]): void => {
+      for (const item of items) {
+        ids.add(item.session.id)
+        visit(item.children)
+      }
+    }
+    visit(nodes)
+    return ids
+  }, [nodes])
+  useEffect(() => {
+    setExpanded((current) => {
+      let stale = false
+      for (const id of current) {
+        if (!nodeIDs.has(id)) {
+          stale = true
+          break
+        }
+      }
+      if (!stale) return current
+      const pruned = new Set(current)
+      for (const id of pruned) if (!nodeIDs.has(id)) pruned.delete(id)
+      return pruned
+    })
+  }, [nodeIDs])
+  const toggle = (id: string): void => {
+    setExpanded((current) => {
+      const next = new Set(current)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+  return (
+    <div className="session-tree">
+      {nodes.map((node) => (
+        <SessionTreeNodeView
+          key={node.session.id}
+          node={node}
+          depth={0}
+          sessionCardProps={sessionCardProps}
+          t={t}
+          expanded={expanded}
+          onToggle={toggle}
+        />
+      ))}
+    </div>
+  )
+}
+
 export function SessionSidebar({
   groups,
   query,
@@ -218,7 +357,7 @@ export function SessionSidebar({
   jumpControls,
   sessionCardProps
 }: {
-  groups: Array<{ directory: string; sessions: SessionView[] }>
+  groups: Array<{ directory: string; sessions: SessionView[]; nodes: SessionTreeNode[] }>
   query: string
   searchInputRef: RefObject<HTMLInputElement>
   sidebarSessionsRef: RefObject<HTMLDivElement>
@@ -261,7 +400,7 @@ export function SessionSidebar({
         {groups.length === 0 ? <p className="subtle sidebar-empty">{offline ? t('sessions.offlineHint') : t('sessions.emptyTitle')}</p> : groups.map((group) => (
           <section key={group.directory} className="sidebar-group">
             <div className="sidebar-group-label" title={group.directory}><FolderIcon size={12} /><span>{projectLabel(group.directory)}</span><span className="sidebar-group-count">{group.sessions.length}</span></div>
-            {group.sessions.map((session) => <SessionCard key={session.id} session={session} {...sessionCardProps} />)}
+            <SessionTreeList nodes={group.nodes} sessionCardProps={sessionCardProps} t={t} />
           </section>
         ))}
       </div>
@@ -277,6 +416,7 @@ export function SessionSidebar({
 export function SessionsPanel({
   sessions,
   filteredSessions,
+  sessionTree,
   activeSessions,
   changedSessions,
   query,
@@ -300,6 +440,8 @@ export function SessionsPanel({
 }: {
   sessions: SessionView[]
   filteredSessions: SessionView[]
+  /** The filtered list restructured as a tree (built in App.tsx with `buildSessionTree`). */
+  sessionTree: SessionTreeNode[]
   activeSessions: number
   changedSessions: number
   query: string
@@ -351,7 +493,7 @@ export function SessionsPanel({
         {filteredSessions.length === 0 && offline ? <div className="empty-state"><OfflineIcon size={44} className="icon-empty-state" /><p>{t('sessions.offlineHint')}</p><div className="empty-state-actions"><button type="button" className="btn-primary" onClick={onRefresh} disabled={refreshing}>{refreshing ? <LoadingIcon size={18} /> : <RefreshIcon size={18} />}{t('sessions.retry')}</button><button type="button" className="btn-secondary" onClick={onShowSettings}><SettingsIcon size={18} />{t('nav.settings')}</button></div></div>
           : filteredSessions.length === 0 && ['connecting', 'reconnecting'].includes(connectionState) ? <div className="empty-state connection-pending"><LoadingIcon size={40} className="icon-empty-state" /><p>{t('sessions.loadingTitle')}</p><p className="subtle">{t('sessions.loadingHint')}</p></div>
           : filteredSessions.length === 0 ? <div className="empty-state"><FolderIcon size={48} className="icon-empty-state" /><p>{t('sessions.emptyTitle')}</p><p className="subtle">{t('sessions.emptyHint')}</p></div>
-          : filteredSessions.map((session) => <SessionCard key={session.id} session={session} {...sessionCardProps} />)}
+          : <SessionTreeList nodes={sessionTree} sessionCardProps={sessionCardProps} t={t} />}
       </div>
       {runtimeError && !(offline && filteredSessions.length === 0) && <div className="error fade-in">✗ {runtimeError}</div>}
       {actionNotice && <div className="notice info fade-in" role="status" aria-live="polite">ℹ {actionNotice}</div>}

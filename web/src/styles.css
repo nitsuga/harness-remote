@@ -3434,6 +3434,117 @@ a:focus-visible,
   margin-top: 0;
 }
 
+/* --- Session tree (feature: tree-structured session list) -----------------
+   Children render nested under their parent, file-explorer style. Each node is a row
+   [toggle column | card]; expanding a parent reveals its children block, indented by one
+   guide column with a vertical guide line and a short tick into each child row. The chevron
+   is a real <button> (never inside the card's own open button) so it toggles independently
+   and cannot open the session. Leaves get a hidden spacer so every row aligns on the guide. */
+
+.session-tree {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.session-tree-node {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.session-tree-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.session-tree-row > .session-card {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.session-tree-toggle {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: var(--tap-min);
+  height: var(--tap-min);
+  margin-top: 0.25rem; /* aligns with the card title's first line */
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted);
+  transition: color var(--motion-fast) var(--ease), background var(--motion-fast) var(--ease);
+}
+
+.session-tree-toggle:hover {
+  color: var(--text);
+  background: var(--surface-strong);
+}
+
+.session-tree-toggle:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.session-tree-toggle svg {
+  transition: transform var(--motion-base) var(--ease);
+}
+
+.session-tree-toggle.expanded svg {
+  transform: rotate(90deg);
+}
+
+.session-tree-toggle--spacer {
+  visibility: hidden;
+}
+
+.session-tree-children {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+  padding-left: 1rem; /* half the toggle width, so child chevrons align under their parent's */
+  border-left: 1px solid var(--border);
+}
+
+/* Short horizontal tick joining each child row to the vertical guide line. */
+.session-tree-children > .session-tree-node > .session-tree-row {
+  position: relative;
+}
+
+.session-tree-children > .session-tree-node > .session-tree-row::before {
+  content: "";
+  position: absolute;
+  top: 1.25rem; /* vertical center of the row's toggle (0.25rem margin + 1rem half-height) */
+  left: -1rem;
+  width: 0.75rem;
+  height: 1px;
+  background: var(--border);
+}
+
+/* Compact sidebar rows: tighter rhythm to match the flush card stack. */
+.sidebar-sessions .session-tree {
+  gap: 0;
+}
+
+.sidebar-sessions .session-tree-toggle {
+  margin-top: 0.125rem; /* aligns with the single-line compact row title */
+}
+
+.sidebar-sessions .session-tree-children {
+  gap: 0;
+  margin-top: 0;
+}
+
+.sidebar-sessions .session-tree-children > .session-tree-node > .session-tree-row::before {
+  top: 1.125rem; /* matches the sidebar toggle center (0.125rem margin + 1rem half-height) */
+}
+
 .composer-chip strong {
   min-width: 0;
   overflow: hidden;

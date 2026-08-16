@@ -198,6 +198,19 @@ assert.ok(!sessionList.includes('role="button"'), 'session cards must not nest b
 assert.ok(sessionList.includes('className="session-card-open"'), 'session cards need a dedicated keyboard-accessible open control')
 assert.equal(/\.session-card\s*\{[^}]*cursor:\s*pointer/.test(styles), false, 'the article must not promise that non-action card content opens the session')
 assert.match(styles, /\.session-card-open\s*\{[\s\S]*?cursor:\s*pointer/, 'the primary session control must retain a pointer and keyboard affordance')
+// Tree-structured session list: children nest under their parents through the shared tree
+// component on BOTH surfaces. The expand toggle is a real button with aria-expanded and
+// aria-controls, rendered OUTSIDE the card's open control, so expanding can never open the
+// session; tree mode flags nested cards so the child badge (redundant under a visible parent)
+// is hidden for them and kept for root-level rows whose parent is not visible.
+assert.ok(sessionList.includes('SessionTreeList'), 'panel and sidebar must render sessions through the shared tree list')
+assert.ok(sessionList.includes('aria-expanded={isExpanded}'), 'tree toggles must announce their expanded state')
+assert.ok(sessionList.includes('aria-controls={childrenID}'), 'tree toggles must reference the children block they reveal')
+assert.ok(sessionList.includes('treeNested={depth > 0}'), 'tree mode must flag nested cards so the child badge can hide')
+assert.ok(sessionList.includes('session-tree-toggle'), 'tree rows need a dedicated expand/collapse control')
+assert.ok(app.includes('buildSessionTree'), 'the session tree must be built from the filtered session list')
+assert.ok(app.includes('sessionTree={sessionTree}'), 'the panel must receive the prebuilt tree')
+assert.ok(app.includes('groups={sidebarTreeGroups}'), 'the sidebar must receive per-directory trees')
 assert.match(styles, /\.composer-chips[\s\S]*?overflow-x: auto/, 'attachment chips must remain reachable on narrow screens')
 assert.equal(app.includes('aria-busy={pendingAction !== null}'), false, 'the session-actions toggle must not carry inert aria-busy state')
 assert.match(app, /<span className="session-action-pending" role="status" aria-live="polite">/, 'pending session actions must announce through a live status region instead of aria-busy')
