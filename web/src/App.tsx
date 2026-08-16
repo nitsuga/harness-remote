@@ -4501,6 +4501,17 @@ function App() {
     )
   }
 
+  /** Retire optimistic user bubbles that the given fetched messages prove server-admitted. The
+   *  full-load path already does this, but the seed and the 2s tail refresh append the server's
+   *  copy of a just-sent prompt BEFORE the full load lands — without retiring the optimistic row
+   *  here, the same prompt renders as two bubbles until the next full load. */
+  const retireOptimisticUserRows = (source: MessageEnvelope[]) => {
+    setOptimisticUserMessages((current) => {
+      const remaining = current.filter((message) => !hasMatchingUserMessage(source, message))
+      return remaining.length === current.length ? current : remaining
+    })
+  }
+
   /** Seed-only tail refresh (issue #52 tail cadence): the coalesced full-reload cycle takes ~10s+
    *  on a long transcript, so a part committed to the newest message mid-cycle (e.g. a SECOND
    *  subagent launch in the same turn) would not paint until that cycle ends. Re-fetch the cheap
@@ -4524,6 +4535,9 @@ function App() {
         loadedMessagesRef.current = merged
         return merged
       })
+      // A just-sent prompt's server copy can land in the tail before the full load retires the
+      // optimistic bubble — retire it here so the prompt never renders twice.
+      retireOptimisticUserRows(tail)
     } catch {
       // Ignore: the coalesced full reload stays authoritative.
     }
@@ -4573,6 +4587,9 @@ function App() {
           loadedMessagesRef.current = merged
           return merged
         })
+        // A just-sent prompt's server copy can land in the seed before the full load retires the
+        // optimistic bubble — retire it here so the prompt never renders twice.
+        retireOptimisticUserRows(tail)
       } catch {
         // Ignore: the full reload below is authoritative.
       }
