@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { subagentCompletionDescription, subagentRunFromCompletion, subagentRunFromTool } from './agentRuns.ts'
 import { createTranslator } from './i18n.ts'
 import {
   applyInboxDelivery,
@@ -1089,5 +1090,159 @@ assert.equal('exitCode' in shellNoExit.parts[0].state, false, 'no exit code, no 
 assert.equal(toMessageEnvelope({ id: 'msg_sh_t', time: { created: 4 }, type: 'shell', shellID: 'sh_3', command: 'sleep 100', status: 'timeout' }, 'ses_x').parts[0].state?.status, 'timeout')
 assert.equal(toMessageEnvelope({ id: 'msg_sh_k', time: { created: 5 }, type: 'shell', shellID: 'sh_4', command: 'sleep 100', status: 'killed' }, 'ses_x').parts[0].state?.status, 'killed')
 assert.equal(toMessageEnvelope({ id: 'msg_sh_r', time: { created: 6 }, type: 'shell', shellID: 'sh_5', command: 'echo hi', status: 'running' }, 'ses_x').parts[0].state?.status, 'running')
+
+// --- Feature #10 lane 1: delegated-subagent correlation signals -------------------------------
+// Synthetic fixtures only — every id was invented here. The shapes mirror the opencode v2
+// `subagent` tool contract (packages/core/src/tool/plugin/subagent.ts): a finished delegated
+// child injects a synthetic message carrying `metadata: { source: "subagent", childID, agent,
+// state }` into the parent transcript; the tool part's `state.metadata` carries
+// `{ sessionID, status: "running"|"completed" }` with agent/description on the tool input.
+
+// A synthetic subagent completion maps its terminal signal onto `info.subagent`, while the
+// `<subagent ...>` text part stays exactly as before (the renderer lane owns the visuals).
+const subagentCompleted = toMessageEnvelope({
+  id: 'msg_sub_done',
+  time: { created: 30 },
+  type: 'synthetic',
+  text: '<subagent id="ses_child" state="completed" description="Do the thing">\nDone\n</subagent>',
+  description: 'Do the thing',
+  metadata: { source: 'subagent', childID: 'ses_child', agent: 'explorer', state: 'completed' }
+}, 'ses_x')
+assert.deepEqual(subagentCompleted.info.subagent, {
+  childID: 'ses_child', agent: 'explorer', state: 'completed'
+})
+assert.deepEqual(subagentCompleted.parts, [{
+  id: 'msg_sub_done:system',
+  messageID: 'msg_sub_done',
+  type: 'system',
+  text: '<subagent id="ses_child" state="completed" description="Do the thing">\nDone\n</subagent>',
+  description: 'Do the thing'
+}], 'the synthetic subagent text part must keep mapping exactly as before')
+// All three documented completion states survive the mapping.
+assert.equal(toMessageEnvelope({
+  id: 'msg_sub_err', time: { created: 31 }, type: 'synthetic',
+  text: '<subagent id="ses_child" state="error" description="Do the thing">\nSubagent failed\n</subagent>',
+  description: 'Do the thing',
+  metadata: { source: 'subagent', childID: 'ses_child', agent: 'explorer', state: 'error' }
+}, 'ses_x').info.subagent.state, 'error')
+assert.equal(toMessageEnvelope({
+  id: 'msg_sub_cancel', time: { created: 32 }, type: 'synthetic',
+  text: '<subagent id="ses_child" state="cancelled" description="Do the thing">\nSubagent cancelled\n</subagent>',
+  description: 'Do the thing',
+  metadata: { source: 'subagent', childID: 'ses_child', agent: 'explorer', state: 'cancelled' }
+}, 'ses_x').info.subagent.state, 'cancelled')
+// A synthetic WITHOUT the subagent metadata stays exactly as today: no `info.subagent`.
+const plainSynthetic = toMessageEnvelope({
+  id: 'msg_syn_plain', time: { created: 33 }, type: 'synthetic', text: 'Move to /home/eric/work.', description: 'Prompt updated'
+}, 'ses_x')
+assert.equal(plainSynthetic.info.subagent, undefined, 'a synthetic without subagent metadata must not gain info.subagent')
+// ...and neither does one whose metadata claims subagent source but carries no child id.
+assert.equal(toMessageEnvelope({
+  id: 'msg_sub_noid', time: { created: 34 }, type: 'synthetic', text: 'x', description: 'x',
+  metadata: { source: 'subagent', state: 'completed' }
+}, 'ses_x').info.subagent, undefined, 'a subagent synthetic without a childID must degrade to the old mapping')
+// A terminal state is never invented (acceptance criterion #5): a subagent synthetic with an
+// absent or unknown completion `state` degrades to the old mapping too — no `info.subagent` — so
+// the run keeps its tool-derived in-flight status instead of snapping to a fabricated "completed".
+assert.equal(toMessageEnvelope({
+  id: 'msg_sub_nostate', time: { created: 35 }, type: 'synthetic',
+  text: '<subagent id="ses_child" description="Do the thing">\nStill running\n</subagent>',
+  description: 'Do the thing',
+  metadata: { source: 'subagent', childID: 'ses_child', agent: 'explorer' }
+}, 'ses_x').info.subagent, undefined, 'a subagent synthetic without a completion state must degrade to the old mapping')
+assert.equal(toMessageEnvelope({
+  id: 'msg_sub_unkstate', time: { created: 36 }, type: 'synthetic',
+  text: '<subagent id="ses_child" description="Do the thing">\nx\n</subagent>',
+  description: 'Do the thing',
+  metadata: { source: 'subagent', childID: 'ses_child', agent: 'explorer', state: 'unknown' }
+}, 'ses_x').info.subagent, undefined, 'an unknown completion state must degrade to the old mapping')
+
+// `subagentRunFromTool` derives the delegated run from the tool part: child id from
+// `state.metadata.sessionID`, in-flight/terminal signal from `state.metadata.status`, and
+// agent/description from the tool input.
+assert.deepEqual(subagentRunFromTool({
+  tool: 'subagent',
+  state: {
+    status: 'completed',
+    input: { agent: 'explorer', description: 'Find the bug', prompt: 'Investigate' },
+    output: 'Found it',
+    metadata: { sessionID: 'ses_child', status: 'completed' },
+    time: { start: 10, end: 20 }
+  }
+}), {
+  childID: 'ses_child', agent: 'explorer', description: 'Find the bug',
+  status: 'completed', startedAt: 10, endedAt: 20, output: 'Found it'
+})
+// A BACKGROUND launch is the real in-flight wire shape: the PART is already `completed` while the
+// job metadata still says `running` (opencode `subagent.ts` returns the backgrounded job without
+// waiting). The run must stay "working" — with the live elapsed clock ticking — until the
+// injected synthetic completion lands, never fall to "idle" off the part's own terminal status.
+assert.equal(subagentRunFromTool({
+  tool: 'subagent',
+  state: {
+    status: 'completed',
+    input: { agent: 'explorer' },
+    metadata: { sessionID: 'ses_child', status: 'running', truncated: false },
+    time: { start: 10, end: 10 }
+  }
+}).status, 'working', 'a completed part whose job is still running must map to working')
+// A FOREGROUND failure carries the part as `error` while the job metadata still says `running`
+// (opencode `subagent.ts` throws ToolFailure without injecting a completion): the part's own
+// error state is the source of truth for failure, so the pill shows failed and the error box
+// keeps rendering.
+assert.equal(subagentRunFromTool({
+  tool: 'subagent',
+  state: { status: 'error', input: { agent: 'explorer' }, metadata: { sessionID: 'ses_child', status: 'running' }, error: 'boom' }
+}).status, 'failed', 'a foreground-failed subagent must map to failed despite the running job metadata')
+assert.equal(subagentRunFromTool({
+  tool: 'subagent',
+  state: { status: 'error', input: { agent: 'explorer' }, metadata: { sessionID: 'ses_child', status: 'running' }, error: 'boom' }
+}).error, 'boom', 'the foreground-failed run must keep the tool error surfaced')
+// Terminal states come only from the server's metadata.status, mapped onto the shared vocabulary.
+assert.equal(subagentRunFromTool({
+  tool: 'subagent',
+  state: { status: 'completed', input: { agent: 'explorer' }, metadata: { sessionID: 'ses_child', status: 'error' } }
+}).status, 'failed')
+assert.equal(subagentRunFromTool({
+  tool: 'subagent',
+  state: { status: 'completed', input: { agent: 'explorer' }, metadata: { sessionID: 'ses_child', status: 'cancelled' } }
+}).status, 'stopped')
+// The in-flight RUNNING part ships `metadata:{}` on the wire (opencode `message-updater.ts`), so
+// it carries no session id: it degrades to null and renders as the generic tool row, exactly like
+// the streaming part.
+assert.equal(subagentRunFromTool({
+  tool: 'subagent',
+  state: { status: 'running', input: { agent: 'explorer' }, metadata: {} }
+}), null, 'a running part without session id metadata must degrade to the generic row')
+// Missing correlation data degrades to null: a non-subagent tool, or a subagent part without a
+// non-empty `metadata.sessionID` — the caller falls back to generic tool rendering.
+assert.equal(subagentRunFromTool({ tool: 'read', state: { metadata: { sessionID: 'ses_child', status: 'completed' } } }), null)
+assert.equal(subagentRunFromTool({ tool: 'subagent', state: { status: 'completed', metadata: { status: 'completed' } } }), null)
+assert.equal(subagentRunFromTool({ tool: 'subagent' }), null, 'a subagent part without state metadata degrades to null')
+assert.equal(subagentRunFromTool({ tool: 'subagent', state: { metadata: { sessionID: '', status: 'completed' } } }), null, 'an empty child id is not correlation data')
+
+// `subagentRunFromCompletion` reads the terminal signal off the envelope info, mapping the
+// completion state onto the shared vocabulary; absent signal → null.
+assert.deepEqual(subagentRunFromCompletion({ subagent: { childID: 'ses_child', agent: 'explorer', state: 'completed' } }), {
+  childID: 'ses_child', agent: 'explorer', status: 'completed'
+})
+assert.equal(subagentRunFromCompletion({ subagent: { childID: 'ses_child', agent: 'explorer', state: 'error' } }).status, 'failed')
+assert.equal(subagentRunFromCompletion({ subagent: { childID: 'ses_child', agent: 'explorer', state: 'cancelled' } }).status, 'stopped')
+assert.equal(subagentRunFromCompletion({}), null)
+assert.equal(subagentRunFromCompletion({ subagent: undefined }), null)
+
+// The completion headline must read the structured `system` part the mapper emits for a subagent
+// completion (the child's short description on `description`, the model-facing `<subagent ...>`
+// block on `text`) — plain text-part extraction alone would come back empty. The same tag-stripper
+// handles a plain-text completion, and over-long payloads stay in the transcript.
+assert.equal(subagentCompletionDescription(subagentCompleted.parts), 'Do the thing',
+  'the description must come off the system part, not the empty text extraction')
+assert.equal(subagentCompletionDescription([
+  { id: 'msg_syn_plain:text', type: 'text', text: '<subagent id="ses_child" state="completed">\nDone\n</subagent>' }
+]), 'Done', 'a plain-text completion keeps its block on text and strips the wrapper tags')
+assert.equal(subagentCompletionDescription([
+  { id: 'x:text', type: 'text', text: `<subagent id="ses_child">\n${'long '.repeat(100)}\n</subagent>` }
+]), undefined, 'an over-long completion payload is not a card headline')
+assert.equal(subagentCompletionDescription([]), undefined, 'an empty envelope carries no description')
 
 console.log('OpenCode 2 client mapping tests passed')

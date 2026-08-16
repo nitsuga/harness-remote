@@ -225,6 +225,10 @@ export type MessageEnvelope = {
     cost?: number
     tokens?: { input?: number; output?: number; reasoning?: number }
     retry?: { attempt: number; at: number; error?: { type?: string; message?: string } }
+    /** OpenCode 2 delegated-subagent terminal completion (only ever set by the v2 mapper from
+     *  the synthetic message the `subagent` tool injects; the v1/bridge backends never populate
+     *  this). This is the terminal signal for a child session spawned as a delegated task. */
+    subagent?: { childID: string; agent?: string; state: "completed" | "error" | "cancelled" }
   }
   parts: MessagePart[]
 }

@@ -60,6 +60,7 @@ export function SessionCard({
   capabilities,
   language,
   t,
+  parentInfo,
   onOpen,
   onRenameValueChange,
   onRename,
@@ -75,6 +76,9 @@ export function SessionCard({
   capabilities: HarnessCapabilities
   language: string
   t: Translator
+  /** Child sessions (spawned by subagents or forks) get a small badge; the value carries the
+   *  parent's id and title (when the parent row is loaded) for the badge's explanatory hint. */
+  parentInfo: ReadonlyMap<string, { parentID: string; parentTitle?: string }>
   onOpen: (session: SessionView) => void
   onRenameValueChange: (value: string) => void
   onRename: (session: SessionView) => void
@@ -84,6 +88,7 @@ export function SessionCard({
   mutationLocked: boolean
 }) {
   const isRenaming = rename.sessionID === session.id && rename.source === "list"
+  const parent = parentInfo.get(session.id)
   return (
     <article
       className={`session-card ${session.status} ${selectedID === session.id ? "active" : ""} ${isRenaming ? "renaming" : ""} fade-in`}
@@ -124,8 +129,17 @@ export function SessionCard({
             </div>
           ) : (
             <button type="button" className="session-card-open" onClick={() => onOpen(session)} title={t('sessions.open')}>
-              {/* Flow content inside a button is invalid; the title and directory are styled spans. */}
+              {/* Flow content inside a button is invalid; the title, badge and directory are styled spans. */}
               <span className="session-card-title" title={session.title}>{session.title}</span>
+              {parent && (
+                <span
+                  className="session-child-badge"
+                  title={parent.parentTitle ? t('detail.childSessionOf', { parent: parent.parentTitle }) : t('detail.childSession')}
+                  aria-label={parent.parentTitle ? t('detail.childSessionOf', { parent: parent.parentTitle }) : t('detail.childSession')}
+                >
+                  {t('detail.childSession')}
+                </span>
+              )}
               <span className="session-card-directory" title={session.directory}>{shortDirectory(session.directory)}</span>
             </button>
           )}

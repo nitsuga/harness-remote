@@ -230,6 +230,11 @@ export type V2AgentSwitched = V2MessageBase & { type: "agent-switched"; agent?: 
 export type V2ModelSwitched = V2MessageBase & { type: "model-switched"; model?: V2ModelRef; previous?: V2ModelRef }
 export type V2LocationSwitched = V2MessageBase & { type: "location-switched"; location?: V2LocationRef; projectID?: string; subpath?: string; previous?: V2LocationPrevious }
 export type V2UserMessage = V2MessageBase & { type: "user"; text?: string; files?: unknown[]; agents?: unknown[]; skills?: unknown[] }
+/** A v2 `Session.Message.Synthetic`: `{ text, description? }`. Delegated-subagent completions
+ *  additionally carry `metadata: { source: "subagent", childID, agent, state }` — injected by the
+ *  opencode `subagent` tool when its child session finishes, with `state` one of "completed" |
+ *  "error" | "cancelled". The mapper surfaces that terminal signal on `info.subagent`; the
+ *  `<subagent ...>` text block remains the part payload. */
 export type V2Synthetic = V2MessageBase & { type: "synthetic"; text?: string; description?: string }
 export type V2SystemMessage = V2MessageBase & { type: "system"; text?: string; description?: string }
 export type V2SkillMessage = V2MessageBase & { type: "skill"; skill?: string; name?: string; text?: string }
@@ -281,7 +286,7 @@ export type V2Compaction = V2MessageBase & {
  *  2. `model-switched`    `{ model, previous? }` (both `Model.Ref`)       → `switch` part (model)
  *  3. `location-switched` `{ location, projectID?, subpath?, previous? }` → `switch` part (location)
  *  4. `user`              `{ text, files, agents, skills }`               → text part
- *  5. `synthetic`         `{ text, description? }`                        → text/system part
+ *  5. `synthetic`         `{ text, description? }`                        → text/system part (+ `info.subagent` on subagent completions)
  *  6. `system`            `{ text, description? }`                        → system part
  *  7. `skill`             `{ skill, name, text }`                         → skill-activation part
  *  8. `shell`             `{ shellID, command, status, exit?, output? }`  → tool part (shell)
@@ -393,6 +398,29 @@ export function toMessageEnvelope(message: V2Message, sessionID: string): Messag
       ...(message.subpath ? { subpath: message.subpath } : {})
     })
   } else if (message.type === "synthetic") {
+    // A synthetic message can carry delegated-subagent completion metadata
+    // (`{ source: "subagent", childID, agent, state }`, injected by the opencode v2 `subagent`
+    // tool when its child finishes — see the V2Synthetic contract above). Surface that terminal
+    // signal on `info.subagent` (purely optional; v2 mapper only) so consumers can render the
+    // delegated task. The `<subagent ...>` text part below stays exactly as before — the
+    // structured signal now rides on `info` — and a synthetic without the metadata maps as
+    // today, with no `info.subagent`.
+    const subagent = message.metadata
+    if (subagent?.source === "subagent" && typeof subagent.childID === "string" && subagent.childID.length > 0) {
+      const state = subagent.state
+      // Only the three documented completion states are valid terminal signals. An absent or
+      // unknown `state` must NOT be defaulted to a terminal state (acceptance criterion #5 — a
+      // terminal state is never invented): the envelope degrades to the old mapping with no
+      // `info.subagent`, so a run with no reliable completion signal keeps its tool-derived
+      // in-flight status instead of snapping to a fabricated "completed".
+      if (state === "completed" || state === "error" || state === "cancelled") {
+        info.subagent = {
+          childID: subagent.childID,
+          ...(typeof subagent.agent === "string" ? { agent: subagent.agent } : {}),
+          state
+        }
+      }
+    }
     if (message.description) {
       // Synthetic messages carry a model-facing prompt plus a short human summary; with a
       // description they render like `system` messages (structured), otherwise as plain text.

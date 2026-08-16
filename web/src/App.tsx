@@ -11,6 +11,13 @@ import {
   isIndeterminateDeliveryError
 } from "./opencode2-client"
 import {
+  subagentCompletionDescription,
+  subagentRunFromCompletion,
+  subagentRunFromTool,
+  type AgentRunStatus,
+  type SubagentRun
+} from "./agentRuns"
+import {
   createDesktopOpenCodeEventSubscription,
   desktopProfileID,
   isAndroidPlatform,
@@ -360,10 +367,21 @@ function sameErrorRef(
   return left.type === right.type && left.message === right.message
 }
 
+/** Shallow `info.subagent` comparison: childID/agent/state arrive wholesale with each poll, like
+ *  the other assistant-level metadata above. */
+function sameSubagentRef(
+  left: MessageEnvelope["info"]["subagent"],
+  right: MessageEnvelope["info"]["subagent"]
+): boolean {
+  if (left === right) return true
+  if (!left || !right) return false
+  return left.childID === right.childID && left.agent === right.agent && left.state === right.state
+}
+
 /** Whether two envelopes carry the same OpenCode 2 assistant-level metadata (agent/model/finish/
- *  error/cost/tokens/retry). Shallow by design: these fields arrive wholesale with each poll, and a
- *  field-level comparison keeps reconciliation from churning message references — and the
- *  per-message render cache — whenever nothing a renderer could show actually changed. */
+ *  error/cost/tokens/retry/subagent). Shallow by design: these fields arrive wholesale with each
+ *  poll, and a field-level comparison keeps reconciliation from churning message references — and
+ *  the per-message render cache — whenever nothing a renderer could show actually changed. */
 export function sameEnvelopeMetadata(left: MessageEnvelope["info"], right: MessageEnvelope["info"]): boolean {
   return left.agent === right.agent
     && sameModelRef(left.model, right.model)
@@ -376,6 +394,7 @@ export function sameEnvelopeMetadata(left: MessageEnvelope["info"], right: Messa
     && left.retry?.attempt === right.retry?.attempt
     && left.retry?.at === right.retry?.at
     && sameErrorRef(left.retry?.error, right.retry?.error)
+    && sameSubagentRef(left.subagent, right.subagent)
 }
 
 function messagesHaveSameContent(left: MessageEnvelope[], right: MessageEnvelope[]): boolean {
@@ -1380,13 +1399,90 @@ function FallbackPartView({ part, timestamp, t }: { part: MessagePart; timestamp
   )
 }
 
+/** A delegated-subagent run rendered as its own structured card in the transcript (issue #10):
+ *  agent + description headline, a status pill from the shared run vocabulary, a live elapsed
+ *  clock while the run is in flight, the terminal result (collapsible) or a danger-toned error,
+ *  and an explicit "open child session" control. The card itself is deliberately NOT a button —
+ *  unlike the collapsed tool rows, nothing about the run opens on a whole-card click; navigation
+ *  is the small labelled control below. Status/elapsed freshness rides the existing poll and
+ *  event cadence; the only timer here is a local one-second clock for the live elapsed label. */
+function SubagentRunCard({
+  run,
+  onOpenChildSession,
+  openingChildID,
+  t
+}: {
+  run: SubagentRun
+  onOpenChildSession: (childID: string) => void
+  openingChildID: string | null
+  t: Translator
+}) {
+  const [expanded, setExpanded] = useState(false)
+  const live = isLiveSubagentStatus(run.status) && run.startedAt !== undefined
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (!live) return
+    const timer = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(timer)
+  }, [live])
+  const elapsed = run.startedAt !== undefined
+    ? t('detail.subagentElapsed', { time: formatRunDuration((run.endedAt ?? now) - run.startedAt) })
+    : null
+  const headline = run.description ?? run.agent ?? t('detail.subagentTask')
+  const longOutput = (run.output?.length ?? 0) > 240
+  return (
+    <div className={`subagent-run-card subagent-run-${run.status}`}>
+      <div className="subagent-run-head">
+        {run.agent && <span className="subagent-run-agent">{run.agent}</span>}
+        <span className="subagent-run-description">{headline}</span>
+        <span className={`subagent-run-status subagent-status-${run.status}`}>{run.status}</span>
+      </div>
+      {elapsed && (
+        <div className="subagent-run-meta">
+          <span className="subagent-run-elapsed">{elapsed}</span>
+        </div>
+      )}
+      {run.error && (
+        <div className="subagent-run-error">{run.error}</div>
+      )}
+      {run.output && run.status !== "failed" && (
+        <>
+          <div className={`subagent-run-result${expanded ? " expanded" : ""}`}>
+            <span className="subagent-run-result-caption">{t('detail.subagentResult')}</span>
+            <pre className="subagent-run-result-text">{run.output}</pre>
+          </div>
+          {longOutput && (
+            <button type="button" className="subagent-run-result-toggle" onClick={() => setExpanded((value) => !value)}>
+              {expanded ? t('detail.showLess') : t('detail.showMore')}
+            </button>
+          )}
+        </>
+      )}
+      <div className="subagent-run-actions">
+        <button
+          type="button"
+          className="btn-secondary compact subagent-run-open"
+          onClick={() => onOpenChildSession(run.childID)}
+          disabled={openingChildID === run.childID}
+          title={t('detail.openChildSession')}
+        >
+          {openingChildID === run.childID ? t('detail.openingChildSession') : t('detail.openChildSession')}
+        </button>
+      </div>
+    </div>
+  )
+}
+
 function MessagePartView({
   part,
   config,
   sessionID,
   directory,
   timestamp,
-  t
+  t,
+  subagentContext,
+  onOpenChildSession,
+  openingChildID
 }: {
   part: MessagePart
   config: ServerConfig
@@ -1394,6 +1490,12 @@ function MessagePartView({
   directory?: string
   timestamp?: string
   t: Translator
+  /** Transcript-wide subagent correlation (see SubagentContext). Optional so ActionGroupView's
+   *  modal reuse stays untouched — subagent run parts escape action groups, so the modal never
+   *  actually hosts one. */
+  subagentContext?: SubagentContext
+  onOpenChildSession?: (childID: string) => void
+  openingChildID?: string | null
 }) {
   if (part.type === "text") {
     if (!part.text) return null
@@ -1418,6 +1520,23 @@ function MessagePartView({
   }
 
   if (part.type === "tool") {
+    // A subagent tool part with a correlated child session renders as its own run card; a
+    // completion for the same child (info.subagent, injected by the subagent tool on finish)
+    // merges over it so the card goes terminal without waiting for the next poll. Parts without
+    // correlation (subagentRunFromTool → null) fall through to the generic tool row exactly as
+    // before — the degraded case never invents lifecycle state.
+    const subagentRun = subagentRunFromTool(part)
+    if (subagentRun) {
+      const completion = subagentContext?.completions.get(subagentRun.childID)
+      return (
+        <SubagentRunCard
+          run={mergeSubagentCompletion(subagentRun, completion)}
+          onOpenChildSession={onOpenChildSession ?? (() => undefined)}
+          openingChildID={openingChildID ?? null}
+          t={t}
+        />
+      )
+    }
     return <ToolPartView part={part} directory={directory} timestamp={timestamp} t={t} />
   }
 
@@ -1473,11 +1592,98 @@ const ACTION_GROUP_TYPES = new Set(["reasoning", "tool", "patch"])
 
 type TimelineItem = { kind: "action-group"; parts: MessagePart[] } | { kind: "part"; part: MessagePart }
 
+/* --- Delegated-subagent runs (issue #10): transcript cards -------------------
+   A `subagent` tool part with a correlated child session id is a parallel piece of work: it gets
+   its own run card instead of being collapsed into the "thought for Xs, ran N tools" row. The
+   helpers below assemble the run data; the renderers live near MessagePartView. */
+
+/** Whether a run is still in flight. Only these statuses keep the live elapsed clock ticking;
+ *  terminal runs (completed/failed/stopped) and idle freeze at their own timestamps. */
+function isLiveSubagentStatus(status: AgentRunStatus): boolean {
+  return status === "working" || status === "waiting" || status === "retrying"
+}
+
+/** Compact "1m 23s" style duration for run cards — plain digits, no locale inflection, matching
+ *  the raw timing the transcript already shows for tool durations. */
+function formatRunDuration(ms: number): string {
+  const total = Math.max(0, Math.round(ms / 1000))
+  const hours = Math.floor(total / 3600)
+  const minutes = Math.floor((total % 3600) / 60)
+  const seconds = total % 60
+  if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`
+  if (minutes > 0) return `${minutes}m ${seconds}s`
+  return `${seconds}s`
+}
+
+/** Merge a synthetic terminal completion (`info.subagent`, injected by the opencode `subagent`
+ *  tool when its child finishes) over a tool-derived run for the same child session id. The
+ *  completion's state is the server's own terminal word and wins; the tool run keeps supplying
+ *  the description/output/error/timing the completion signal does not carry. The agent stays the
+ *  tool input's stable agent id when the tool run carries one — the completion's `agent` is only
+ *  a fallback for a run whose tool part never surfaced an id. */
+function mergeSubagentCompletion(run: SubagentRun, completion: SubagentRun | undefined): SubagentRun {
+  if (!completion) return run
+  const merged: SubagentRun = { ...run, status: completion.status, endedAt: completion.endedAt ?? run.endedAt }
+  if (!merged.agent && completion.agent) merged.agent = completion.agent
+  return merged
+}
+
+/** Every child session id that has a tool-derived run card somewhere in the transcript. A
+ *  completion for one of these merges into that card; a completion for anything else renders as
+ *  its own compact card, otherwise a delegated task that finished before its tool part reached the
+ *  transcript would vanish entirely. */
+function collectSubagentToolChildIDs(messages: readonly MessageEnvelope[]): Set<string> {
+  const ids = new Set<string>()
+  for (const message of messages) {
+    for (const part of message.parts) {
+      const run = part.type === "tool" ? subagentRunFromTool(part) : null
+      if (run) ids.add(run.childID)
+    }
+  }
+  return ids
+}
+
+/** Collect the terminal completion signals carried on `info.subagent` across the whole rendered
+ *  transcript, keyed by child session id. A later completion for the same child is the later word
+ *  and replaces the earlier one. */
+function collectSubagentCompletions(messages: readonly MessageEnvelope[]): Map<string, SubagentRun> {
+  const completions = new Map<string, SubagentRun>()
+  for (const message of messages) {
+    const completion = subagentRunFromCompletion(message.info)
+    if (!completion) continue
+    const run: SubagentRun = { ...completion }
+    // Synthetic completions carry ONLY `time.created` on the wire (opencode `message-updater.ts`
+    // never sets `time.completed` for them): the completion's creation time IS the terminal time,
+    // so the merged card shows the real elapsed instead of freezing at the launch instant.
+    run.endedAt = message.info.time.created
+    // The headline reads the completion's own parts: the v2 mapper emits a structured `system`
+    // part carrying the child's short description on `description` (and the model-facing
+    // `<subagent ...>` block on `text`), so plain text extraction alone would come back empty.
+    const description = subagentCompletionDescription(message.parts)
+    if (!run.description && description) run.description = description
+    completions.set(run.childID, run)
+  }
+  return completions
+}
+
+/** Transcript-wide subagent correlation, computed once per rendered-message change and handed down
+ *  to the memoized bubble renderers: `completions` lets a working tool card go terminal the moment
+ *  the synthetic completion lands (no refetch), and `toolChildIDs` decides whether a completion
+ *  still needs its own compact card. */
+type SubagentContext = {
+  completions: Map<string, SubagentRun>
+  toolChildIDs: Set<string>
+}
+
 /** Walks a message's parts in order and collapses each run of consecutive thinking/tool-call/edit parts into a
  *  single action-group item, alternating with the output text parts as they actually occurred — so a turn that
  *  thinks, calls a tool, replies, thinks again, calls another tool, and replies again renders as two separate
  *  "thought for Xs, used N tools" rows interleaved with their two outputs, rather than one merged blob. A run of
- *  just one action part skips the group wrapper entirely and renders as that part directly. */
+ *  just one action part skips the group wrapper entirely and renders as that part directly.
+ *  Delegated-subagent tool parts escape the collapse entirely: a parallel run has its own lifecycle and its own
+ *  card, so burying it in a group summary (whose modal only renders on demand) would hide a live run. Parts that
+ *  fail to correlate to a child session (`subagentRunFromTool` → null) stay buffered and render as today's
+ *  generic tool row. */
 function buildMessageTimeline(parts: MessagePart[]): TimelineItem[] {
   const items: TimelineItem[] = []
   let buffer: MessagePart[] = []
@@ -1490,7 +1696,12 @@ function buildMessageTimeline(parts: MessagePart[]): TimelineItem[] {
     if (part.type === "step-start" || part.type === "step-finish") continue
     if (part.type === "text" && !part.text) continue
     if (ACTION_GROUP_TYPES.has(part.type)) {
-      buffer.push(part)
+      if (part.type === "tool" && subagentRunFromTool(part)) {
+        flush()
+        items.push({ kind: "part", part })
+      } else {
+        buffer.push(part)
+      }
     } else {
       flush()
       items.push({ kind: "part", part })
@@ -1732,7 +1943,7 @@ function messageActivityTime(message: MessageEnvelope): number {
 }
 
 function toSessionView(session: Session, status?: SessionStatus, activityTime = session.time.updated): SessionView {
-  return {
+  const view: SessionView = {
     id: session.id,
     title: session.title,
     directory: session.directory,
@@ -1745,6 +1956,22 @@ function toSessionView(session: Session, status?: SessionStatus, activityTime = 
     revertMessageID: session.revert?.messageID,
     external: session.external
   }
+  // The v2 mapper attaches `parentID` non-enumerably (it must never leak into wire payloads or
+  // equality comparisons), so a plain field copy would silently drop it — the session list badge
+  // for child sessions reads it from the view, so surface it the same non-enumerable way.
+  if (session.parentID) Object.defineProperty(view, "parentID", { value: session.parentID, enumerable: false })
+  return view
+}
+
+/** Shallow-copy a session view with the non-enumerable `parentID` preserved. `toSessionView` is
+ *  the single definition point for that property, and it attaches it via Object.defineProperty —
+ *  a plain `{...item}` spread drops it, which would make a child session's badge vanish until
+ *  the next poll. */
+function copySessionView(view: SessionView, patch: Partial<SessionView>): SessionView {
+  const copied = { ...view, ...patch }
+  const parentID = (view as SessionView & { parentID?: string }).parentID
+  if (parentID) Object.defineProperty(copied, "parentID", { value: parentID, enumerable: false })
+  return copied
 }
 
 function formatLimit(value?: number): string {
@@ -2199,7 +2426,10 @@ function ConversationRunView({
   actions,
   onRevertMessage,
   revertDisabled,
-  t
+  t,
+  subagentContext,
+  onOpenChildSession,
+  openingChildID
 }: {
   items: TimelineItem[]
   messagesByID: Map<string, MessageEnvelope & { text: string }>
@@ -2210,11 +2440,28 @@ function ConversationRunView({
   onRevertMessage: (messageID: string) => void
   revertDisabled: boolean
   t: Translator
+  subagentContext: SubagentContext
+  onOpenChildSession: (childID: string) => void
+  openingChildID: string | null
 }) {
   const fallback = [...messagesByID.values()].pop()
   const timestampFor = (part: MessagePart) => {
     const owner = (part.messageID && messagesByID.get(part.messageID)) || fallback
     return owner ? formatTime(owner.info.time.created) : undefined
+  }
+  // The run bubble merges several messages, and a synthetic subagent completion is its own message
+  // inside the run — a completion whose tool card is absent must surface as a compact card here,
+  // exactly as MessageArticle renders it for a standalone message.
+  const orphanCompletions: SubagentRun[] = []
+  const seen = new Set<string>()
+  for (const message of messagesByID.values()) {
+    const subagent = message.info.subagent
+    if (!subagent || seen.has(subagent.childID) || subagentContext.toolChildIDs.has(subagent.childID)) continue
+    const run = subagentContext.completions.get(subagent.childID)
+    if (run) {
+      seen.add(subagent.childID)
+      orphanCompletions.push(run)
+    }
   }
   // The bubble shows the whole run, so copying it means copying every message in it. Handing over the
   // last one copied a fraction of what is on screen, and nothing at all whenever the run happened to
@@ -2247,9 +2494,21 @@ function ConversationRunView({
             directory={directory}
             timestamp={timestampFor(item.part)}
             t={t}
+            subagentContext={subagentContext}
+            onOpenChildSession={onOpenChildSession}
+            openingChildID={openingChildID}
           />
         )
       )}
+      {orphanCompletions.map((run) => (
+        <SubagentRunCard
+          key={run.childID}
+          run={run}
+          onOpenChildSession={onOpenChildSession}
+          openingChildID={openingChildID}
+          t={t}
+        />
+      ))}
     </MessageContextMenu>
   )
 }
@@ -2266,7 +2525,10 @@ const MessageArticle = memo(function MessageArticle({
   revertDisabled,
   t,
   onCancelQueuedMessage,
-  cancellingInboxIDs
+  cancellingInboxIDs,
+  subagentContext,
+  onOpenChildSession,
+  openingChildID
 }: {
   message: MessageEnvelope & { text: string }
   config: ServerConfig
@@ -2277,8 +2539,18 @@ const MessageArticle = memo(function MessageArticle({
   t: Translator
   onCancelQueuedMessage: (message: MessageEnvelope) => void
   cancellingInboxIDs: ReadonlySet<string>
+  subagentContext: SubagentContext
+  onOpenChildSession: (childID: string) => void
+  openingChildID: string | null
 }) {
   const cancelableInboxID = message.info.delivery === "queue" ? queuedInboxItemID(message) : null
+  // A terminal completion whose tool part never reached the transcript (its child session id has
+  // no run card anywhere) must still surface as its own compact card — the synthetic completion
+  // is the only trace of the delegated task. When the card DOES exist, the completion merges into
+  // it at the part renderer and nothing extra is drawn here.
+  const orphanCompletion = message.info.subagent && !subagentContext.toolChildIDs.has(message.info.subagent.childID)
+    ? subagentContext.completions.get(message.info.subagent.childID) ?? null
+    : null
   return (
     <MessageContextMenu
       text={message.text}
@@ -2306,8 +2578,19 @@ const MessageArticle = memo(function MessageArticle({
             directory={directory}
             timestamp={formatTime(message.info.time.created)}
             t={t}
+            subagentContext={subagentContext}
+            onOpenChildSession={onOpenChildSession}
+            openingChildID={openingChildID}
           />
         )
+      )}
+      {orphanCompletion && (
+        <SubagentRunCard
+          run={orphanCompletion}
+          onOpenChildSession={onOpenChildSession}
+          openingChildID={openingChildID}
+          t={t}
+        />
       )}
       {(message.info.error || message.info.finish === "error") && (
         <div className="message-error-row">
@@ -2367,7 +2650,10 @@ const MessagesPane = memo(function MessagesPane({
   onJumpToTop,
   onJumpToBottom,
   onCancelQueuedMessage,
-  cancellingInboxIDs
+  cancellingInboxIDs,
+  subagentContext,
+  onOpenChildSession,
+  openingChildID
 }: {
   loadingSessionID: string | null
   loadedSessionID: string | null
@@ -2397,6 +2683,9 @@ const MessagesPane = memo(function MessagesPane({
   onJumpToBottom: () => void
   onCancelQueuedMessage: (message: MessageEnvelope) => void
   cancellingInboxIDs: ReadonlySet<string>
+  subagentContext: SubagentContext
+  onOpenChildSession: (childID: string) => void
+  openingChildID: string | null
 }) {
   return (
     <div className="messages-wrap">
@@ -2433,7 +2722,7 @@ const MessagesPane = memo(function MessagesPane({
           <>
             {timelineGroups.map((group) =>
               group.kind === "message" ? (
-                <MessageArticle key={group.message.info.id} message={group.message} config={config} directory={directory} actions={actions} onRevertMessage={onRevertMessage} revertDisabled={revertDisabled} t={t} onCancelQueuedMessage={onCancelQueuedMessage} cancellingInboxIDs={cancellingInboxIDs} />
+                <MessageArticle key={group.message.info.id} message={group.message} config={config} directory={directory} actions={actions} onRevertMessage={onRevertMessage} revertDisabled={revertDisabled} t={t} onCancelQueuedMessage={onCancelQueuedMessage} cancellingInboxIDs={cancellingInboxIDs} subagentContext={subagentContext} onOpenChildSession={onOpenChildSession} openingChildID={openingChildID} />
               ) : (
                 <ConversationRunView
                   key={group.key}
@@ -2446,6 +2735,9 @@ const MessagesPane = memo(function MessagesPane({
                   onRevertMessage={onRevertMessage}
                   revertDisabled={revertDisabled}
                   t={t}
+                  subagentContext={subagentContext}
+                  onOpenChildSession={onOpenChildSession}
+                  openingChildID={openingChildID}
                 />
               )
             )}
@@ -3040,6 +3332,18 @@ function App() {
       return session.title.toLowerCase().includes(text) || session.directory.toLowerCase().includes(text)
     })
   }, [sessions, query])
+  // Child-session badges (issue #10): `toSessionView` carries `parentID` non-enumerably, so the
+  // badge reads it off the view rows and resolves the parent's title from the same list — cheap
+  // because both sides are already in memory. Recomputed whenever the list changes identity.
+  const parentInfo = useMemo(() => {
+    const info = new Map<string, { parentID: string; parentTitle?: string }>()
+    const titles = new Map(sessions.map((session) => [session.id, session.title]))
+    for (const session of sessions) {
+      const parentID = (session as SessionView & { parentID?: string }).parentID
+      if (parentID) info.set(session.id, { parentID, parentTitle: titles.get(parentID) })
+    }
+    return info
+  }, [sessions])
   const displayedCommands = useMemo(() => {
     if (commandFilter === "skill") return commands.filter((command) => command.source === "skill")
     return commands
@@ -3115,6 +3419,15 @@ function App() {
       .map(toRenderedMessage)
       .filter((message) => message.text || message.parts.some((part) => part.type !== "step-start" && part.type !== "step-finish"))
   }, [config.backend, messages, optimisticUserMessages, queuedInboxMessages, selectedSession?.revertMessageID])
+
+  // Transcript-wide subagent correlation (issue #10): terminal completions carried on
+  // info.subagent and the set of child ids that have a run card. Recomputes only when the rendered
+  // transcript actually changes, so the memoized bubble renderers below keep their referential
+  // stability across polls that change nothing.
+  const subagentContext = useMemo<SubagentContext>(() => ({
+    completions: collectSubagentCompletions(renderedMessages),
+    toolChildIDs: collectSubagentToolChildIDs(renderedMessages)
+  }), [renderedMessages])
 
   const timelineGroups = useMemo(() => groupRenderedMessages(renderedMessages), [renderedMessages])
 
@@ -3392,7 +3705,17 @@ function App() {
           ])
       const scopedSessions = new Map(sessionLists.flat().map((session) => [session.id, session]))
       const statuses = Object.assign({}, ...statusMaps)
-      const hydratedItems = items.map((session) => ({ ...session, ...scopedSessions.get(session.id), project: session.project }))
+      // The v2 mapper attaches `parentID` non-enumerably (it must never leak into wire payloads or
+      // equality comparisons), so the spread below would silently drop it — object spread copies only
+      // enumerable own properties. Child sessions reach the list only through this hydration path
+      // (a refresh replaces their just-inserted rows), and the badge reads `parentID` from the view,
+      // so surface it the same non-enumerable way `toSessionView` does.
+      const hydratedItems = items.map((session) => {
+        const parentID = session.parentID
+        const hydrated = { ...session, ...scopedSessions.get(session.id), project: session.project }
+        if (parentID) Object.defineProperty(hydrated, "parentID", { value: parentID, enumerable: false })
+        return hydrated
+      })
       const activityTimes = await loadSessionActivityTimes(hydratedItems)
       const tombstoneKey = refreshContext.profileID + "\u0000" + refreshContext.configKey
       const persistedTombstoneKey = tombstoneNamespaceKey(refreshContext.profileID, refreshContext.configKey)
@@ -3764,7 +4087,7 @@ function App() {
       if (config.backend === "opencode" || config.backend === "opencode2") await loadSelected(selectedSession.id, selectedSession.directory, true)
       await refreshSessions(true)
       if (revertedSession) {
-        setSessions((current) => current.map((item) => item.id === revertedSession.id ? { ...item, revertMessageID: revertedSession.revert?.messageID } : item))
+        setSessions((current) => current.map((item) => item.id === revertedSession.id ? copySessionView(item, { revertMessageID: revertedSession.revert?.messageID }) : item))
       }
     } catch (err) {
       if (isLeaseContextCurrent(lease)) setRuntimeError((err as Error).message)
@@ -4026,7 +4349,7 @@ function App() {
       const session = await api.revertMessage(config, selectedSession.id, messageID, selectedSession.directory)
       await loadSelected(selectedSession.id, selectedSession.directory, true)
       await refreshSessions(true)
-      if (isLeaseContextCurrent(lease)) setSessions((current) => current.map((item) => item.id === session.id ? { ...item, revertMessageID: session.revert?.messageID } : item))
+      if (isLeaseContextCurrent(lease)) setSessions((current) => current.map((item) => item.id === session.id ? copySessionView(item, { revertMessageID: session.revert?.messageID }) : item))
     } catch (err) {
       if (isLeaseContextCurrent(lease)) setRuntimeError((err as Error).message)
     } finally {
@@ -4238,6 +4561,40 @@ function App() {
     const session = selectedSessionRef.current
     if (session) void openSessionRef.current(session.id, session.directory)
   }, [])
+
+  /** Opening a child session needs its directory, which the sessions list usually already has; when
+   *  the child is not listed (deleted, pruned, or never surfaced), the directory is fetched lazily
+   *  from the server on demand — one request, only when the user actually presses the button. */
+  const openingChildIDRef = useRef<string | null>(null)
+  const [openingChildID, setOpeningChildID] = useState<string | null>(null)
+  const openChildSessionRef = useRef<(childID: string) => void>(() => undefined)
+  const handleOpenChildSession = useCallback((childID: string) => {
+    openChildSessionRef.current(childID)
+  }, [])
+  openChildSessionRef.current = (childID: string) => {
+    if (openingChildIDRef.current === childID) return
+    const known = sessions.find((session) => session.id === childID)
+    const open = (directory: string) => void openSessionRef.current(childID, directory).catch(() => undefined)
+    if (known) {
+      open(known.directory)
+      return
+    }
+    openingChildIDRef.current = childID
+    setOpeningChildID(childID)
+    void (async () => {
+      try {
+        const child = await getSessionV2(config, childID)
+        if (!child) return
+        open(child.directory)
+      } catch { /* the child is gone or unreachable; the button stays available to retry */ }
+      finally {
+        if (openingChildIDRef.current === childID) {
+          openingChildIDRef.current = null
+          setOpeningChildID(null)
+        }
+      }
+    })()
+  }
 
   const handleSessionsJumpToTop = useCallback(() => {
     window.scrollTo({ top: 0, behavior: "smooth" })
@@ -5768,6 +6125,7 @@ function App() {
     capabilities,
     language,
     t,
+    parentInfo,
     onOpen: (session: SessionView) => void openSession(session.id, session.directory).catch(() => undefined),
     onRenameValueChange: setRenameValue,
     onRename: (session: SessionView) => void renameSession(session.id, renameValue, session.directory).catch(() => undefined),
@@ -6300,6 +6658,9 @@ function App() {
             onLeaseChanged={handleLeaseChanged}
             onCancelQueuedMessage={cancelQueuedMessage}
             cancellingInboxIDs={cancellingInboxIDs}
+            subagentContext={subagentContext}
+            onOpenChildSession={handleOpenChildSession}
+            openingChildID={openingChildID}
           />
           <SessionComposer
             selected={Boolean(selectedSession) && sessionActionPending !== "fork"}
