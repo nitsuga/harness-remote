@@ -119,7 +119,7 @@ const INBOX_QUEUED_FANOUT_CAP = 50
 // The attention-inbox context (type + value) lives in ./attentionInboxContext so the panel
 // components can import it without a module cycle: App.tsx imports the session list, which renders
 // the panel, which would otherwise have to import the context back from App.tsx.
-import { AttentionInboxContext } from "./attentionInboxContext"
+import { AttentionInboxContext, type QueuedSessionEntry } from "./attentionInboxContext"
 
 function readSessionTombstones(): Map<string, Set<string>> {
   const result = new Map<string, Set<string>>()
@@ -2550,7 +2550,9 @@ const MessageArticle = memo(function MessageArticle({
   revertDisabled,
   t,
   onCancelQueuedMessage,
+  onSendQueuedMessage,
   cancellingInboxIDs,
+  sendingInboxIDs,
   subagentContext,
   onOpenChildSession,
   openingChildID
@@ -2563,7 +2565,9 @@ const MessageArticle = memo(function MessageArticle({
   revertDisabled: boolean
   t: Translator
   onCancelQueuedMessage: (message: MessageEnvelope) => void
+  onSendQueuedMessage: (message: MessageEnvelope) => void
   cancellingInboxIDs: ReadonlySet<string>
+  sendingInboxIDs: ReadonlySet<string>
   subagentContext: SubagentContext
   onOpenChildSession: (childID: string) => void
   openingChildID: string | null
@@ -2628,15 +2632,26 @@ const MessageArticle = memo(function MessageArticle({
         <div className="message-delivery-notice">
           <span>{t('detail.queuedPrompt')}</span>
           {cancelableInboxID && (
-            <button
-              type="button"
-              className="message-cancel-queued"
-              onClick={() => onCancelQueuedMessage(message)}
-              disabled={cancellingInboxIDs.has(cancelableInboxID)}
-              title={t('detail.cancelQueuedPrompt')}
-            >
-              {t('detail.cancelQueuedPrompt')}
-            </button>
+            <>
+              <button
+                type="button"
+                className="message-cancel-queued"
+                onClick={() => onSendQueuedMessage(message)}
+                disabled={sendingInboxIDs.has(cancelableInboxID)}
+                title={t('inbox.steerPrompt')}
+              >
+                {t('inbox.steerPrompt')}
+              </button>
+              <button
+                type="button"
+                className="message-cancel-queued"
+                onClick={() => onCancelQueuedMessage(message)}
+                disabled={cancellingInboxIDs.has(cancelableInboxID)}
+                title={t('detail.cancelQueuedPrompt')}
+              >
+                {t('detail.cancelQueuedPrompt')}
+              </button>
+            </>
           )}
         </div>
       )}
@@ -2675,7 +2690,9 @@ const MessagesPane = memo(function MessagesPane({
   onJumpToTop,
   onJumpToBottom,
   onCancelQueuedMessage,
+  onSendQueuedMessage,
   cancellingInboxIDs,
+  sendingInboxIDs,
   subagentContext,
   onOpenChildSession,
   openingChildID
@@ -2707,7 +2724,9 @@ const MessagesPane = memo(function MessagesPane({
   onJumpToTop: () => void
   onJumpToBottom: () => void
   onCancelQueuedMessage: (message: MessageEnvelope) => void
+  onSendQueuedMessage: (message: MessageEnvelope) => void
   cancellingInboxIDs: ReadonlySet<string>
+  sendingInboxIDs: ReadonlySet<string>
   subagentContext: SubagentContext
   onOpenChildSession: (childID: string) => void
   openingChildID: string | null
@@ -2747,7 +2766,7 @@ const MessagesPane = memo(function MessagesPane({
           <>
             {timelineGroups.map((group) =>
               group.kind === "message" ? (
-                <MessageArticle key={group.message.info.id} message={group.message} config={config} directory={directory} actions={actions} onRevertMessage={onRevertMessage} revertDisabled={revertDisabled} t={t} onCancelQueuedMessage={onCancelQueuedMessage} cancellingInboxIDs={cancellingInboxIDs} subagentContext={subagentContext} onOpenChildSession={onOpenChildSession} openingChildID={openingChildID} />
+                <MessageArticle key={group.message.info.id} message={group.message} config={config} directory={directory} actions={actions} onRevertMessage={onRevertMessage} revertDisabled={revertDisabled} t={t} onCancelQueuedMessage={onCancelQueuedMessage} onSendQueuedMessage={onSendQueuedMessage} cancellingInboxIDs={cancellingInboxIDs} sendingInboxIDs={sendingInboxIDs} subagentContext={subagentContext} onOpenChildSession={onOpenChildSession} openingChildID={openingChildID} />
               ) : (
                 <ConversationRunView
                   key={group.key}
@@ -2939,7 +2958,7 @@ function App() {
   const [inboxItems, setInboxItems] = useState<AttentionItem[]>([])
   /** Per-session queued-prompt listings (`GET /api/session/{id}/inbox`) for the queued-prompt
    *  operations (steer/queue/cancel); sessions with nothing queued are absent. v2 only. */
-  const [queuedInboxBySession, setQueuedInboxBySession] = useState<Map<string, V2InboxItem[]>>(new Map())
+  const [queuedInboxBySession, setQueuedInboxBySession] = useState<Map<string, QueuedSessionEntry>>(new Map())
   /** Un-notified attention count shown as a badge on the inbox entry (web/mobile; the designer
    *  wires the visual in the panel lane). Completions never count: they are list items, not
    *  demands on the user. */
@@ -3099,6 +3118,9 @@ function App() {
   const cancellingInboxIDsRef = useRef<ReadonlySet<string>>(new Set())
   const [cancellingInboxIDs, setCancellingInboxIDs] = useState<ReadonlySet<string>>(() => new Set())
   cancellingInboxIDsRef.current = cancellingInboxIDs
+  const steeringInboxIDsRef = useRef<ReadonlySet<string>>(new Set())
+  const [steeringInboxIDs, setSteeringInboxIDs] = useState<ReadonlySet<string>>(() => new Set())
+  steeringInboxIDsRef.current = steeringInboxIDs
   const [todos, setTodos] = useState<TodoItem[]>([])
   const [diffFiles, setDiffFiles] = useState<DiffFile[]>([])
   const [pendingQuestions, setPendingQuestions] = useState<QuestionRequest[]>([])
@@ -3376,8 +3398,10 @@ function App() {
       if (!isLeaseContextCurrent(lease)) return
       setQueuedInboxBySession((current) => {
         const next = new Map(current)
-        const items = (next.get(sessionID) ?? []).filter((entry) => entry.id !== inboxID)
-        if (items.length) next.set(sessionID, items); else next.delete(sessionID)
+        const entry = next.get(sessionID)
+        if (!entry) return current
+        const items = entry.items.filter((item) => item.id !== inboxID)
+        if (items.length) next.set(sessionID, { ...entry, items }); else next.delete(sessionID)
         return next
       })
       setActionNotice(t(op === "cancel" ? 'inbox.cancelPrompt' : op === "steer" ? 'inbox.steerPrompt' : 'inbox.queuePrompt'))
@@ -4017,16 +4041,20 @@ function App() {
       // Queued-prompt fan-out (v2 only, silent-fail): the queued operations (steer/queue/cancel)
       // target server inbox items, so keep a per-session listing for a bounded subset of sessions.
       // Sessions with nothing queued stay absent from the map. Never blocks the poll: it resolves
-      // in the background and only lands when this refresh is still current.
+      // in the background and only lands when this refresh is still current. Entries carry the
+      // session metadata the inbox panel needs to surface queued-only sessions (issue A).
       if (config.backend === "opencode2") {
         const queuedTargets = mapped.slice(0, INBOX_QUEUED_FANOUT_CAP)
         void Promise.all(queuedTargets.map(async (session) => {
           const items = await listInboxV2(config, session.id, session.directory).catch(() => [] as V2InboxItem[])
-          return { sessionID: session.id, items } as const
+          return { session, items } as const
         })).then((results) => {
           if (!refreshIsCurrent()) return
-          const next = new Map<string, V2InboxItem[]>()
-          for (const result of results) if (result.items.length > 0) next.set(result.sessionID, result.items)
+          const next = new Map<string, QueuedSessionEntry>()
+          for (const { session, items } of results) {
+            if (items.length === 0) continue
+            next.set(session.id, { sessionID: session.id, title: session.title, backend: config.backend, agent: session.agent, items })
+          }
           setQueuedInboxBySession(next)
         })
       }
@@ -4857,6 +4885,50 @@ function App() {
         if (cancellingInboxIDsRef.current.has(inboxID)) {
           cancellingInboxIDsRef.current = new Set([...cancellingInboxIDsRef.current].filter((id) => id !== inboxID))
           setCancellingInboxIDs(cancellingInboxIDsRef.current)
+        }
+      }
+    })()
+  }
+
+  /** Send now (steer) for a queued transcript row: deliver the server inbox item immediately instead
+   *  of waiting for the next input boundary. Mirrors cancelQueuedMessage — same in-flight guard, same
+   *  definite-success reconciliation — with a separate in-flight set so both ops can race a row. */
+  const steerQueuedMessageRef = useRef<(message: MessageEnvelope) => void>(() => undefined)
+  const steerQueuedMessage = useCallback((message: MessageEnvelope) => {
+    steerQueuedMessageRef.current(message)
+  }, [])
+  steerQueuedMessageRef.current = (message: MessageEnvelope) => {
+    const inboxID = queuedInboxItemID(message)
+    const session = selectedSessionRef.current
+    if (!inboxID || !session || session.id !== message.info.sessionID) return
+    const steerContext = { profileID: activeProfileID, configKey: configKey(config), sessionID: session.id }
+    if (!mutationCoordinator.isContextCurrent(steerContext)) return
+    if (steeringInboxIDsRef.current.has(inboxID)) return
+    steeringInboxIDsRef.current = new Set(steeringInboxIDsRef.current).add(inboxID)
+    setSteeringInboxIDs(steeringInboxIDsRef.current)
+    setRuntimeError(null)
+    void (async () => {
+      try {
+        await api.steerInboxItem(config, session.id, inboxID, session.directory)
+        if (!mutationCoordinator.isContextCurrent(steerContext)) return
+        // Definite success (204): drop the row now (the steered message arrives as history through
+        // the reload), then reconcile so the transcript converges.
+        setQueuedInboxMessages((current) => {
+          const remaining = current.filter((candidate) => queuedInboxItemID(candidate) !== inboxID)
+          return remaining.length === current.length ? current : remaining
+        })
+        setOptimisticUserMessages((current) => {
+          const remaining = current.filter((candidate) => queuedInboxItemID(candidate) !== inboxID)
+          return remaining.length === current.length ? current : remaining
+        })
+        void loadSelected(session.id, session.directory, true).catch(() => undefined)
+        void refreshSessions(false, undefined, true).catch(() => undefined)
+      } catch (err) {
+        if (mutationCoordinator.isContextCurrent(steerContext)) setRuntimeError((err as Error).message)
+      } finally {
+        if (steeringInboxIDsRef.current.has(inboxID)) {
+          steeringInboxIDsRef.current = new Set([...steeringInboxIDsRef.current].filter((id) => id !== inboxID))
+          setSteeringInboxIDs(steeringInboxIDsRef.current)
         }
       }
     })()
@@ -6479,7 +6551,9 @@ function App() {
     <AttentionInboxContext.Provider value={{
       items: inboxItems,
       queuedBySession: queuedInboxBySession,
-      badge: inboxBadge,
+      // The badge covers BOTH alert surfaces: undismissed attention items and every queued prompt
+      // (issue A) — a queued prompt is exactly as actionable as a pending form.
+      badge: inboxBadge + [...queuedInboxBySession.values()].reduce((sum, entry) => sum + entry.items.length, 0),
       dismiss: dismissAttentionItem,
       open: openAttentionItem,
       cancelQueued,
@@ -7009,6 +7083,8 @@ function App() {
             onLeaseChanged={handleLeaseChanged}
             onCancelQueuedMessage={cancelQueuedMessage}
             cancellingInboxIDs={cancellingInboxIDs}
+            onSendQueuedMessage={steerQueuedMessage}
+            sendingInboxIDs={steeringInboxIDs}
             subagentContext={subagentContext}
             onOpenChildSession={handleOpenChildSession}
             openingChildID={openingChildID}

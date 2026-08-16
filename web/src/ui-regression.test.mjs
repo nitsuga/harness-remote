@@ -17,6 +17,7 @@ const attentionPersistence = readFileSync(new URL('./attentionPersistence.ts', i
 const mutationCoordinator = readFileSync(new URL('./session-mutation-coordinator.ts', import.meta.url), 'utf8')
 const opencode2Client = readFileSync(new URL('./opencode2-client.ts', import.meta.url), 'utf8')
 const opencode2Mappers = readFileSync(new URL('./opencode2-mappers.ts', import.meta.url), 'utf8')
+const attentionPanel = readFileSync(new URL('./components/attention-inbox.tsx', import.meta.url), 'utf8')
 
 assert.match(styles, /button\s*\{[\s\S]*?cursor:\s*pointer;/, 'enabled buttons must advertise that they can be pressed')
 assert.match(styles, /button:disabled\s*\{[\s\S]*?cursor:\s*not-allowed;/, 'disabled buttons must retain the blocked cursor')
@@ -398,6 +399,19 @@ assert.match(
   app,
   /message\.info\.delivery === "queue" && \([\s\S]*?<div className="message-delivery-notice">[\s\S]*?\{t\('detail\.queuedPrompt'\)\}/,
   'every queued row must render the localized queue status in the shared message view'
+)
+// The queued row carries both actions inline — Send now (steer) and Cancel — so a queued prompt is
+// actionable from the transcript itself, not only from the attention-inbox panel. The Send now op
+// must reuse the inbox steer route (never a duplicate prompt send) with its own in-flight guard.
+assert.match(
+  app,
+  /onClick=\{\(\) => onSendQueuedMessage\(message\)\}[\s\S]*?disabled=\{sendingInboxIDs\.has\(cancelableInboxID\)\}/,
+  'queued rows must offer Send now (steer) inline with an in-flight guard'
+)
+assert.match(
+  app,
+  /await api\.steerInboxItem\(config, session\.id, inboxID, session\.directory\)[\s\S]*?setQueuedInboxMessages\(/,
+  'inline Send now must steer the server inbox item and drop the row on definite success'
 )
 
 // Compaction correlates terminal state ONLY with the exact admission/request id — no baseline or
@@ -1210,6 +1224,37 @@ for (const member of [
 // The context must NOT live in App.tsx: a cycle would form because App imports the session list,
 // which renders the panel, which imports the context (App → session-list → panel → App).
 assert.ok(!app.includes('export const AttentionInboxContext'), 'the inbox context must live outside App.tsx to break the module cycle')
+// --- Queued-prompt surfacing (issue A) ----------------------------------------------------------
+// A session whose ONLY inbox content is queued prompts must still surface: the panel appends
+// queued-only sessions from the queued map (pre-A, the tree was built from attention items alone,
+// so queued rows were structurally invisible for queued-only sessions), the queued fan-out carries
+// the session metadata the panel needs, and queued activity opens the panel and counts in the badge
+// exactly like a pending form.
+assert.match(
+  attentionPanel,
+  /queuedBySession\.get\(sessionId\)\?\.items \?\? \[\]/,
+  'queued entries must attach from the queued map to every session bucket'
+)
+assert.match(
+  attentionPanel,
+  /for \(const \[sessionId, entry\] of queuedBySession\)/,
+  'the panel must append sessions that exist only in the queued map'
+)
+assert.match(
+  attentionPanel,
+  /inbox\.items\.length > 0 \|\| inbox\.queuedBySession\.size > 0/,
+  'queued activity must open the panel exactly like attention items'
+)
+assert.match(
+  app,
+  /badge: inboxBadge \+ \[\.\.\.queuedInboxBySession\.values\(\)\]\.reduce\(/,
+  'the inbox badge must count queued prompts as actionable content'
+)
+assert.match(
+  app,
+  /sessionID: session\.id, title: session\.title, backend: config\.backend, agent: session\.agent, items/,
+  'the queued fan-out must carry session metadata so queued-only sessions can be grouped'
+)
 // Queued-prompt operations are real server mutations: they must take the coordinator's inbox lease
 // through the component's established lease helpers (acquireMutation wraps acquireLease and keeps
 // the lock signal in step with the existing session mutations).
