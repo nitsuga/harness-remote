@@ -10,3 +10,6 @@ web/dist-electron/
 web/release/
 web/release-*/
 .smoke-state/
+
+# deepwork session state (git-local)
+.slim/deepwork/
