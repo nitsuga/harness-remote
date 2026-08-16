@@ -4501,6 +4501,21 @@ function App() {
     )
   }
 
+  /** Retire optimistic user bubbles that the given fetched messages prove server-admitted. The
+   *  full-load path already does this, but the seed and the 2s tail refresh append the server's
+   *  copy of a just-sent prompt BEFORE the full load lands — without retiring the optimistic row
+   *  here, the same prompt renders as two bubbles until the next full load. Queued prompts are
+   *  not in the transcript (the server holds them in the inbox until delivered), so the inbox
+   *  rows must join the match source: their server id retires the optimistic row (by durable id,
+   *  or by the same text guard when the admission response was lost) the moment the queued row
+   *  exists. */
+  const retireOptimisticUserRows = (source: MessageEnvelope[]) => {
+    setOptimisticUserMessages((current) => {
+      const remaining = current.filter((message) => !hasMatchingUserMessage(source, message))
+      return remaining.length === current.length ? current : remaining
+    })
+  }
+
   /** Seed-only tail refresh (issue #52 tail cadence): the coalesced full-reload cycle takes ~10s+
    *  on a long transcript, so a part committed to the newest message mid-cycle (e.g. a SECOND
    *  subagent launch in the same turn) would not paint until that cycle ends. Re-fetch the cheap
@@ -4524,6 +4539,10 @@ function App() {
         loadedMessagesRef.current = merged
         return merged
       })
+      // A just-sent prompt's server copy can land in the tail before the full load retires the
+      // optimistic bubble — retire it here (matching queued inbox rows too) so the prompt never
+      // renders twice.
+      retireOptimisticUserRows([...tail, ...queuedInboxMessages])
     } catch {
       // Ignore: the coalesced full reload stays authoritative.
     }
@@ -4573,6 +4592,10 @@ function App() {
           loadedMessagesRef.current = merged
           return merged
         })
+        // A just-sent prompt's server copy can land in the seed before the full load retires the
+        // optimistic bubble — retire it here (matching queued inbox rows too) so the prompt never
+        // renders twice.
+        retireOptimisticUserRows([...tail, ...queuedInboxMessages])
       } catch {
         // Ignore: the full reload below is authoritative.
       }

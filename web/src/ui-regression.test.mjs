@@ -1191,6 +1191,10 @@ assert.ok(app.includes('refreshSelectedSessionTail(selected.id, selected.directo
   'the SSE debounced refresh must also run the seed-only tail refresh')
 assert.ok(app.includes('refreshSelectedSessionTail(selectedSession.id, selectedSession.directory)'),
   'the 3.5s poll must also run the seed-only tail refresh')
+assert.ok(app.includes('retireOptimisticUserRows([...tail, ...queuedInboxMessages])'),
+  'the seed and tail refresh must retire optimistic bubbles against the tail AND queued inbox rows, or a sent (or queued) prompt renders twice')
+assert.ok(app.includes('const retireOptimisticUserRows = (source: MessageEnvelope[]) =>'),
+  'the optimistic retirement helper must exist for the seed/tail refresh paths')
 assert.ok(app.includes('mergeNewestTail,'),
   'the subagentLive import block must ship mergeNewestTail to loadSelected')
 
