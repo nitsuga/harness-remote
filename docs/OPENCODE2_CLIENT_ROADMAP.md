@@ -36,13 +36,13 @@ The remaining work is primarily richer visibility and control. Model execution a
 | 2 | [#7](https://github.com/nitsuga/harness-remote/issues/7) | Derive and display persistent session todos | Planned | - |
 | 2 | [#8](https://github.com/nitsuga/harness-remote/issues/8) | Expose richer session activity and attention states | Planned | - |
 | 2 | [#9](https://github.com/nitsuga/harness-remote/issues/9) | Build a cross-session attention inbox | Planned | #8 |
-| 3 | [#10](https://github.com/nitsuga/harness-remote/issues/10) | Visualize background subagents and delegated tasks | In progress | - |
-| 3 | [#13](https://github.com/nitsuga/harness-remote/issues/13) | Render structured message and tool parts richly | In progress | - |
+| 3 | [#10](https://github.com/nitsuga/harness-remote/issues/10) | Visualize background subagents and delegated tasks | Shipped | - |
+| 3 | [#13](https://github.com/nitsuga/harness-remote/issues/13) | Render structured message and tool parts richly | Shipped | - |
 | 3 | [#14](https://github.com/nitsuga/harness-remote/issues/14) | Research and provide accurate per-message diffs | Planned | #13 |
 | 4 | [#11](https://github.com/nitsuga/harness-remote/issues/11) | Add an authenticated remote PTY terminal | Planned | - |
 | 4 | [#12](https://github.com/nitsuga/harness-remote/issues/12) | Expose task and worktree workflows in the client | Planned | #8, #9 |
 
-Progress: **2 of 12 shipped**.
+Progress: **4 of 12 shipped**.
 
 ## Delivery Phases
 
