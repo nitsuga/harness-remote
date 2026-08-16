@@ -1181,6 +1181,16 @@ assert.ok(app.includes('mergeNewestTail(current, tail)'),
   'loadSelected must append the tail through mergeNewestTail inside the state updater, keyed on message presence')
 assert.ok(app.includes('Come-back case: the transcript for this session is already committed in state/ref'),
   'the seed must lift the loading gate for an already-loaded session even when the merge finds nothing new')
+assert.ok(app.includes('const alreadyLoaded = loadedMessagesRef.current[0]?.info.sessionID === sessionID'),
+  'openSession must keep an already-committed transcript on screen instead of blanking it for the full reload')
+assert.ok(app.includes('const refreshSelectedSessionTail = async'),
+  'the seed-only tail refresh must exist to catch late-committing parts mid full-reload cycle')
+assert.ok(app.includes('now - lastTailRefreshRef.current < 2000'),
+  'the tail refresh must run on the same 2s throttle as the live child-output refresh')
+assert.ok(app.includes('refreshSelectedSessionTail(selected.id, selected.directory)'),
+  'the SSE debounced refresh must also run the seed-only tail refresh')
+assert.ok(app.includes('refreshSelectedSessionTail(selectedSession.id, selectedSession.directory)'),
+  'the 3.5s poll must also run the seed-only tail refresh')
 assert.ok(app.includes('mergeNewestTail,'),
   'the subagentLive import block must ship mergeNewestTail to loadSelected')
 
