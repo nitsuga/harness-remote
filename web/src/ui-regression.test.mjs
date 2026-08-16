@@ -1168,6 +1168,27 @@ assert.ok(
   /if \(part\.type === "text"\) \{\s*if \(!part\.text\) return null[\s\S]*?if \(isSubagentCompletionWrapper\(part\.text\)\) return null/.test(app),
   'a text part carrying the raw synthetic wrapper must be skipped too, so the XML stays out of the transcript'
 )
+// The raw `<shell ...>...</shell>` envelope must never render as chat prose either: a synthetic
+// shell completion maps to a tool part in the mapper, but any cached/older envelope that lands on
+// a system or text part must be skipped too, exactly like the subagent wrapper above.
+assert.match(
+  app,
+  /if \(part\.type === "system"\) \{[\s\S]*?if \(isSubagentCompletionWrapper\(part\.text\)\) return null[\s\S]*?if \(isShellCompletionWrapper\(part\.text\)\) return null/,
+  'a system part carrying the raw shell wrapper must be skipped, not rendered as XML'
+)
+assert.ok(
+  /if \(part\.type === "text"\) \{\s*if \(!part\.text\) return null[\s\S]*?if \(isSubagentCompletionWrapper\(part\.text\)\) return null[\s\S]*?if \(isShellCompletionWrapper\(part\.text\)\) return null/.test(app),
+  'a text part carrying the raw shell wrapper must be skipped too, so the XML stays out of the transcript'
+)
+// The mapper side must keep shipping the two shell-wrapper helpers and gate the tool-part mapping
+// on a terminal state, or the renderer guards above would hide a completion that never mapped.
+assert.match(opencode2Mappers, /export function isShellCompletionWrapper/, 'the v2 mapper must expose the shell-wrapper predicate')
+assert.match(opencode2Mappers, /export function parseShellCompletionWrapper/, 'the v2 mapper must expose the shell-wrapper parser')
+assert.match(
+  opencode2Mappers,
+  /source === "shell"[\s\S]*?parseShellCompletionWrapper\(message\.text\)[\s\S]*?parsed\.state === "completed" \|\| parsed\.state === "error"/,
+  'a synthetic shell completion must map to a tool part only on a terminal state'
+)
 
 // --- Newest-page transcript seed (issue #52) ---------------------------------------------------
 // On OpenCode 2 the parent transcript reload is a full oldest-first paginated fetch (~14s on long

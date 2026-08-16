@@ -7,8 +7,10 @@ import {
   applyInboxDelivery,
   deriveTodosFromMessages,
   fetchSkillCatalog,
+  isShellCompletionWrapper,
   isV2RouteAbsent,
   mergeCommandCatalog,
+  parseShellCompletionWrapper,
   toAgentOption,
   toCommandOption,
   toDiffFile,
@@ -1337,6 +1339,78 @@ assert.equal(isSubagentCompletionWrapper('The subagent finished.'), false, 'plai
 assert.equal(isSubagentCompletionWrapper('See <subagent id="x">inline</subagent> in text'), false, 'a wrapper must span the whole payload to be the injected completion')
 assert.equal(isSubagentCompletionWrapper('<subagent id="x">unclosed'), false, 'an unclosed tag is not the injected completion')
 assert.equal(isSubagentCompletionWrapper(undefined), false)
+
+// --- Feature #46 lane 2: background shell completions ------------------------------------------
+// Synthetic fixtures only — every id was invented here. A backgrounded shell job's completion
+// persists as a synthetic message whose text is the raw `<shell ...>...</shell>` envelope, with
+// `metadata: { source: "shell", jobID, state }` — the opencode v2 shell tool's shape. The mapper
+// turns it into the same tool part a `shell` message produces, so the UI renders a shell card
+// instead of the raw XML as chat prose.
+
+// The wire command attribute is NOT escaped: it can hold literal `"` (`echo "a>b"`) and `>`
+// (`2>&1`). The parse reads greedily to the last quote, so the full command survives verbatim.
+const shellCompleted = toMessageEnvelope({
+  id: 'msg_shell',
+  time: { created: 1, completed: 2 },
+  type: 'synthetic',
+  metadata: { source: 'shell', jobID: 'call_00_abc', state: 'completed' },
+  text: '<shell id="call_00_abc" state="completed" command="echo hi && echo \"a>b\" && npm x 2>&1">\nhi\n> b\n</shell>'
+}, 'ses_x')
+assert.deepEqual(shellCompleted.parts, [{
+  id: 'msg_shell:shell',
+  messageID: 'msg_shell',
+  type: 'tool',
+  tool: 'shell',
+  callID: 'call_00_abc',
+  state: {
+    status: 'completed',
+    input: { command: 'echo hi && echo "a>b" && npm x 2>&1' },
+    output: 'hi\n> b',
+    time: { start: 1, end: 2 }
+  }
+}], 'a terminal shell completion must map to EXACTLY one tool part — never a text part with the raw XML')
+// An unknown/absent completion state is never invented (same acceptance rule as the subagent lane):
+// the envelope degrades to today's mapping, so the raw wrapper stays a plain text part.
+assert.deepEqual(toMessageEnvelope({
+  id: 'msg_shell_unk',
+  time: { created: 3 },
+  type: 'synthetic',
+  metadata: { source: 'shell', jobID: 'call_00_xyz', state: 'weird' },
+  text: '<shell id="call_00_xyz" state="weird" command="echo hi">\nx\n</shell>'
+}, 'ses_x').parts, [{
+  id: 'msg_shell_unk:text',
+  type: 'text',
+  text: '<shell id="call_00_xyz" state="weird" command="echo hi">\nx\n</shell>'
+}], 'an unknown completion state must fall back to today\u2019s text mapping')
+
+// The recognition predicate is strict about the wrapper spanning the whole payload: inline tag
+// mentions and partial blocks are ordinary content and must keep rendering as before.
+assert.equal(isShellCompletionWrapper('<shell id="call_00_abc" state="completed" command="echo hi">\nhi\n</shell>'), true)
+assert.equal(isShellCompletionWrapper('  <shell id="call_00_abc">Done</shell>\n'), true, 'surrounding whitespace is still a complete wrapper')
+assert.equal(isShellCompletionWrapper('The shell finished.'), false, 'plain prose is not a wrapper')
+assert.equal(isShellCompletionWrapper('See <shell id="x">inline</shell> in text'), false, 'a wrapper must span the whole payload to be the injected completion')
+assert.equal(isShellCompletionWrapper('<shell id="x">unclosed'), false, 'an unclosed tag is not the injected completion')
+assert.equal(isShellCompletionWrapper(undefined), false)
+assert.equal(isShellCompletionWrapper(''), false)
+
+// The parser extracts the terminal state, the original command (unescaped quotes and `>` intact)
+// and the trimmed output; an absent command attribute omits it, and non-wrapper input is null.
+assert.deepEqual(parseShellCompletionWrapper('<shell id="call_00_abc" state="completed" command="echo hi && echo \"a>b\" && npm x 2>&1">\nhi\n> b\n</shell>'), {
+  state: 'completed',
+  command: 'echo hi && echo "a>b" && npm x 2>&1',
+  output: 'hi\n> b'
+}, 'the command must be extracted whole despite unescaped quotes and >')
+assert.deepEqual(parseShellCompletionWrapper('<shell id="call_00_abc" state="completed">\nhi\n</shell>'), {
+  state: 'completed',
+  output: 'hi'
+}, 'an absent command attribute must omit command while output still extracts')
+assert.deepEqual(parseShellCompletionWrapper('<shell id="call_00_abc" state="completed">\n</shell>'), {
+  state: 'completed',
+  output: ''
+}, 'an empty wrapper payload must yield empty output')
+assert.equal(parseShellCompletionWrapper('plain text'), null, 'non-wrapper input must parse to null')
+assert.equal(parseShellCompletionWrapper('<shell id="x">unclosed'), null, 'an unclosed tag must not parse')
+assert.equal(parseShellCompletionWrapper(undefined), null)
 
 // --- Feature #47 lane: live running-subagent summary ------------------------------------------
 // Synthetic fixtures only — every id was invented here. The shapes mirror the opencode v2

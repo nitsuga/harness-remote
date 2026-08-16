@@ -57,7 +57,7 @@ import {
 } from "./subagentLive"
 import { stripMarkdownDirectives } from "./markdownDirectives"
 import { createRefreshCoalescer } from "./refresh-coalescer"
-import { isQuestionActive, applyInboxDelivery, type V2InboxItem } from "./opencode2-mappers"
+import { isQuestionActive, isShellCompletionWrapper, applyInboxDelivery, type V2InboxItem } from "./opencode2-mappers"
 import { DEFAULT_HARNESS_CAPABILITIES } from "./backendCapabilities"
 import { BACKEND_CLIENTS } from "./backendClient"
 import { copyToClipboard } from "./clipboard"
@@ -1610,6 +1610,9 @@ function MessagePartView({
     // exactly the raw `<subagent ...>...</subagent>` wrapper (issue #47); the run card renders the
     // actual result, so the XML itself must never surface as chat prose.
     if (isSubagentCompletionWrapper(part.text)) return null
+    // A synthetic shell completion maps to a tool part in the mapper, but any cached/older envelope
+    // whose raw `<shell ...>` wrapper still lands on a text part must never render as XML prose.
+    if (isShellCompletionWrapper(part.text)) return null
     return (
       <div className="message-content">
         <ReactMarkdown remarkPlugins={REMARK_PLUGINS}>{normalizeMessageMarkdown(part.text)}</ReactMarkdown>
@@ -1676,6 +1679,9 @@ function MessagePartView({
     // so the wrapper must never render as XML in the transcript (issue #47). Normal system messages
     // are not complete wrappers and render exactly as before.
     if (isSubagentCompletionWrapper(part.text)) return null
+    // Same for a shell completion: a completion with a description would have mapped to a system
+    // part before this fix, so the raw `<shell ...>` envelope must never render as XML prose either.
+    if (isShellCompletionWrapper(part.text)) return null
     return (
       <div className="message-system-row">
         {part.text && <span className="message-system-text">{part.text}</span>}
