@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { isLiveSubagentStatus, isSubagentCompletionWrapper, subagentCompletionDescription, subagentCompletionOutput, subagentRunFromCompletion, subagentRunFromTool } from './agentRuns.ts'
-import { applyStreamedToolProgress, extractChildOutputLines, liveSubagentChildIDs, subagentProgressMetadata } from './subagentLive.ts'
+import { applyStreamedToolProgress, extractChildOutputLines, liveSubagentChildIDs, mergeNewestTail, subagentProgressMetadata } from './subagentLive.ts'
 import { createTranslator } from './i18n.ts'
 import {
   applyInboxDelivery,
@@ -1511,6 +1511,34 @@ assert.deepEqual(liveSubagentChildIDs([parentWithDoneChild]), [],
   'a terminal subagent is not a live child; its result card takes over')
 assert.deepEqual(liveSubagentChildIDs([parentWithStreamingSubagent]), [],
   'a streaming subagent without correlation is not a live child')
+
+
+// --- Newest-page transcript seed (issue #52) -------------------------------------------------
+// Synthetic fixtures only — minimal envelopes (id/time/parts) like the fixtures above. The seed
+// is an append-only merge keyed on message ids: it never re-reconciles existing messages (the full
+// reload owns reconciliation), and it returns the same array on a no-op so memoized renderers stay
+// put.
+const seedEnvelope = (id, created) => ({
+  info: { id, role: 'user', sessionID: 'ses_x', time: { created } },
+  parts: [{ id: `${id}:text`, type: 'text', text: id }]
+})
+const seedCurrent = [seedEnvelope('msg_a', 1), seedEnvelope('msg_b', 2)]
+// (a) An empty tail adds nothing and returns the same array.
+assert.equal(mergeNewestTail(seedCurrent, []), seedCurrent,
+  'an empty tail must return the same array')
+// (b) New ids are appended in tail order, preserving the current order.
+assert.deepEqual(mergeNewestTail(seedCurrent, [seedEnvelope('msg_c', 3), seedEnvelope('msg_d', 4)]).map((message) => message.info.id),
+  ['msg_a', 'msg_b', 'msg_c', 'msg_d'],
+  'new tail ids must append in tail order')
+// (c) Existing ids keep their exact objects; only new ones are appended after.
+const mergedOverlap = mergeNewestTail(seedCurrent, [seedEnvelope('msg_a', 1), seedEnvelope('msg_c', 3)])
+assert.equal(mergedOverlap[0], seedCurrent[0], 'an existing message must keep its object identity')
+assert.equal(mergedOverlap[1], seedCurrent[1], 'an existing message must keep its object identity')
+assert.deepEqual(mergedOverlap.map((message) => message.info.id), ['msg_a', 'msg_b', 'msg_c'],
+  'new ids must append after the existing ones')
+// (d) A fully-overlapping tail changes nothing and returns the same array.
+assert.equal(mergeNewestTail(seedCurrent, seedCurrent), seedCurrent,
+  'a fully-overlapping tail must return the same array')
 
 
 // --- Session todo derivation from transcript todowrite parts (issue #7) ----------------------

@@ -51,6 +51,7 @@ import {
   extractChildOutputLines,
   liveSubagentChildIDs,
   liveSubagentChildIDsFromParts,
+  mergeNewestTail,
   subagentProgressMetadata,
   type ChildOutput
 } from "./subagentLive"
@@ -4498,6 +4499,27 @@ function App() {
     const isCurrentLoad = () => requestID === loadSelectedRequestRef.current
       && mutationCoordinator.isContextGenerationCurrent(loadContextGeneration)
       && mutationCoordinator.isContextCurrent(loadContext)
+    // Issue #52: on OpenCode 2, paint the newest transcript page first — one cheap bounded
+    // newest-first request (~100ms) — so a just-launched subagent's card and the newest messages
+    // render immediately instead of waiting for the full oldest-first reload (~14s on long
+    // transcripts). The full reload below reconciles everything; a seed failure is ignored (the
+    // full load is the source of truth). replaceMessages callers want a clean full snapshot and
+    // skip the seed. The ref must be committed together with state (issue #47 invariant) or the
+    // live child-output capture would not see the seeded tool part.
+    if (config.backend === "opencode2" && !replaceMessages) {
+      try {
+        const tail = await api.loadMessagesTail(config, sessionID, directory)
+        if (requestID !== loadSelectedRequestRef.current) return
+        const merged = mergeNewestTail(loadedMessagesRef.current, tail)
+        if (merged !== loadedMessagesRef.current) {
+          shouldAutoScrollRef.current = isNearMessagesBottom()
+          loadedMessagesRef.current = merged
+          setMessages(merged)
+        }
+      } catch {
+        // Ignore: the full reload below is authoritative.
+      }
+    }
     const [msg, todo, diff, questions, permissions, actions, inbox] = await Promise.all([
       api.loadMessages(config, sessionID, directory, backendClient.messageRefreshSupported && refreshHistory),
       capabilities.todos ? api.loadTodo(config, sessionID, directory).catch(() => []) : Promise.resolve([]),

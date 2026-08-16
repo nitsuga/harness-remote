@@ -1169,6 +1169,19 @@ assert.ok(
   'a text part carrying the raw synthetic wrapper must be skipped too, so the XML stays out of the transcript'
 )
 
+// --- Newest-page transcript seed (issue #52) ---------------------------------------------------
+// On OpenCode 2 the parent transcript reload is a full oldest-first paginated fetch (~14s on long
+// transcripts), so a just-launched subagent's tool part would not render until the first completed
+// full reload. loadSelected must seed the transcript with the cheap newest-first tail
+// (`loadMessagesTail`, ~100ms) first, appended via mergeNewestTail — keyed on message presence and
+// never re-reconciling existing messages, which the full reload owns.
+assert.ok(app.includes('api.loadMessagesTail(config, sessionID, directory)'),
+  'loadSelected must fetch the cheap newest-first tail to seed the transcript (issue #52)')
+assert.ok(app.includes('mergeNewestTail(loadedMessagesRef.current, tail)'),
+  'loadSelected must append the tail through mergeNewestTail, keyed on message presence')
+assert.ok(app.includes('mergeNewestTail,'),
+  'the subagentLive import block must ship mergeNewestTail to loadSelected')
+
 // --- Richer session activity states (issue #8) -------------------------------------------------
 // The v2 execution memory must be cleared only on a profile/config namespace change, never on a
 // mere session switch: terminal/error facts must survive browsing away and back (gate 2 decision —
