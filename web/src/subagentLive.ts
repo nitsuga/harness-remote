@@ -44,6 +44,17 @@ export function applyStreamedToolProgress(
   return changed ? next : messages
 }
 
+/** Seed the transcript with a newest-page tail (chronological, issue #52): appends tail messages
+ *  whose ids are not already present, leaving existing messages untouched (the full reload
+ *  reconciles them) and preserving both orders. Returns the same array when nothing new arrived,
+ *  so memoized renderers stay put on a no-op seed. */
+export function mergeNewestTail(current: readonly MessageEnvelope[], tail: readonly MessageEnvelope[]): MessageEnvelope[] {
+  if (tail.length === 0) return current as MessageEnvelope[]
+  const seen = new Set(current.map((message) => message.info.id))
+  const additions = tail.filter((message) => !seen.has(message.info.id))
+  return additions.length === 0 ? current as MessageEnvelope[] : [...current, ...additions]
+}
+
 /** Normalize the `metadata` field of a v2 `session.tool.progress` event to the flat correlation
  *  record the run derivation reads (`{ sessionID, status }`). The opencode `subagent` plugin
  *  publishes `context.progress({ metadata: { sessionID, status: "running" } })`, so the event

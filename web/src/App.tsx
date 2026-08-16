@@ -51,6 +51,7 @@ import {
   extractChildOutputLines,
   liveSubagentChildIDs,
   liveSubagentChildIDsFromParts,
+  mergeNewestTail,
   subagentProgressMetadata,
   type ChildOutput
 } from "./subagentLive"
@@ -3460,6 +3461,7 @@ function App() {
   const awaitingAssistantBaselineRef = useRef("")
   const loadSelectedRequestRef = useRef(0)
   const refreshCoalescerRef = useRef(createRefreshCoalescer())
+  const lastTailRefreshRef = useRef(0)
   const loadCommandsRequestRef = useRef(0)
   const loadAgentsRequestRef = useRef(0)
   const loadModelsRequestRef = useRef(0)
@@ -3901,9 +3903,17 @@ function App() {
     loadModelsRequestRef.current += 1
     setModelOptions([])
     setExtensionActions([])
-    setMessages([])
-    loadedMessagesRef.current = []
-    setLoadedSessionID(null)
+    // Come-back case (issue #52): this session's transcript is already committed in state/ref
+    // (re-opening the current session, e.g. a retry) — keep it on screen and refresh in the
+    // background instead of blanking the pane for the full reload.
+    const alreadyLoaded = loadedMessagesRef.current[0]?.info.sessionID === sessionID
+    if (alreadyLoaded) {
+      setLoadedSessionID(sessionID)
+    } else {
+      setMessages([])
+      loadedMessagesRef.current = []
+      setLoadedSessionID(null)
+    }
     setLoadFailure(null)
     setOptimisticUserMessages([])
     setTodos([])
@@ -3915,7 +3925,7 @@ function App() {
     setRuntimeError(null)
     setActionNotice(null)
     setView("detail")
-    setLoadingSessionID(sessionID)
+    if (!alreadyLoaded) setLoadingSessionID(sessionID)
     openingSessionRef.current = sessionID
     try {
       try {
@@ -4491,6 +4501,34 @@ function App() {
     )
   }
 
+  /** Seed-only tail refresh (issue #52 tail cadence): the coalesced full-reload cycle takes ~10s+
+   *  on a long transcript, so a part committed to the newest message mid-cycle (e.g. a SECOND
+   *  subagent launch in the same turn) would not paint until that cycle ends. Re-fetch the cheap
+   *  newest page on the same 2s throttle as the live child-output refresh, so late-committing
+   *  parts render within a couple of seconds. Append-only merge; failures ignored (the coalesced
+   *  full reload stays authoritative). */
+  const refreshSelectedSessionTail = async (sessionID: string, directory: string | undefined) => {
+    if (config.backend !== "opencode2") return
+    const now = Date.now()
+    if (now - lastTailRefreshRef.current < 2000) return
+    lastTailRefreshRef.current = now
+    const key = `${activeProfileID}\u0000${configKey(config)}\u0000${sessionID}`
+    try {
+      const tail = await api.loadMessagesTail(config, sessionID, directory)
+      // The fetch resolved against a newer session/profile context: never paint a stale tail.
+      if (key !== `${activeProfileID}\u0000${configKey(config)}\u0000${selectedSessionRef.current?.id}`) return
+      setMessages((current) => {
+        const merged = mergeNewestTail(current, tail)
+        if (merged === current) return current
+        shouldAutoScrollRef.current = isNearMessagesBottom()
+        loadedMessagesRef.current = merged
+        return merged
+      })
+    } catch {
+      // Ignore: the coalesced full reload stays authoritative.
+    }
+  }
+
   async function loadSelected(sessionID: string, directory: string, refreshHistory = false, replaceMessages = false) {
     const requestID = ++loadSelectedRequestRef.current
     const loadContext = { profileID: activeProfileID, configKey: configKey(config), sessionID }
@@ -4498,6 +4536,47 @@ function App() {
     const isCurrentLoad = () => requestID === loadSelectedRequestRef.current
       && mutationCoordinator.isContextGenerationCurrent(loadContextGeneration)
       && mutationCoordinator.isContextCurrent(loadContext)
+    // Issue #52: on OpenCode 2, paint the newest transcript page first — one cheap bounded
+    // newest-first request (~100ms) — so a just-launched subagent's card and the newest messages
+    // render immediately instead of waiting for the full oldest-first reload (~14s on long
+    // transcripts). The full reload below reconciles everything; a seed failure is ignored (the
+    // full load is the source of truth). replaceMessages callers want a clean full snapshot and
+    // skip the seed. The ref must be committed together with state (issue #47 invariant) or the
+    // live child-output capture would not see the seeded tool part.
+    if (config.backend === "opencode2" && !replaceMessages) {
+      try {
+        const tail = await api.loadMessagesTail(config, sessionID, directory)
+        // The full-load commit below re-checks context generation and context; the seed relies on
+        // the same isCurrentLoad guard so a stale profile/session can never paint its tail page.
+        if (!isCurrentLoad()) return
+        // Come-back case: the transcript for this session is already committed in state/ref (the
+        // seed finds nothing new, so the merge below no-ops) — the loading gate must still lift
+        // now instead of waiting for the full reload (~10s+ on a long transcript).
+        if (loadingSessionID === sessionID && loadedMessagesRef.current[0]?.info.sessionID === sessionID) {
+          setLoadingSessionID((activeID) => (activeID === sessionID ? null : activeID))
+          setLoadedSessionID(sessionID)
+        }
+        setMessages((current) => {
+          const merged = mergeNewestTail(current, tail)
+          if (merged === current) return current
+          // Issue #52: opening a long session must paint the newest page immediately instead of
+          // holding the empty loading state for the full reload. Only lift the gate when the
+          // rendered content is (or starts from) THIS session — appending the tail onto another
+          // session's leftover transcript must stay hidden until the full reload replaces it.
+          if (loadingSessionID === sessionID && (current.length === 0 || current[0]?.info.sessionID === sessionID)) {
+            setLoadingSessionID((activeID) => (activeID === sessionID ? null : activeID))
+            setLoadedSessionID(sessionID)
+          }
+          shouldAutoScrollRef.current = isNearMessagesBottom()
+          // Commit the ref together with state (issue #47 invariant) or the live child-output
+          // capture would not see the seeded tool part.
+          loadedMessagesRef.current = merged
+          return merged
+        })
+      } catch {
+        // Ignore: the full reload below is authoritative.
+      }
+    }
     const [msg, todo, diff, questions, permissions, actions, inbox] = await Promise.all([
       api.loadMessages(config, sessionID, directory, backendClient.messageRefreshSupported && refreshHistory),
       capabilities.todos ? api.loadTodo(config, sessionID, directory).catch(() => []) : Promise.resolve([]),
@@ -6119,6 +6198,7 @@ function App() {
       refreshSessions(true).catch(() => undefined)
       if (selectedSession) {
         refreshSelectedSession(selectedSession.id, selectedSession.directory).catch(() => undefined)
+        void refreshSelectedSessionTail(selectedSession.id, selectedSession.directory)
       }
       refreshLiveSubagentOutput().catch(() => undefined)
     }, 3500)
@@ -6164,7 +6244,10 @@ function App() {
         refreshTimer = undefined
         refreshSessions(true).catch(() => undefined)
         const selected = selectedSessionRef.current
-        if (selected) refreshSelectedSession(selected.id, selected.directory).catch(() => undefined)
+        if (selected) {
+          refreshSelectedSession(selected.id, selected.directory).catch(() => undefined)
+          void refreshSelectedSessionTail(selected.id, selected.directory)
+        }
         // Issue #47: events that touch the selected session are exactly when a running child's
         // output is likely to have moved (the child's own events arrive on this global stream),
         // so refresh the live output on the same cadence — cheap, and throttled inside.
