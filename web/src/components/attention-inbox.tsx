@@ -36,7 +36,7 @@ import {
   CloseIcon,
   WaitingIcon
 } from "../Icons"
-import { AttentionInboxContext, type AttentionInboxContextValue } from "../attentionInboxContext"
+import { AttentionInboxContext, type AttentionInboxContextValue, type QueuedSessionEntry } from "../attentionInboxContext"
 import { backendDisplayName } from "../backendSetup"
 import type { AttentionItem } from "../attentionInbox"
 import type { Translator } from "../i18n"
@@ -81,33 +81,46 @@ type MachineGroup = {
 }
 
 /** Project the (already newest-first) item stream into machine → agent → session groups,
- *  preserving the stream's order inside each level: buckets are appended on first sight. */
+ *  preserving the stream's order inside each level: buckets are appended on first sight. Sessions
+ *  that exist ONLY in the queued map (no attention items — the common case for a queued prompt)
+ *  are appended as queued-only groups so their Cancel/Send now/Queue actions stay reachable (issue A). */
 function groupAttentionItems(
   items: readonly AttentionItem[],
-  queuedBySession: ReadonlyMap<string, V2InboxItem[]>
+  queuedBySession: ReadonlyMap<string, QueuedSessionEntry>
 ): MachineGroup {
-  const machineLabel = items.length > 0 ? backendDisplayName(items[0].backend) : ""
+  const firstBackend = items.length > 0 ? items[0].backend
+    : queuedBySession.values().next().value?.backend
+  const machineLabel = firstBackend ? backendDisplayName(firstBackend) : ""
   const agents: AgentGroup[] = []
   const agentByKey = new Map<string, AgentGroup>()
-  for (const item of items) {
-    const agentKey = item.agent ?? NO_AGENT_KEY
+  const sessionBucket = (agentKey: string, agentLabel: string, sessionId: string, title: string) => {
     let agent = agentByKey.get(agentKey)
     if (!agent) {
-      agent = { key: agentKey, label: item.agent ?? "", sessions: [] }
+      agent = { key: agentKey, label: agentLabel, sessions: [] }
       agentByKey.set(agentKey, agent)
       agents.push(agent)
     }
-    let session = agent.sessions.find((candidate) => candidate.sessionId === item.sessionId)
+    let session = agent.sessions.find((candidate) => candidate.sessionId === sessionId)
     if (!session) {
       session = {
-        sessionId: item.sessionId,
-        title: item.sessionTitle,
+        sessionId,
+        title,
         items: [],
-        queued: queuedBySession.get(item.sessionId) ?? []
+        queued: queuedBySession.get(sessionId)?.items ?? []
       }
       agent.sessions.push(session)
     }
-    session.items.push(item)
+    return session
+  }
+  for (const item of items) {
+    const agentKey = item.agent ?? NO_AGENT_KEY
+    sessionBucket(agentKey, item.agent ?? "", item.sessionId, item.sessionTitle).items.push(item)
+  }
+  // Queued-only sessions: not covered by any item, append them (newest-first via map insertion order).
+  for (const [sessionId, entry] of queuedBySession) {
+    const agentKey = entry.agent ?? NO_AGENT_KEY
+    if (agentByKey.get(agentKey)?.sessions.some((candidate) => candidate.sessionId === sessionId)) continue
+    sessionBucket(agentKey, entry.agent ?? "", sessionId, entry.title)
   }
   return { label: machineLabel, agents }
 }
@@ -263,20 +276,22 @@ export function AttentionInboxPanel({
   // empty to populated — the first poll usually arrives after mount, and a fresh alert after a
   // fully-resolved inbox is exactly when the surface should reappear. A deliberate collapse (only
   // possible while content is showing) is never overridden; the badge keeps alerting on the
-  // collapsed header.
-  const [open, setOpen] = useState(() => inbox.items.length > 0)
-  const hadItemsRef = useRef(inbox.items.length > 0)
+  // collapsed header. Queued prompts count as content (issue A): a queued item must open the panel
+  // exactly like a pending form, or its actions stay hidden behind a collapsed header.
+  const hasContent = inbox.items.length > 0 || inbox.queuedBySession.size > 0
+  const [open, setOpen] = useState(() => hasContent)
+  const hadItemsRef = useRef(hasContent)
   useEffect(() => {
-    const nowHasItems = inbox.items.length > 0
-    if (nowHasItems && !hadItemsRef.current) setOpen(true)
-    hadItemsRef.current = nowHasItems
-  }, [inbox.items.length])
+    const nowHasContent = inbox.items.length > 0 || inbox.queuedBySession.size > 0
+    if (nowHasContent && !hadItemsRef.current) setOpen(true)
+    hadItemsRef.current = nowHasContent
+  }, [inbox.items.length, inbox.queuedBySession])
   const badgeLabel = inbox.badge > 0 ? `${t('inbox.title')} · ${inbox.badge}` : t('inbox.title')
 
   const flat = machine.agents.length === 1 && machine.agents[0].sessions.length === 1
   const body = (
     <>
-      {inbox.items.length === 0 ? (
+      {inbox.items.length === 0 && inbox.queuedBySession.size === 0 ? (
         <p className="attention-empty">
           <CheckIcon size={16} />
           <span>{t('inbox.empty')}</span>

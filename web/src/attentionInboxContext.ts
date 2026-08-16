@@ -1,6 +1,6 @@
 import { createContext } from "react"
 import type { AttentionItem } from "./attentionInbox"
-import type { SavedPermission } from "./types"
+import type { BackendKind, SavedPermission } from "./types"
 import type { V2InboxItem } from "./opencode2-mappers"
 
 /**
@@ -9,9 +9,20 @@ import type { V2InboxItem } from "./opencode2-mappers"
  * module cycle (App.tsx already imports the session list, which renders the panel — importing the
  * context back from App.tsx would create App → session-list → panel → App).
  */
+
+/** One session's queued prompts plus the session metadata the panel needs to surface it even when
+ *  it has NO attention items (the pre-#A gap that hid the Queued section for queued-only sessions). */
+export type QueuedSessionEntry = {
+  sessionID: string
+  title: string
+  backend: BackendKind
+  agent?: string
+  items: V2InboxItem[]
+}
+
 export type AttentionInboxContextValue = {
   items: readonly AttentionItem[]
-  queuedBySession: ReadonlyMap<string, V2InboxItem[]>
+  queuedBySession: ReadonlyMap<string, QueuedSessionEntry>
   badge: number
   dismiss(item: AttentionItem): void
   /** Open the item's session (navigating profiles if needed is out of scope — the item is always
