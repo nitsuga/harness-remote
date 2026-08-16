@@ -31,18 +31,44 @@ The remaining work is primarily richer visibility and control. Model execution a
 |---|---:|---|---|---|
 | 1 | [#3](https://github.com/nitsuga/harness-remote/issues/3) | Classify commands and support explicit skill activation | Shipped | - |
 | 1 | [#4](https://github.com/nitsuga/harness-remote/issues/4) | Add compact and fork session actions | Shipped | - |
+| 1 | [#23](https://github.com/nitsuga/harness-remote/issues/23) | Detect v2 server version skew for compact/fork capability gating | Planned | #4 |
+| 1 | [#24](https://github.com/nitsuga/harness-remote/issues/24) | Surface fork result when it arrives after navigation | Planned | #4 |
 | 1 | [#5](https://github.com/nitsuga/harness-remote/issues/5) | Support session import and export | Planned | - |
 | 1 | [#6](https://github.com/nitsuga/harness-remote/issues/6) | Show and manage MCP server status | Planned | - |
 | 2 | [#7](https://github.com/nitsuga/harness-remote/issues/7) | Derive and display persistent session todos | Planned | - |
 | 2 | [#8](https://github.com/nitsuga/harness-remote/issues/8) | Expose richer session activity and attention states | Shipped | - |
 | 2 | [#9](https://github.com/nitsuga/harness-remote/issues/9) | Build a cross-session attention inbox | Shipped | #8 |
+| 2 | [#37](https://github.com/nitsuga/harness-remote/issues/37) | Aggregate the attention inbox across multiple machines (multi-profile) | Planned | #9, fleet ([#146](https://github.com/nitsuga/harness-remote/issues/146)) |
 | 3 | [#10](https://github.com/nitsuga/harness-remote/issues/10) | Visualize background subagents and delegated tasks | Shipped | - |
 | 3 | [#13](https://github.com/nitsuga/harness-remote/issues/13) | Render structured message and tool parts richly | Shipped | - |
 | 3 | [#14](https://github.com/nitsuga/harness-remote/issues/14) | Research and provide accurate per-message diffs | Planned | #13 |
 | 4 | [#11](https://github.com/nitsuga/harness-remote/issues/11) | Add an authenticated remote PTY terminal | Planned | - |
 | 4 | [#12](https://github.com/nitsuga/harness-remote/issues/12) | Expose task and worktree workflows in the client | Planned | #8, #9 |
 
-Progress: **6 of 12 shipped**.
+Progress: **6 of 15 shipped**.
+
+### Reconciliation notes (Aug 16, 2026)
+
+Statuses and issue states were cross-checked against the fork's issue tracker; the table above is canonical.
+
+- **#4 stays `Shipped`** because the compact/fork flow merged in [PR #22](https://github.com/nitsuga/harness-remote/pull/22). The issue itself remains open because one acceptance criterion — actions exposed only for backends that support them — is not met: capabilities are still hardcoded. That gap is tracked by #23, and the dropped fork-result-after-navigation gap by #24.
+- **#9 shipped with a re-scoped criterion 1.** [PR #36](https://github.com/nitsuga/harness-remote/pull/36) delivered the machine → agent → session grouping structure with the single active profile populated. Populating it from multiple machines is a connection-management architecture change tracked by #37 and gated on fleet work ([#146](https://github.com/nitsuga/harness-remote/issues/146)).
+- **Queued-prompt surfacing shipped without a tracked issue:** [PR #40](https://github.com/nitsuga/harness-remote/pull/40) (badge, auto-open, inline "Send now") plus regression fixes #41 and #42 landed after the last status update. It is not in the table because no issue tracks it; if it should be tracked, file an issue and add a row.
+
+### Open maintenance and security backlog (not feature-tracked)
+
+Filed separately during feature reviews; these are bugs and hygiene items, not roadmap features:
+
+| Issue | Area | One-liner |
+|---|---|---|
+| [#25](https://github.com/nitsuga/harness-remote/issues/25) | UX | Mutation-lock state on question/permission cards has no disabled hint |
+| [#26](https://github.com/nitsuga/harness-remote/issues/26) | a11y | Session card meta/status areas read as clickable but no longer open |
+| [#27](https://github.com/nitsuga/harness-remote/issues/27) | v1 parity | v1 prompt/command transport loss still surfaces as definite failure |
+| [#28](https://github.com/nitsuga/harness-remote/issues/28) | v2 fix | Fork-reconciled child row can flicker under concurrent poll refresh |
+| [#29](https://github.com/nitsuga/harness-remote/issues/29) | v2 fix | Rename input can stay open after a stale lease race |
+| [#31](https://github.com/nitsuga/harness-remote/issues/31) | v2 fix | `file://` content should degrade gracefully in the file-content renderer |
+| [#35](https://github.com/nitsuga/harness-remote/issues/35) | chore | Remove write-only `wasRunningRef` dead state |
+| [#38](https://github.com/nitsuga/harness-remote/issues/38) | security | PermissionCard renders raw permission patterns (last raw credential-like surface) |
 
 ## Delivery Phases
 
@@ -52,6 +78,7 @@ Ship small, independently reviewable additions that map directly to OpenCode 2 A
 
 - Skills and commands
 - Compact and fork
+- Compact/fork version-skew capability gating (#23) and fork-result surfacing (#24)
 - Import and export
 - MCP visibility and management
 
@@ -62,6 +89,7 @@ Build a durable state model before adding richer multi-agent presentation.
 - Reconstructed session todos
 - Busy, waiting, failed, completed, and needs-attention states
 - Cross-session questions, permissions, failures, and completion inbox
+- Multi-machine inbox aggregation (fleet-gated, #37)
 
 ### Phase 3: Rich execution visibility
 
