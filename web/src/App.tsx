@@ -342,11 +342,48 @@ function toRenderedMessage(message: MessageEnvelope): MessageEnvelope & { text: 
   return wrapped
 }
 
+function sameModelRef(
+  left: MessageEnvelope["info"]["model"],
+  right: MessageEnvelope["info"]["model"]
+): boolean {
+  if (left === right) return true
+  if (!left || !right) return false
+  return left.id === right.id && left.providerID === right.providerID && left.variant === right.variant
+}
+
+function sameErrorRef(
+  left: MessageEnvelope["info"]["error"],
+  right: MessageEnvelope["info"]["error"]
+): boolean {
+  if (left === right) return true
+  if (!left || !right) return false
+  return left.type === right.type && left.message === right.message
+}
+
+/** Whether two envelopes carry the same OpenCode 2 assistant-level metadata (agent/model/finish/
+ *  error/cost/tokens/retry). Shallow by design: these fields arrive wholesale with each poll, and a
+ *  field-level comparison keeps reconciliation from churning message references — and the
+ *  per-message render cache — whenever nothing a renderer could show actually changed. */
+export function sameEnvelopeMetadata(left: MessageEnvelope["info"], right: MessageEnvelope["info"]): boolean {
+  return left.agent === right.agent
+    && sameModelRef(left.model, right.model)
+    && left.finish === right.finish
+    && sameErrorRef(left.error, right.error)
+    && left.cost === right.cost
+    && left.tokens?.input === right.tokens?.input
+    && left.tokens?.output === right.tokens?.output
+    && left.tokens?.reasoning === right.tokens?.reasoning
+    && left.retry?.attempt === right.retry?.attempt
+    && left.retry?.at === right.retry?.at
+    && sameErrorRef(left.retry?.error, right.retry?.error)
+}
+
 function messagesHaveSameContent(left: MessageEnvelope[], right: MessageEnvelope[]): boolean {
   return left.length === right.length && left.every((message, index) => {
     const candidate = right[index]
     return candidate?.info.role === message.info.role && candidate?.info.type === message.info.type
       && candidate?.info.compactionStatus === message.info.compactionStatus && extractText(candidate) === extractText(message)
+      && sameEnvelopeMetadata(candidate.info, message.info)
   })
 }
 
@@ -1193,6 +1230,21 @@ function ToolPartView({
               {diff.deletions > 0 && <span className="diff-stat-del">-{diff.deletions}</span>}
             </span>
           )}
+          {part.state?.exitCode !== undefined && (
+            <span className="message-tool-status-exit" title={t('action.exitCode', { n: part.state.exitCode })}>
+              {t('action.exitCode', { n: part.state.exitCode })}
+            </span>
+          )}
+          {tool === "shell" && status === "timeout" && (
+            <span className="message-tool-status-timeout" title={t('action.shellTimeout')}>
+              {t('action.shellTimeout')}
+            </span>
+          )}
+          {tool === "shell" && status === "killed" && (
+            <span className="message-tool-status-killed" title={t('action.shellKilled')}>
+              {t('action.shellKilled')}
+            </span>
+          )}
           {status === "error" && (
             <span className="message-tool-status-error" title={t('action.toolFailed')} aria-label={t('action.toolFailed')}>
               ✕
@@ -1220,6 +1272,9 @@ function ToolPartView({
               ) : (
                 part.state?.output && <pre className="message-tool-output">{part.state.output}</pre>
               )}
+              {part.state?.outputFiles?.map((file) => (
+                <FileContentView key={file.uri} uri={file.uri} mime={file.mime} name={file.name} t={t} />
+              ))}
             </>
           )}
           {part.state?.error && <pre className="message-tool-output message-tool-error">{part.state.error}</pre>}
@@ -1241,6 +1296,84 @@ function ReasoningPartView({ part, timestamp, t }: { part: MessagePart; timestam
       {open && (
         <Modal title={label} timestamp={timestamp} onClose={() => setOpen(false)} t={t}>
           <pre className="message-reasoning-text">{part.text}</pre>
+        </Modal>
+      )}
+    </>
+  )
+}
+
+/** A tool-produced file and a standalone `file-content` part share one representation: an image
+ *  renders as the attachment card, everything else as a link carrying the file's name (or its uri). */
+function FileContentView({ uri, mime, name, t }: { uri: string; mime: string; name?: string; t: Translator }) {
+  return (
+    <div className="message-content">
+      {mime && mime.startsWith("image/") ? (
+        <img className="message-attachment" src={uri} alt={name || t('detail.attachedImage')} />
+      ) : (
+        <a href={uri}>{name || uri}</a>
+      )}
+    </div>
+  )
+}
+
+/** `{providerID}/{id} ({variant})` with the provider/variant pieces dropped when the wire did not
+ *  carry them, so a bare model id still reads cleanly. */
+function modelRefLabel(model: { id: string; providerID?: string; variant?: string } | undefined): string {
+  if (!model) return ""
+  const base = model.providerID ? `${model.providerID}/${model.id}` : model.id
+  return model.variant ? `${base} (${model.variant})` : base
+}
+
+/** The localized one-line summary for a `switch` part. The wire's own English text stays out of the
+ *  visible label — it is only kept as the row's aria-label fallback for screen readers. */
+function switchPartLabel(part: MessagePart, t: Translator): string {
+  // Live v2 transcripts carry `previous === value` (e.g. `{"type":"agent-switched","agent":"build",
+  // "previous":"build"}`): only render the "a → b" arrow when the previous value actually differs,
+  // mirroring the mapper's `switchPartText` instead of showing a self-referential "build → build".
+  // For model switches both sides are ref ids, so the equality check lands on `part.value` too.
+  const switchedFrom = part.previous !== undefined && part.previous !== part.value ? part.previous : undefined
+  if (part.kind === "model") {
+    const to = modelRefLabel(part.model) || part.value || ""
+    return switchedFrom
+      ? t('detail.switchModel', { from: switchedFrom, to })
+      : t('detail.switchModelTo', { to })
+  }
+  const subpath = part.kind === "location" && part.subpath ? ` (${part.subpath})` : ""
+  const to = `${part.value || ""}${subpath}`
+  if (part.kind === "agent") {
+    return switchedFrom
+      ? t('detail.switchAgent', { from: switchedFrom, to })
+      : t('detail.switchAgentTo', { to })
+  }
+  return switchedFrom
+    ? t('detail.switchLocation', { from: switchedFrom, to })
+    : t('detail.switchLocationTo', { to })
+}
+
+/** A non-interactive informational row for agent/model/directory switches — looks like the action
+ *  summaries but opens nothing and takes no focus. */
+function SwitchPartView({ part, t }: { part: MessagePart; t: Translator }) {
+  const label = switchPartLabel(part, t)
+  return (
+    <div className="message-switch-summary" role="note" aria-label={part.text || label}>
+      {label}
+    </div>
+  )
+}
+
+/** Unknown future wire message types surface as a labelled summary with the sanitized payload one
+ *  click away — never dropped from the transcript, and never rendered inline. */
+function FallbackPartView({ part, timestamp, t }: { part: MessagePart; timestamp?: string; t: Translator }) {
+  const [open, setOpen] = useState(false)
+  const typeName = part.typeName || "unknown"
+  return (
+    <>
+      <button type="button" className="message-fallback-summary" onClick={() => setOpen(true)}>
+        {t('detail.fallbackLabel', { typeName })}
+      </button>
+      {open && (
+        <Modal title={t('detail.fallbackTitle')} timestamp={timestamp} onClose={() => setOpen(false)} t={t}>
+          <pre className="message-tool-output">{JSON.stringify(part.raw, null, 2)}</pre>
         </Modal>
       )}
     </>
@@ -1300,6 +1433,37 @@ function MessagePartView({
         t={t}
       />
     )
+  }
+
+  if (part.type === "switch") {
+    return <SwitchPartView part={part} t={t} />
+  }
+
+  if (part.type === "system") {
+    return (
+      <div className="message-system-row">
+        {part.text && <span className="message-system-text">{part.text}</span>}
+        {part.description && <span className="message-system-description">{part.description}</span>}
+      </div>
+    )
+  }
+
+  if (part.type === "skill-activation") {
+    return (
+      <div className="message-skill-summary">
+        <span className="message-skill-name">{t('detail.skillActivated', { name: part.name || part.skillId || "" })}</span>
+        {part.text && <span className="message-skill-text">{part.text}</span>}
+      </div>
+    )
+  }
+
+  if (part.type === "file-content") {
+    if (!part.uri) return null
+    return <FileContentView uri={part.uri} mime={part.mime || ""} name={part.name} t={t} />
+  }
+
+  if (part.type === "fallback") {
+    return <FallbackPartView part={part} timestamp={timestamp} t={t} />
   }
 
   return null
@@ -1702,6 +1866,7 @@ function mergeFetchedMessages(current: MessageEnvelope[], fetched: MessageEnvelo
       || previous.info.compactionStatus !== message.info.compactionStatus
       || previous.info.time.completed !== message.info.time.completed
       || previous.info.delivery !== message.info.delivery
+      || !sameEnvelopeMetadata(previous.info, message.info)
     return !metadataChanged && partsEqual(previous.parts, mergedParts) ? previous : { ...message, parts: mergedParts }
   })
 }
@@ -2143,6 +2308,13 @@ const MessageArticle = memo(function MessageArticle({
             t={t}
           />
         )
+      )}
+      {(message.info.error || message.info.finish === "error") && (
+        <div className="message-error-row">
+          {message.info.error
+            ? t('detail.assistantError', { message: message.info.error.message || message.info.finish || "" })
+            : t('detail.assistantInterrupted')}
+        </div>
       )}
       {message.info.delivery === "queue" && (
         <div className="message-delivery-notice">

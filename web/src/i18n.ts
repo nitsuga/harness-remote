@@ -182,6 +182,17 @@ type TranslationKey =
   | 'detail.actionWhileWorking'
   | 'detail.queuedPrompt'
   | 'detail.cancelQueuedPrompt'
+  | 'detail.switchAgent'
+  | 'detail.switchAgentTo'
+  | 'detail.switchModel'
+  | 'detail.switchModelTo'
+  | 'detail.switchLocation'
+  | 'detail.switchLocationTo'
+  | 'detail.skillActivated'
+  | 'detail.fallbackLabel'
+  | 'detail.fallbackTitle'
+  | 'detail.assistantError'
+  | 'detail.assistantInterrupted'
   | 'todo.title'
   | 'todo.hide'
   | 'todo.show'
@@ -285,6 +296,9 @@ type TranslationKey =
   | 'action.toolFailed'
   | 'action.running'
   | 'action.preparingTool'
+  | 'action.exitCode'
+  | 'action.shellTimeout'
+  | 'action.shellKilled'
   | 'action.showDiffFor'
   | 'action.actionsFallback'
   | 'action.countReadOne'
@@ -505,6 +519,17 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.actionWhileWorking': 'Available once the agent is idle.',
     'detail.queuedPrompt': 'Queued · waiting to send',
     'detail.cancelQueuedPrompt': 'Cancel queued prompt',
+    'detail.switchAgent': 'Switched agent: {from} → {to}',
+    'detail.switchAgentTo': 'Switched agent to {to}',
+    'detail.switchModel': 'Switched model: {from} → {to}',
+    'detail.switchModelTo': 'Switched model to {to}',
+    'detail.switchLocation': 'Switched directory: {from} → {to}',
+    'detail.switchLocationTo': 'Switched directory to {to}',
+    'detail.skillActivated': 'Activated skill: {name}',
+    'detail.fallbackLabel': 'Unknown message type ({typeName})',
+    'detail.fallbackTitle': 'Unknown message type',
+    'detail.assistantError': 'Error: {message}',
+    'detail.assistantInterrupted': 'Step interrupted',
     'todo.title': 'Todo Items',
     'todo.hide': 'Hide',
     'todo.show': 'Show',
@@ -559,6 +584,9 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'action.toolFailed': 'Tool failed',
     'action.running': 'Running…',
     'action.preparingTool': 'Preparing {tool}',
+    'action.exitCode': 'exit {n}',
+    'action.shellTimeout': 'timed out',
+    'action.shellKilled': 'killed',
     'action.showDiffFor': 'Show diff for {file}',
     'action.actionsFallback': 'Actions',
     'action.countReadOne': 'read 1 file',
@@ -827,6 +855,17 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.actionWhileWorking': 'Disponibile quando l’agente è inattivo.',
     'detail.queuedPrompt': 'In coda · in attesa di invio',
     'detail.cancelQueuedPrompt': 'Annulla il prompt in coda',
+    'detail.switchAgent': 'Agente cambiato: {from} → {to}',
+    'detail.switchAgentTo': 'Agente cambiato in {to}',
+    'detail.switchModel': 'Modello cambiato: {from} → {to}',
+    'detail.switchModelTo': 'Modello cambiato in {to}',
+    'detail.switchLocation': 'Directory cambiata: {from} → {to}',
+    'detail.switchLocationTo': 'Directory cambiata in {to}',
+    'detail.skillActivated': 'Skill attivata: {name}',
+    'detail.fallbackLabel': 'Tipo di messaggio sconosciuto ({typeName})',
+    'detail.fallbackTitle': 'Tipo di messaggio sconosciuto',
+    'detail.assistantError': 'Errore: {message}',
+    'detail.assistantInterrupted': 'Passaggio interrotto',
     'todo.title': 'Todo',
     'todo.hide': 'Nascondi',
     'todo.show': 'Mostra',
@@ -874,6 +913,9 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'action.toolFailed': 'Tool fallito',
     'action.running': 'In esecuzione…',
     'action.preparingTool': 'Preparazione di {tool}',
+    'action.exitCode': 'uscita {n}',
+    'action.shellTimeout': 'scaduto',
+    'action.shellKilled': 'terminato',
     'action.showDiffFor': 'Mostra diff per {file}',
     'action.actionsFallback': 'Azioni',
     'action.countReadOne': 'letto 1 file',
@@ -1142,6 +1184,17 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.actionWhileWorking': '代理程式閒置後即可使用。',
     'detail.queuedPrompt': '已排隊 · 等待傳送',
     'detail.cancelQueuedPrompt': '取消佇列中的提示',
+    'detail.switchAgent': '已切換代理：{from} → {to}',
+    'detail.switchAgentTo': '已切換代理至 {to}',
+    'detail.switchModel': '已切換模型：{from} → {to}',
+    'detail.switchModelTo': '已切換模型至 {to}',
+    'detail.switchLocation': '已切換目錄：{from} → {to}',
+    'detail.switchLocationTo': '已切換目錄至 {to}',
+    'detail.skillActivated': '已啟用技能：{name}',
+    'detail.fallbackLabel': '未知的訊息類型（{typeName}）',
+    'detail.fallbackTitle': '未知的訊息類型',
+    'detail.assistantError': '錯誤：{message}',
+    'detail.assistantInterrupted': '步驟已中斷',
     'todo.title': '待辦事項',
     'todo.hide': '隱藏',
     'todo.show': '顯示',
@@ -1189,6 +1242,9 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'action.toolFailed': '工具失敗',
     'action.running': '執行中…',
     'action.preparingTool': '正在準備 {tool}',
+    'action.exitCode': '退出碼 {n}',
+    'action.shellTimeout': '逾時',
+    'action.shellKilled': '已終止',
     'action.showDiffFor': '顯示 {file} 的差異',
     'action.actionsFallback': '動作',
     'action.countReadOne': '讀取 1 個檔案',
@@ -1406,6 +1462,17 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'detail.actionWhileWorking': '代理空闲后即可使用。',
     'detail.queuedPrompt': '已排队 · 等待发送',
     'detail.cancelQueuedPrompt': '取消队列中的提示',
+    'detail.switchAgent': '已切换代理：{from} → {to}',
+    'detail.switchAgentTo': '已切换代理至 {to}',
+    'detail.switchModel': '已切换模型：{from} → {to}',
+    'detail.switchModelTo': '已切换模型至 {to}',
+    'detail.switchLocation': '已切换目录：{from} → {to}',
+    'detail.switchLocationTo': '已切换目录至 {to}',
+    'detail.skillActivated': '已启用技能：{name}',
+    'detail.fallbackLabel': '未知的消息类型（{typeName}）',
+    'detail.fallbackTitle': '未知的消息类型',
+    'detail.assistantError': '错误：{message}',
+    'detail.assistantInterrupted': '步骤已中断',
     'todo.title': '待办事项',
     'todo.hide': '隐藏',
     'todo.show': '显示',
@@ -1502,6 +1569,9 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'action.toolFailed': '工具失败',
     'action.running': '运行中…',
     'action.preparingTool': '正在准备 {tool}',
+    'action.exitCode': '退出码 {n}',
+    'action.shellTimeout': '超时',
+    'action.shellKilled': '已终止',
     'action.showDiffFor': '显示 {file} 的差异',
     'action.actionsFallback': '操作',
     'action.countReadOne': '读取了 1 个文件',

@@ -2123,7 +2123,8 @@ a:focus-visible,
 
 .message-reasoning-summary,
 .message-action-summary,
-.message-tool-summary {
+.message-tool-summary,
+.message-fallback-summary {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -2153,7 +2154,8 @@ a:focus-visible,
 
 .message-reasoning-summary > *,
 .message-action-summary > *,
-.message-tool-summary > * {
+.message-tool-summary > *,
+.message-fallback-summary > * {
   min-width: 0;
   overflow-wrap: anywhere;
 }
@@ -2181,7 +2183,8 @@ a:focus-visible,
 /* A reasoning/tool run is summarized as an action row rather than a reasoning row. It needs the
    same separation before the following answer, otherwise its text starts flush against the row. */
 .message-action-summary + .message-content,
-.message-tool-summary + .message-content {
+.message-tool-summary + .message-content,
+.message-fallback-summary + .message-content {
   margin-top: var(--space-4);
 }
 
@@ -2197,7 +2200,11 @@ a:focus-visible,
 }
 
 .message > .message-action-summary:first-child,
-.message > .message-tool-summary:first-child {
+.message > .message-tool-summary:first-child,
+.message > .message-fallback-summary:first-child,
+.message > .message-switch-summary:first-child,
+.message > .message-system-row:first-child,
+.message > .message-skill-summary:first-child {
   margin-top: 0;
 }
 
@@ -2263,6 +2270,17 @@ a:focus-visible,
   line-height: 1;
 }
 
+/* Outcome badges ride the tool meta row like the error ✕ and pending … markers: the exit code of
+   a finished shell, and the distinct timeout/killed outcomes of an interrupted one. */
+.message-tool-status-exit,
+.message-tool-status-timeout,
+.message-tool-status-killed {
+  color: var(--muted);
+  font-size: var(--font-xs);
+  line-height: 1;
+  font-family: var(--font-mono);
+}
+
 .message-tool-error.message-tool-output {
   color: var(--danger);
 }
@@ -2279,6 +2297,63 @@ a:focus-visible,
 
 .message-tool-command:first-child {
   margin-top: 0;
+}
+
+/* --- Structured OpenCode 2 part rows --- */
+
+/* Switch / system / skill-activation rows are informational, so they share the summary family's
+   wrap-safe card look but are never buttons: no pointer, no focus, nothing opens. */
+.message-switch-summary,
+.message-system-row,
+.message-skill-summary {
+  width: 100%;
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  margin-top: var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-subtle);
+  padding: var(--space-1) var(--space-3);
+  color: var(--muted-strong);
+  font-size: var(--font-xs);
+  font-weight: 500;
+  text-align: left;
+}
+
+.message-switch-summary {
+  cursor: default;
+}
+
+.message-system-row,
+.message-skill-summary {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.message-system-description,
+.message-skill-text {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.message-system-description {
+  font-style: italic;
+}
+
+/* A failed assistant step / compaction surfaces as a danger-toned line under the affected bubble,
+   so an interrupted turn reads as an error instead of a quiet empty reply. */
+.message-error-row {
+  margin-top: var(--space-2);
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius-md);
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: var(--font-xs);
+  font-weight: 600;
+  overflow-wrap: anywhere;
 }
 
 .message-patch {
@@ -2804,6 +2879,7 @@ a:focus-visible,
   .message-reasoning-summary:hover,
   .message-action-summary:hover,
   .message-tool-summary:hover,
+  .message-fallback-summary:hover,
   .message-diff-row:hover,
   .context-chip:hover,
   .composer-chip:hover,
