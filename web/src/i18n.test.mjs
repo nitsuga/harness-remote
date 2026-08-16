@@ -133,6 +133,7 @@ assert.equal(en('detail.assistantError', { message: 'aborted' }), 'Error: aborte
 const SUBAGENT_KEYS = [
   'detail.openChildSession', 'detail.openingChildSession', 'detail.subagentTask',
   'detail.subagentResult', 'detail.showMore', 'detail.showLess', 'detail.subagentElapsed',
+  'detail.subagentLiveOutput', 'detail.subagentLivePlaceholder',
   'detail.childSession', 'detail.childSessionOf'
 ]
 for (const language of ['en', 'it', 'zh-TW', 'zh-CN']) {

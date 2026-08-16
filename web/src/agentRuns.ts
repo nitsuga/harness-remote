@@ -126,6 +126,13 @@ export type SubagentRun = {
   model?: { id: string; providerID?: string; variant?: string }
 }
 
+/** Whether a delegated run is still in flight. Only these statuses keep the live elapsed clock
+ *  ticking and the live output window following the child; terminal runs (completed/failed/stopped)
+ *  and idle freeze at their own timestamps. */
+export function isLiveSubagentStatus(status: AgentRunStatus): boolean {
+  return status === "working" || status === "waiting" || status === "retrying"
+}
+
 /** Map the v2 subagent tool's completion vocabulary onto the shared terminal states:
  *  "completed" → completed, "error" → failed, "cancelled" → stopped. Anything else (notably
  *  the in-flight "running") yields no terminal status, so `normalizeAgentRunStatus` keeps

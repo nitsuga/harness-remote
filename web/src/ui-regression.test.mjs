@@ -1087,6 +1087,37 @@ assert.match(styles, /\.subagent-run-error\s*\{[^}]*background:\s*var\(--danger-
 assert.match(styles, /\.subagent-run-working\s*\{[^}]*border-left-color:\s*var\(--primary\)/, 'a working run must read as active')
 assert.match(styles, /\.session-child-badge\s*\{[^}]*background:\s*var\(--secondary-soft\)/, 'the child badge must use the subagent accent')
 
+// --- Live running-subagent summary (issue #47) ---------------------------------------------------
+// The child session id exists ONLY on the ephemeral `session.tool.progress` event while the child
+// runs (durable transcript state carries it only after the terminal tool success lands), so the
+// run card must appear via that event and keep a live output window fed from the child's own
+// transcript. These guards pin the wiring: the event handler, the refetch preservation (or the
+// card blinks out on every poll), the poll/SSE refresh, and the card's live window itself.
+assert.ok(app.includes('applyStreamedToolProgress'), 'the v2 session.tool.progress event must inject the child session id onto the running tool part')
+assert.ok(app.includes('type === "session.tool.progress"'), 'the SSE handler must recognize the ephemeral subagent progress event')
+assert.match(
+  app,
+  /function reconcileStreamedPart[\s\S]*?previousChildID = previous\.state\?\.metadata\?\.sessionID[\s\S]*?incomingChildID = incoming\.state\?\.metadata\?\.sessionID/,
+  'a refetched tool part must not erase the ephemeral child correlation, or the run card blinks out on every poll'
+)
+assert.ok(app.includes('refreshLiveSubagentOutput'), 'the live child-output capture must run on the poll and SSE refresh cadence')
+assert.ok(app.includes('liveSubagentChildIDs'), 'the live-output capture must be scoped to runs that are actually in flight')
+assert.ok(app.includes('extractChildOutputLines'), 'the live-output capture must read the child transcript tail')
+assert.ok(app.includes("t('detail.subagentLivePlaceholder')"), 'a live run without output yet must show the quiet placeholder')
+assert.match(
+  app,
+  /liveRun && output[\s\S]*?subagent-run-live/,
+  'a live run with captured output must render the monospace live window'
+)
+assert.match(
+  app,
+  /liveRun && !output[\s\S]*?subagent-run-live-placeholder/,
+  'a live run without captured output must render the placeholder, not an empty window'
+)
+assert.ok(styles.includes('.subagent-run-live'), 'the live window needs its fixed-height clamped region')
+assert.ok(styles.includes('.subagent-run-live.expanded'), 'the live window needs the expanded bounded region')
+assert.ok(styles.includes('.subagent-run-live-placeholder'), 'the no-output placeholder needs its quiet treatment')
+
 // --- Richer session activity states (issue #8) -------------------------------------------------
 // The v2 execution memory must be cleared only on a profile/config namespace change, never on a
 // mere session switch: terminal/error facts must survive browsing away and back (gate 2 decision —

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { subagentCompletionDescription, subagentRunFromCompletion, subagentRunFromTool } from './agentRuns.ts'
+import { isLiveSubagentStatus, subagentCompletionDescription, subagentRunFromCompletion, subagentRunFromTool } from './agentRuns.ts'
+import { applyStreamedToolProgress, extractChildOutputLines, liveSubagentChildIDs } from './subagentLive.ts'
 import { createTranslator } from './i18n.ts'
 import {
   applyInboxDelivery,
@@ -1307,6 +1308,164 @@ assert.equal(subagentCompletionDescription([
   { id: 'x:text', type: 'text', text: `<subagent id="ses_child">\n${'long '.repeat(100)}\n</subagent>` }
 ]), undefined, 'an over-long completion payload is not a card headline')
 assert.equal(subagentCompletionDescription([]), undefined, 'an empty envelope carries no description')
+
+// --- Feature #47 lane: live running-subagent summary ------------------------------------------
+// Synthetic fixtures only — every id was invented here. The shapes mirror the opencode v2
+// `subagent` tool contract exactly as the live server publishes them: the ephemeral
+// `session.tool.progress` event carries `{ sessionID, assistantMessageID, id, metadata }` with
+// `metadata: { sessionID: <childID>, status: "running" }` and `id` = the tool-call id, while the
+// child's own transcript (GET /api/session/{child}/message) is the source of the live output.
+
+// The live status vocabulary gates both the elapsed clock and the live output window.
+assert.equal(isLiveSubagentStatus('working'), true)
+assert.equal(isLiveSubagentStatus('waiting'), true)
+assert.equal(isLiveSubagentStatus('retrying'), true)
+assert.equal(isLiveSubagentStatus('completed'), false)
+assert.equal(isLiveSubagentStatus('failed'), false)
+assert.equal(isLiveSubagentStatus('stopped'), false)
+assert.equal(isLiveSubagentStatus('idle'), false)
+
+// A parent transcript whose streaming `subagent` tool part has no child correlation yet — exactly
+// the bare launch row the app showed while the child ran before this feature.
+const parentWithStreamingSubagent = toMessageEnvelope({
+  id: 'msg_parent',
+  time: { created: 1 },
+  type: 'assistant',
+  content: [
+    {
+      type: 'tool',
+      id: 'call_00_sub1',
+      name: 'subagent',
+      executed: false,
+      state: {
+        status: 'streaming',
+        input: { agent: 'explorer', description: 'Find the bug', prompt: 'Investigate' },
+        metadata: {}
+      },
+      time: { created: 1 }
+    }
+  ]
+}, 'ses_parent')
+assert.equal(subagentRunFromTool(parentWithStreamingSubagent.parts[0]), null,
+  'a streaming subagent part without metadata.sessionID must stay a bare tool row')
+
+// The captured-shape progress event: exactly what opencode `subagent.ts` publishes at launch.
+const subagentProgressEvent = {
+  type: 'session.tool.progress',
+  sessionID: 'ses_parent',
+  assistantMessageID: 'msg_parent',
+  id: 'call_00_sub1',
+  metadata: { sessionID: 'ses_child', status: 'running' }
+}
+
+// (a) The progress event injects its metadata onto the matching tool part, immutably.
+const injected = applyStreamedToolProgress(
+  [parentWithStreamingSubagent],
+  subagentProgressEvent.sessionID,
+  subagentProgressEvent.assistantMessageID,
+  subagentProgressEvent.id,
+  subagentProgressEvent.metadata
+)
+assert.deepEqual(injected[0].parts[0].state.metadata, { sessionID: 'ses_child', status: 'running' },
+  'the progress metadata must land on the matching tool part so the run card appears while the child runs')
+assert.notEqual(injected[0].parts[0], parentWithStreamingSubagent.parts[0],
+  'the injected part must be a fresh object (immutable update)')
+assert.equal(injected[0].info.id, parentWithStreamingSubagent.info.id,
+  'unrelated envelope fields must be preserved')
+assert.equal(subagentRunFromTool(injected[0].parts[0])?.childID, 'ses_child',
+  'the injected correlation must make subagentRunFromTool derive a run immediately')
+assert.equal(subagentRunFromTool(injected[0].parts[0])?.status, 'working',
+  'the injected status "running" must map to the live working state')
+// Merging is keyed on the part's callID and the event's assistantMessageID: a different call or a
+// different message leaves the transcript untouched (same array, same part object).
+const noMatchInput = [parentWithStreamingSubagent]
+assert.equal(
+  applyStreamedToolProgress(noMatchInput, 'ses_parent', 'msg_parent', 'call_00_other', subagentProgressEvent.metadata),
+  noMatchInput,
+  'a progress event for an unknown callID must not touch the transcript'
+)
+const otherSessionInput = [parentWithStreamingSubagent]
+assert.equal(
+  applyStreamedToolProgress(otherSessionInput, 'ses_other', 'msg_parent', 'call_00_sub1', subagentProgressEvent.metadata),
+  otherSessionInput,
+  'a progress event for another session must not touch the transcript'
+)
+// A later event with more metadata merges over, keeping earlier keys (the terminal success event
+// arrives through the durable part update, but the merge must stay additive regardless).
+const reInjected = applyStreamedToolProgress(injected, 'ses_parent', 'msg_parent', 'call_00_sub1', { status: 'completed' })
+assert.deepEqual(reInjected[0].parts[0].state.metadata, { sessionID: 'ses_child', status: 'completed' },
+  'a later progress merge must keep the child id and take the newer status')
+
+// (b) The live-output extraction flattens the child transcript's text parts into bounded lines.
+const childTranscript = [
+  toMessageEnvelope({
+    id: 'msg_child_user',
+    time: { created: 1 },
+    type: 'user',
+    text: 'You are a subagent spawned by another session. Investigate.'
+  }, 'ses_child'),
+  toMessageEnvelope({
+    id: 'msg_child_1',
+    time: { created: 2 },
+    type: 'assistant',
+    content: [
+      { type: 'reasoning', text: 'Let me think about the parser.' },
+      { type: 'text', text: 'Found the bug.\n\nIt was the parser.' }
+    ]
+  }, 'ses_child'),
+  toMessageEnvelope({
+    id: 'msg_child_2',
+    time: { created: 3 },
+    type: 'assistant',
+    content: [
+      { type: 'tool', id: 'call_c1', name: 'read', executed: true, state: { status: 'completed', metadata: {} }, time: { created: 3, completed: 4 } },
+      { type: 'text', text: 'Done.' }
+    ]
+  }, 'ses_child')
+]
+assert.deepEqual(extractChildOutputLines(childTranscript),
+  ['You are a subagent spawned by another session. Investigate.', 'Found the bug.', 'It was the parser.', 'Done.'],
+  'text parts flatten to lines; reasoning and tool parts stay out; blank lines are dropped')
+assert.deepEqual(extractChildOutputLines(childTranscript, 2),
+  ['It was the parser.', 'Done.'],
+  'the cap keeps the newest lines, not the oldest')
+assert.deepEqual(extractChildOutputLines([]), [], 'an empty child transcript extracts no lines')
+
+// The live-window fetch is scoped to runs that are actually in flight.
+const parentWithLiveChild = applyStreamedToolProgress(
+  [parentWithStreamingSubagent],
+  subagentProgressEvent.sessionID,
+  subagentProgressEvent.assistantMessageID,
+  subagentProgressEvent.id,
+  subagentProgressEvent.metadata
+)
+assert.deepEqual(liveSubagentChildIDs(parentWithLiveChild), ['ses_child'],
+  'a correlated running subagent is a live child')
+const parentWithDoneChild = toMessageEnvelope({
+  id: 'msg_parent_done',
+  time: { created: 1, completed: 2 },
+  type: 'assistant',
+  content: [
+    {
+      type: 'tool',
+      id: 'call_00_sub2',
+      name: 'subagent',
+      executed: true,
+      state: {
+        status: 'completed',
+        input: { agent: 'explorer', description: 'Find the bug', prompt: 'Investigate' },
+        output: 'Found it',
+        metadata: { sessionID: 'ses_child', status: 'completed' }
+      },
+      time: { created: 1, ran: 2, completed: 3 }
+    }
+  ]
+}, 'ses_parent')
+assert.deepEqual(liveSubagentChildIDs([parentWithDoneChild]), [],
+  'a terminal subagent is not a live child; its result card takes over')
+assert.deepEqual(liveSubagentChildIDs([parentWithStreamingSubagent]), [],
+  'a streaming subagent without correlation is not a live child')
+
 
 // --- Session todo derivation from transcript todowrite parts (issue #7) ----------------------
 // Captured-style fixture: an assistant message carrying an executed `todowrite` tool part (v2 has
