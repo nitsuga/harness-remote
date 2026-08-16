@@ -7,6 +7,7 @@ import type {
   MessagePart,
   ModelOption,
   QuestionRequest,
+  SavedPermission,
   Session,
   ToolState
 } from "./types"
@@ -27,6 +28,7 @@ export type V2Session = {
   subpath?: string
   model?: { id?: string; providerID?: string; variant?: string }
   projectID?: string
+  agent?: string
   parentID?: string
   fork?: { sessionID?: string; parentID?: string }
   revert?: { messageID?: string; partID?: string }
@@ -55,7 +57,26 @@ export function toSession(session: V2Session): Session {
   }
   const parentID = session.parentID ?? session.fork?.parentID ?? session.fork?.sessionID
   if (parentID) Object.defineProperty(mapped, "parentID", { value: parentID, enumerable: false })
+  // Only set when the wire carried it, so strict-shape fixtures without an agent stay stable.
+  if (session.agent) mapped.agent = session.agent
   return mapped
+}
+
+/**
+ * One saved allow-always grant from `GET /api/permission/saved`. The resource is usually a
+ * permission pattern (`/home/*`) that the revoke UI needs verbatim to stay usable, so it is kept
+ * as-is unless it matches the credential heuristic — any resource containing a key/token/secret/
+ * password/credential segment (e.g. a stored API-token string, or a path into a `secrets/` tree)
+ * is masked WHOLE rather than segment-wise: a partially masked path still leaks structure, and the
+ * revoke UI remains usable through action + project id alone for the rare masked grant.
+ */
+export function toSavedPermission(raw: { id?: string; projectID?: string; action?: string; resource?: string }): SavedPermission {
+  return {
+    id: raw.id ?? "",
+    projectID: raw.projectID ?? "",
+    action: raw.action ?? "",
+    resource: raw.resource && FALLBACK_SECRET_KEY.test(raw.resource) ? "[redacted]" : (raw.resource ?? "")
+  }
 }
 
 /**
@@ -173,8 +194,9 @@ export function toFileContentPart(file: { uri: string; mime: string; name?: stri
 /**
  * Any key whose name matches these is treated as a credential by `sanitizeForFallback` and stripped
  * from the fallback payload before it reaches the transcript (never persist, render or log secrets).
+ * Also reused by `toSavedPermission` to mask saved resources that look like credentials.
  */
-const FALLBACK_SECRET_KEY = /key|token|secret|password|credential/i
+export const FALLBACK_SECRET_KEY = /key|token|secret|password|credential/i
 
 /**
  * Deep-copy an unknown wire payload for a `fallback` part, stripping anything that could be a

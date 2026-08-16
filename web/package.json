@@ -35,6 +35,7 @@
     "test:session-status": "node --experimental-strip-types src/session-status.test.mjs",
     "test:markdown": "node --experimental-strip-types src/markdown-directives.test.mjs",
     "test:config": "node --experimental-strip-types src/server-config.test.mjs",
+    "test:attention": "node --experimental-strip-types src/attention-inbox.test.mjs",
     "test:attachments": "node --experimental-strip-types src/attachments.test.mjs",
     "test:agent-runs": "node --experimental-strip-types src/agent-runs.test.mjs",
     "test:mutation-coordinator": "node --experimental-strip-types src/session-mutation-coordinator.test.mjs",

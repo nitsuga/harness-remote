@@ -27,6 +27,7 @@ import {
   toMessageEnvelope,
   toModelOption,
   toQuestionRequest,
+  toSavedPermission,
   toSession,
   toSkillActivationBody,
   toSkillCommand,
@@ -411,6 +412,30 @@ export const opencode2Api = {
    *  error, never as an indeterminate delivery. */
   async cancelInboxItem(config: ServerConfig, sessionID: string, inboxID: string, directory?: string) {
     await v2Request<boolean>(config, withLocation(`/api/session/${encodeURIComponent(sessionID)}/inbox/${encodeURIComponent(inboxID)}`, directory), { method: "DELETE" })
+    return true
+  },
+
+  /** Deliver a queued inbox item now (`POST /api/session/{id}/inbox/{inboxID}/steer`). */
+  async steerInboxItem(config: ServerConfig, sessionID: string, inboxID: string, directory?: string) {
+    await v2Request<boolean>(config, withLocation(`/api/session/${encodeURIComponent(sessionID)}/inbox/${encodeURIComponent(inboxID)}/steer`, directory), { method: "POST" })
+    return true
+  },
+
+  /** Re-queue an inbox item (`POST /api/session/{id}/inbox/{inboxID}/queue`). */
+  async queueInboxItem(config: ServerConfig, sessionID: string, inboxID: string, directory?: string) {
+    await v2Request<boolean>(config, withLocation(`/api/session/${encodeURIComponent(sessionID)}/inbox/${encodeURIComponent(inboxID)}/queue`, directory), { method: "POST" })
+    return true
+  },
+
+  /** List the durable allow-always grants (`GET /api/permission/saved`) for the revoke UI. */
+  async listSavedPermissions(config: ServerConfig, directory?: string) {
+    const list = await v2Request<Array<{ id?: string; projectID?: string; action?: string; resource?: string }>>(config, withLocation("/api/permission/saved", directory))
+    return (list ?? []).map(toSavedPermission)
+  },
+
+  /** Revoke one allow-always grant (`DELETE /api/permission/saved/{id}`) so its permission prompts again. */
+  async revokeSavedPermission(config: ServerConfig, id: string, directory?: string) {
+    await v2Request<boolean>(config, withLocation(`/api/permission/saved/${encodeURIComponent(id)}`, directory), { method: "DELETE" })
     return true
   },
 

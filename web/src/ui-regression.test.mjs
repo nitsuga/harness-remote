@@ -12,6 +12,11 @@ const sessionList = readFileSync(new URL('./components/session-list.tsx', import
 const composerView = readFileSync(new URL('./components/session-composer.tsx', import.meta.url), 'utf8')
 const agentRuns = readFileSync(new URL('./agentRuns.ts', import.meta.url), 'utf8')
 const sessionStatus = readFileSync(new URL('./sessionStatus.ts', import.meta.url), 'utf8')
+const attentionInbox = readFileSync(new URL('./attentionInbox.ts', import.meta.url), 'utf8')
+const attentionPersistence = readFileSync(new URL('./attentionPersistence.ts', import.meta.url), 'utf8')
+const mutationCoordinator = readFileSync(new URL('./session-mutation-coordinator.ts', import.meta.url), 'utf8')
+const opencode2Client = readFileSync(new URL('./opencode2-client.ts', import.meta.url), 'utf8')
+const opencode2Mappers = readFileSync(new URL('./opencode2-mappers.ts', import.meta.url), 'utf8')
 
 assert.match(styles, /button\s*\{[\s\S]*?cursor:\s*pointer;/, 'enabled buttons must advertise that they can be pressed')
 assert.match(styles, /button:disabled\s*\{[\s\S]*?cursor:\s*not-allowed;/, 'disabled buttons must retain the blocked cursor')
@@ -1097,5 +1102,121 @@ assert.match(
   /function statusLabel\(status: string, t: Translator\): string \{\s*const key = STATUS_LABEL_KEYS\[status\]\s*return key \? t\(key\) : status\s*\}/,
   'unknown status words must fall back to the raw status'
 )
+
+// --- Attention inbox data layer (issue #9, Lane A) ------------------------------------------
+// The pure projection module must keep the four attention kinds and the q:/p:/f:/c: id scheme: the
+// renderer lane dedups by those ids and the dismissal layer keys generations off them.
+assert.match(
+  attentionInbox,
+  /export type AttentionItemKind = "question" \| "permission" \| "failure" \| "completion"/,
+  'attentionInbox.ts must define exactly the four attention kinds'
+)
+assert.match(attentionInbox, /return `q:\$\{requestId[^`]*\}`/, 'question items must dedup by q:<requestId>')
+assert.match(attentionInbox, /return `p:\$\{requestId[^`]*\}`/, 'permission items must dedup by p:<requestId>')
+assert.match(attentionInbox, /return `f:\$\{sessionId\}`/, 'failure items must dedup by f:<sessionId>')
+assert.match(attentionInbox, /return `c:\$\{sessionId\}`/, 'completion items must dedup by c:<sessionId>')
+// Saved permissions: the mapper must keep normal permission patterns (a usable revoke UI needs
+// them) and mask only resources that themselves look like credentials.
+assert.match(opencode2Mappers, /\[redacted\]/, 'toSavedPermission must contain the secret-like resource redaction branch')
+// The v2 client must expose the saved-permission list and the steer/queue inbox routes.
+assert.ok(opencode2Client.includes('"/api/permission/saved"'), 'the v2 client must expose the saved-permission route')
+assert.ok(opencode2Client.includes('/steer`'), 'the v2 client must expose the inbox steer route')
+assert.ok(opencode2Client.includes('/queue`'), 'the v2 client must expose the inbox queue route')
+// The run projection must carry the session agent so inbox cards can name the agent.
+assert.match(agentRuns, /if \(session\.agent\) run\.agent = session\.agent/, 'agentRuns.ts must map the session agent onto the run')
+
+// --- Attention inbox wiring (issue #9, Lane B) -------------------------------------------------
+// The view model must carry the session agent end to end, or inbox cards cannot name the agent.
+assert.match(app, /function toSessionView[\s\S]*?agent: session\.agent/, 'toSessionView must carry the session agent onto the view')
+// The inbox derivation must run after the v2 status derivation inside refreshSessions (the statuses
+// merge feeds the terminal signals), mirroring the #8 gate.
+const refreshRegion = app.slice(app.indexOf('async function refreshSessions'), app.indexOf('async function refreshSessionsWithIndicator'))
+assert.ok(
+  refreshRegion.indexOf('deriveSessionStatus(') !== -1 && refreshRegion.indexOf('deriveSessionStatus(') < refreshRegion.indexOf('collectAttentionItems('),
+  'the attention derivation must run after the v2 status derivation in refreshSessions'
+)
+// Dismissed/notified persistence must use the hashed namespace key pattern, exactly like tombstones.
+assert.ok(app.includes('attentionNamespaceKey'), 'attention state must be namespaced per profile/config like tombstones')
+assert.ok(app.includes('attentionStorageKey(attentionNamespaceKey('), 'attention state must persist under the hashed namespace key')
+// The notification fire condition must skip completions, the focused session, dismissed items, and
+// dedup via the shared membership key (bare id for q/p — session.updated churns, so a generation
+// key would re-notify the same request — generation for f/c).
+assert.match(
+  app,
+  /item\.kind !== "completion"[\s\S]*?item\.sessionId !== selectedID[\s\S]*?!notifiedRef\.current\.has\(notifiedKeyFor\(item\)\)/,
+  'attention notifications must skip completions and the focused session and dedup via the shared membership key'
+)
+assert.match(
+  app,
+  /const fresh = filteredItems\.filter/,
+  'attention notifications must only fire for items not dismissed by the user'
+)
+// Desktop fires the OS notification only when the window is NOT focused — Electron suppresses the
+// toast on a focused window, so marking without delivery would zero the badge and silently drop
+// the item; the badge carries the alert on the collapsed header instead.
+assert.match(
+  app,
+  /if \(fresh\.length > 0 && isDesktopPlatform\(\) && !windowFocused\)/,
+  'desktop must fire and mark notifications only while the window is not focused'
+)
+// The notified membership key must match the dismissal key form (bare id for q/p, generation for
+// f/c) or dedup and badge counting diverge.
+assert.match(
+  app,
+  /const notifiedKeyFor = \(item: AttentionItem\): string =>\s*item\.kind === "question" \|\| item\.kind === "permission" \? item\.id : itemGeneration\(item\)/,
+  'the notified set must use bare ids for q/p and generations for f/c, like dismissals'
+)
+// Dismissal must write the key form filterDismissed honors: bare id for q/p (their at churns with
+// session.updated), generation for f/c — a wrong key silently no-ops the dismissal.
+assert.match(
+  app,
+  /const dismissalKey = item\.kind === "question" \|\| item\.kind === "permission" \? item\.id : itemGeneration\(item\)/,
+  'dismissal must write bare ids for q/p and generations for f/c'
+)
+// Terminal signals (failed/completed/needs-attention) reach the inbox for v2 only: v1/bridge wire
+// statuses carry no terminal attention, so their runs surface only the questions/permissions.
+assert.match(
+  app,
+  /const terminalStatus = config\.backend === "opencode2"/,
+  'terminal inbox signals must be v2-only'
+)
+// The queued-prompt operations need an inbox lease kind in the coordinator.
+assert.ok(mutationCoordinator.includes('"inbox"'), 'the mutation coordinator must have an inbox lease kind')
+// The v2 client surface the wiring depends on must keep its inbox routes.
+assert.ok(opencode2Client.includes('listInbox('), 'the v2 client must keep the per-session inbox listing route')
+// Lane A's persistence module must keep the prune contract the poll uses to bound storage growth.
+assert.ok(attentionPersistence.includes('export function pruneAttentionState'), 'attentionPersistence.ts must expose the prune helper')
+
+// --- Attention inbox interaction handlers (issue #9, Lane C) -----------------------------------
+// The context contract must expose the queued-prompt operations, the open action, and the
+// on-demand saved-permission surface the panel lane consumes. It lives in its own module so the
+// panel components can import it without a module cycle (App → session-list → panel → App).
+const attentionInboxContext = readFileSync(new URL('./attentionInboxContext.ts', import.meta.url), 'utf8')
+const inboxContextRegion = attentionInboxContext.slice(
+  attentionInboxContext.indexOf('export type AttentionInboxContextValue'),
+  attentionInboxContext.indexOf('export const AttentionInboxContext')
+)
+for (const member of [
+  'open(item: AttentionItem): void',
+  'cancelQueued(sessionID: string, inboxID: string): void',
+  'steerQueued(sessionID: string, inboxID: string): void',
+  'queueQueued(sessionID: string, inboxID: string): void',
+  'savedPermissions: readonly SavedPermission[]',
+  'loadSavedPermissions(): void',
+  'revokeSavedPermission(id: string): void'
+]) {
+  assert.ok(inboxContextRegion.includes(member), `the inbox context contract must expose ${member}`)
+}
+// The context must NOT live in App.tsx: a cycle would form because App imports the session list,
+// which renders the panel, which imports the context (App → session-list → panel → App).
+assert.ok(!app.includes('export const AttentionInboxContext'), 'the inbox context must live outside App.tsx to break the module cycle')
+// Queued-prompt operations are real server mutations: they must take the coordinator's inbox lease
+// through the component's established lease helpers (acquireMutation wraps acquireLease and keeps
+// the lock signal in step with the existing session mutations).
+assert.ok(app.includes('acquireMutation("inbox"'), 'queued-prompt operations must go through the inbox lease')
+// Saved permissions load on demand only: the panel triggers the one fetch, the poll never does.
+assert.ok(app.includes('listSavedPermissions(config'), 'the saved-permission list must be fetched through the client')
+assert.ok(app.includes('loadSavedPermissions'), 'the context must expose an on-demand saved-permission loader')
+assert.ok(!refreshRegion.includes('listSavedPermissions'), 'saved permissions must never load inside the poll')
 
 console.log('ui regression tests passed')

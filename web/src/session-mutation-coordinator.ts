@@ -87,7 +87,7 @@
  *    can never clear a newer lease.
  */
 
-/** The 14 mutation kinds the coordinator arbitrates. */
+/** The 15 mutation kinds the coordinator arbitrates. */
 export const MUTATION_KINDS = [
   "fork",
   "prompt",
@@ -100,6 +100,7 @@ export const MUTATION_KINDS = [
   "abort",
   "question",
   "permission",
+  "inbox",
   "create",
   "model",
   "agent"

@@ -103,4 +103,10 @@ assert.deepEqual(
   'permissions must outrank needsAttention'
 )
 
+// The session agent rides onto the run when present (issue #9) so the attention inbox card can name
+// the agent; a session without one must carry no agent field (strict-shape fixtures stay stable).
+const agentRun = toAgentRun(session({ agent: 'build' }), 'opencode2')
+assert.equal(agentRun.agent, 'build', 'the run must carry the session agent when present')
+assert.equal('agent' in toAgentRun(session(), 'opencode2'), false, 'a session without an agent must carry no agent field')
+
 console.log('agent run normalization tests passed')

@@ -21,6 +21,7 @@ import type {
   PathInfo,
   QuestionRequest,
   PermissionRequest,
+  SavedPermission,
   ServerConfig,
   Session,
   SessionStatus,
@@ -406,6 +407,30 @@ const apiV1 = {
     // state and cancellation exist only on the v2 server. Reject honestly rather than pretending
     // the item was cancelled. Only the opencode2 client implements cancelInboxItem.
     return Promise.reject(new Error("Inbox cancellation is only supported on OpenCode 2 servers"))
+  },
+
+  steerInboxItem(_config: ServerConfig, _sessionID: string, _inboxID: string, _directory?: string) {
+    // Inbox steering (deliver a queued item now) exists only on the v2 server. Reject honestly
+    // rather than pretending the item was steered.
+    return Promise.reject(new Error("Inbox steering is only supported on OpenCode 2 servers"))
+  },
+
+  queueInboxItem(_config: ServerConfig, _sessionID: string, _inboxID: string, _directory?: string) {
+    // Inbox queuing exists only on the v2 server. Reject honestly rather than pretending the item
+    // was queued.
+    return Promise.reject(new Error("Inbox queuing is only supported on OpenCode 2 servers"))
+  },
+
+  listSavedPermissions(_config: ServerConfig, _directory?: string) {
+    // OpenCode 1 (and the other v1-shaped backends) expose no saved-permission store — allow-always
+    // grants are a v2 concept. Degrade to an empty list instead of pretending to enumerate grants.
+    return Promise.resolve([] as SavedPermission[])
+  },
+
+  revokeSavedPermission(_config: ServerConfig, _id: string, _directory?: string) {
+    // Saved-permission revocation exists only on the v2 server. Reject honestly rather than
+    // pretending the grant was revoked.
+    return Promise.reject(new Error("Saved permission revocation is only supported on OpenCode 2 servers"))
   },
 
   revertMessage(config: ServerConfig, sessionID: string, messageID: string, directory?: string) {
