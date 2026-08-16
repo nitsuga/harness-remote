@@ -4509,13 +4509,26 @@ function App() {
     if (config.backend === "opencode2" && !replaceMessages) {
       try {
         const tail = await api.loadMessagesTail(config, sessionID, directory)
-        if (requestID !== loadSelectedRequestRef.current) return
-        const merged = mergeNewestTail(loadedMessagesRef.current, tail)
-        if (merged !== loadedMessagesRef.current) {
+        // The full-load commit below re-checks context generation and context; the seed relies on
+        // the same isCurrentLoad guard so a stale profile/session can never paint its tail page.
+        if (!isCurrentLoad()) return
+        setMessages((current) => {
+          const merged = mergeNewestTail(current, tail)
+          if (merged === current) return current
+          // Issue #52: opening a long session must paint the newest page immediately instead of
+          // holding the empty loading state for the full reload — clear the open gate the same
+          // guarded way openSession does after a completed load (loadingSessionID is only set
+          // while a session is being opened).
+          if (loadingSessionID === sessionID) {
+            setLoadingSessionID((activeID) => (activeID === sessionID ? null : activeID))
+            setLoadedSessionID(sessionID)
+          }
           shouldAutoScrollRef.current = isNearMessagesBottom()
+          // Commit the ref together with state (issue #47 invariant) or the live child-output
+          // capture would not see the seeded tool part.
           loadedMessagesRef.current = merged
-          setMessages(merged)
-        }
+          return merged
+        })
       } catch {
         // Ignore: the full reload below is authoritative.
       }

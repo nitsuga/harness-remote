@@ -1177,8 +1177,8 @@ assert.ok(
 // never re-reconciling existing messages, which the full reload owns.
 assert.ok(app.includes('api.loadMessagesTail(config, sessionID, directory)'),
   'loadSelected must fetch the cheap newest-first tail to seed the transcript (issue #52)')
-assert.ok(app.includes('mergeNewestTail(loadedMessagesRef.current, tail)'),
-  'loadSelected must append the tail through mergeNewestTail, keyed on message presence')
+assert.ok(app.includes('mergeNewestTail(current, tail)'),
+  'loadSelected must append the tail through mergeNewestTail inside the state updater, keyed on message presence')
 assert.ok(app.includes('mergeNewestTail,'),
   'the subagentLive import block must ship mergeNewestTail to loadSelected')
 
