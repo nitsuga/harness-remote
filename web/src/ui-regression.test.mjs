@@ -1117,6 +1117,17 @@ assert.match(
 assert.ok(styles.includes('.subagent-run-live'), 'the live window needs its fixed-height clamped region')
 assert.ok(styles.includes('.subagent-run-live.expanded'), 'the live window needs the expanded bounded region')
 assert.ok(styles.includes('.subagent-run-live-placeholder'), 'the no-output placeholder needs its quiet treatment')
+assert.match(
+  app,
+  /liveRun && \([\s\S]*?subagent-run-live-status[\s\S]*?typing-dots/,
+  'a live run must get the working-dots status row whether or not output has landed'
+)
+assert.match(
+  app,
+  /subagent-run-live-toggle[\s\S]*?typing-dots/,
+  'the Show more toggle and the working dots must share the same status row'
+)
+assert.ok(styles.includes('.subagent-run-live-status'), 'the live status row needs its flex treatment')
 
 // --- Richer session activity states (issue #8) -------------------------------------------------
 // The v2 execution memory must be cleared only on a profile/config namespace change, never on a

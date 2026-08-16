@@ -3058,7 +3058,6 @@ a:focus-visible,
 }
 
 .subagent-run-live-toggle {
-  margin-top: var(--space-1);
   padding: 0;
   border: 0;
   background: transparent;
@@ -3066,6 +3065,23 @@ a:focus-visible,
   font-size: var(--font-xs);
   font-weight: 600;
   cursor: pointer;
+}
+
+/* The status row under the live area (issue #47) keeps the Show more/Show less toggle on the left
+   and the shared typing-dot working animation right-aligned. It renders for the whole live run, so
+   a run that has not produced output yet still reads as in flight; the dots reuse the assistant
+   typing-bubble animation untouched (reduced-motion is handled globally), sized to sit with the
+   card's compact 2xs/xs vocabulary. */
+.subagent-run-live-status {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
+  min-height: 1rem;
+}
+
+.subagent-run-live-status .typing-dots {
+  margin-left: auto;
 }
 
 .subagent-run-live-placeholder {

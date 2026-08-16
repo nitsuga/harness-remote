@@ -1433,11 +1433,13 @@ function FallbackPartView({ part, timestamp, t }: { part: MessagePart; timestamp
  *  and an explicit "open child session" control. While the child works (issue #47), a monospace
  *  window below the headline follows the child's latest output — the child session id exists only
  *  on the ephemeral progress event, so the live area degrades to a quiet placeholder until the
- *  first output arrives, and to the result view the moment the run turns terminal. The card
- *  itself is deliberately NOT a button — unlike the collapsed tool rows, nothing about the run
- *  opens on a whole-card click; navigation is the small labelled control below. Status/elapsed
- *  freshness rides the existing poll and event cadence; the only timer here is a local one-second
- *  clock for the live elapsed label. */
+ *  first output arrives, and to the result view the moment the run turns terminal. While the run
+ *  is live, a status row under the live area keeps the shared typing-dot working animation
+ *  right-aligned on the same line as the Show more/Show less toggle, so a run with no output yet
+ *  still reads as in flight at a glance. The card itself is deliberately NOT a button — unlike the
+ *  collapsed tool rows, nothing about the run opens on a whole-card click; navigation is the small
+ *  labelled control below. Status/elapsed freshness rides the existing poll and event cadence; the
+ *  only timer here is a local one-second clock for the live elapsed label. */
 function SubagentRunCard({
   run,
   output,
@@ -1497,27 +1499,34 @@ function SubagentRunCard({
         </div>
       )}
       {liveRun && output && (
-        <>
-          <div
-            className={`subagent-run-live${liveExpanded ? " expanded" : ""}`}
-            ref={liveRegionRef}
-            onScroll={(event) => {
-              const region = event.currentTarget
-              stickToLiveBottomRef.current = region.scrollHeight - region.scrollTop - region.clientHeight < 12
-            }}
-          >
-            <span className="subagent-run-live-caption">{t('detail.subagentLiveOutput')}</span>
-            <pre className="subagent-run-live-text">{output.lines.join("\n")}</pre>
-          </div>
-          {output.lines.length > 5 && (
+        <div
+          className={`subagent-run-live${liveExpanded ? " expanded" : ""}`}
+          ref={liveRegionRef}
+          onScroll={(event) => {
+            const region = event.currentTarget
+            stickToLiveBottomRef.current = region.scrollHeight - region.scrollTop - region.clientHeight < 12
+          }}
+        >
+          <span className="subagent-run-live-caption">{t('detail.subagentLiveOutput')}</span>
+          <pre className="subagent-run-live-text">{output.lines.join("\n")}</pre>
+        </div>
+      )}
+      {liveRun && !output && (
+        <div className="subagent-run-live-placeholder">{t('detail.subagentLivePlaceholder')}</div>
+      )}
+      {liveRun && (
+        <div className="subagent-run-live-status">
+          {output && output.lines.length > 5 && (
             <button type="button" className="subagent-run-live-toggle" onClick={() => setLiveExpanded((value) => !value)}>
               {liveExpanded ? t('detail.showLess') : t('detail.showMore')}
             </button>
           )}
-        </>
-      )}
-      {liveRun && !output && (
-        <div className="subagent-run-live-placeholder">{t('detail.subagentLivePlaceholder')}</div>
+          <div className="typing-dots" aria-hidden="true">
+            <span className="typing-dot" />
+            <span className="typing-dot" />
+            <span className="typing-dot" />
+          </div>
+        </div>
       )}
       {run.error && (
         <div className="subagent-run-error">{run.error}</div>
