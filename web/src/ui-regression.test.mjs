@@ -38,12 +38,12 @@ assert.match(styles, /\.session-card-main\s*\{[\s\S]*?min-width:\s*0;/, 'session
 // right edge and the composer was cut off.
 assert.match(
   styles,
-  /\.message-reasoning-summary,\s*\.message-action-summary,\s*\.message-tool-summary\s*\{[^}]*white-space:\s*normal;/,
+  /\.message-reasoning-summary,\s*\.message-action-summary,\s*\.message-tool-summary,\s*\.message-fallback-summary\s*\{[^}]*white-space:\s*normal;/,
   'action summaries must opt out of the global button nowrap'
 )
 assert.match(
   styles,
-  /\.message-reasoning-summary > \*,\s*\.message-action-summary > \*,\s*\.message-tool-summary > \*\s*\{[^}]*min-width:\s*0;/,
+  /\.message-reasoning-summary > \*,\s*\.message-action-summary > \*,\s*\.message-tool-summary > \*,\s*\.message-fallback-summary > \*\s*\{[^}]*min-width:\s*0;/,
   'the text inside a summary row must be allowed to shrink, or the flex item keeps its full width'
 )
 assert.match(styles, /^\.session-card \.session-card-title\s*\{[^}]*overflow-wrap:\s*(break-word|anywhere);/m, 'a long session title must break rather than widen its card')
@@ -917,5 +917,40 @@ assert.match(app, /setQueuedInboxMessages\(\(current\) => \{[\s\S]*?queuedInboxI
 assert.ok(app.includes('className="message-cancel-queued"'), 'the queued row must render a clearly-labelled cancel control')
 assert.match(app, /className="message-cancel-queued"[\s\S]*?disabled=\{cancellingInboxIDs\.has\(cancelableInboxID\)\}/, 'the cancel control must disable itself while its request is in flight')
 assert.match(styles, /\.message-cancel-queued\s*\{/, 'the queued cancel control needs its own styles')
+
+// --- OpenCode 2 structured message/tool rendering (feature #13 lane 2) ---------------------------
+// Every new part discriminant must have a renderer branch in MessagePartView instead of the old
+// silent `return null` fallback for unknown types.
+for (const discriminant of ['"switch"', '"system"', '"skill-activation"', '"file-content"', '"fallback"']) {
+  assert.ok(
+    app.includes(`part.type === ${discriminant}`),
+    `MessagePartView must render ${discriminant} parts`
+  )
+}
+assert.ok(app.includes('function FileContentView'), 'tool output files and file-content parts must share one renderer')
+assert.ok(app.includes('function SwitchPartView'), 'switch parts need their own non-interactive summary row')
+// The switch row is informational: it must not be a button that opens a modal.
+assert.match(app, /function SwitchPartView[\s\S]*?<div className="message-switch-summary"[\s\S]*?>/, 'the switch row must render as a plain div, not a button')
+// The fallback summary opens a modal with the sanitized payload and nothing else.
+assert.match(
+  app,
+  /function FallbackPartView[\s\S]*?className="message-fallback-summary"[\s\S]*?<Modal title=\{t\('detail\.fallbackTitle'\)\}[\s\S]*?JSON\.stringify\(part\.raw, null, 2\)/,
+  'the fallback summary button must open a modal titled for unknown types showing the sanitized payload'
+)
+// Merging fetched transcripts must carry the new envelope metadata: it never renders as chips yet,
+// but it survives poll reconciliation so a later UI lane can surface it without a data reset.
+assert.match(app, /function sameEnvelopeMetadata\(/, 'poll reconciliation must compare the OpenCode 2 envelope metadata')
+assert.match(app, /metadataChanged =\s*previous\.info\.type !== message\.info\.type[\s\S]*?sameEnvelopeMetadata\(previous\.info, message\.info\)/, 'metadataChanged must include the envelope metadata comparison')
+assert.match(app, /messagesHaveSameContent\([\s\S]*?sameEnvelopeMetadata\(candidate\.info, message\.info\)/, 'content reconciliation must treat updated envelope metadata as a change')
+// The transcript surfaces assistant-level failures under the affected bubble.
+assert.match(app, /message\.info\.error \|\| message\.info\.finish === "error"[\s\S]*?message-error-row[\s\S]*?detail\.assistantError/, 'assistant errors and interrupted steps must render an error row')
+// Shell tool outcomes: exit code, timeout and killed badges live in the tool meta row.
+assert.match(app, /part\.state\?\.exitCode !== undefined[\s\S]*?action\.exitCode/, 'finished shells must show their exit code badge')
+assert.match(app, /tool === "shell" && status === "timeout"[\s\S]*?action\.shellTimeout/, 'timed-out shells must show a distinct badge')
+assert.match(app, /tool === "shell" && status === "killed"[\s\S]*?action\.shellKilled/, 'killed shells must show a distinct badge')
+assert.match(app, /part\.state\?\.outputFiles\?\.map\([\s\S]*?FileContentView/, 'tool output files must render through the shared file renderer')
+assert.match(styles, /\.message-switch-summary\s*\{[^}]*cursor:\s*default/, 'the switch row must not promise that it is clickable')
+assert.match(styles, /\.message-fallback-summary[\s\S]*?cursor:\s*pointer/, 'the fallback summary button must advertise that it can be pressed')
+assert.match(styles, /\.message-error-row\s*\{[^}]*background:\s*var\(--danger-soft\)/, 'assistant error rows must use the danger treatment')
 
 console.log('ui regression tests passed')

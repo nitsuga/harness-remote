@@ -108,4 +108,22 @@ assert.ok(en('detail.requiresUserMessage').includes('message'), 'the user-messag
 assert.ok(en('detail.actionWhileWorking').includes('idle'), 'the working-state explanation must name the idle condition')
 assert.ok(en('detail.forkCreated').includes('session list'), 'the fork-created notice must point at the session list')
 
+// OpenCode 2 structured-part labels (feature #13 lane 2): switches, skill activations, unknown-type
+// fallbacks and assistant error/interruption rows must never render a raw key in any language.
+for (const translator of [en, it, zh, zhCN]) {
+  for (const key of [
+    'detail.switchAgent', 'detail.switchAgentTo', 'detail.switchModel', 'detail.switchModelTo',
+    'detail.switchLocation', 'detail.switchLocationTo', 'detail.skillActivated',
+    'detail.fallbackLabel', 'detail.fallbackTitle', 'detail.assistantError',
+    'detail.assistantInterrupted', 'action.exitCode', 'action.shellTimeout', 'action.shellKilled'
+  ]) {
+    assert.notEqual(translator(key), key, `${key} must be translated in every language`)
+  }
+}
+assert.equal(en('action.exitCode', { n: 0 }), 'exit 0')
+assert.equal(en('detail.switchAgent', { from: 'build', to: 'orchestrator' }), 'Switched agent: build → orchestrator')
+assert.equal(en('detail.switchAgentTo', { to: 'orchestrator' }), 'Switched agent to orchestrator')
+assert.equal(en('detail.fallbackLabel', { typeName: 'snapshot' }), 'Unknown message type (snapshot)')
+assert.equal(en('detail.assistantError', { message: 'aborted' }), 'Error: aborted')
+
 console.log('i18n tests passed')

@@ -126,18 +126,43 @@ export type SessionStatus = {
 
 export type ToolState = {
   status: string
+  /** Tool input as a plain record. The OpenCode 2 wire carries a STRING input on `streaming` state;
+   *  the v2 mapper wraps that string as `{ command }` so this field stays record-shaped. */
   input?: Record<string, unknown>
   title?: string
   output?: string
   error?: string
   time?: { start: number; end?: number }
   metadata?: { answers?: string[][] }
+  /** Exit code of a finished shell tool (v2 shell messages; `state.metadata.exit` on v1 shells). */
+  exitCode?: number
+  /** Files a tool produced (`type:"file"` v2 tool content), kept with the tool part so the rendered
+   *  tool card can offer them without re-deriving them from the raw wire payload. */
+  outputFiles?: Array<{ uri: string; mime: string; name?: string }>
 }
+
+/** The part kinds the transcript understands. The legacy `file` / `patch` / `step-start` /
+ *  `step-finish` kinds come from the v1/bridge backends; OpenCode 2's richer message types map onto
+ *  the structured `switch` / `system` / `skill-activation` / `file-content` kinds, and anything the
+ *  v2 wire grows later lands on `fallback` instead of being silently dropped. */
+export type MessagePartType =
+  | "text"
+  | "reasoning"
+  | "tool"
+  | "file"
+  | "patch"
+  | "step-start"
+  | "step-finish"
+  | "switch"
+  | "system"
+  | "skill-activation"
+  | "file-content"
+  | "fallback"
 
 export type MessagePart = {
   id: string
   messageID?: string
-  type: string
+  type: MessagePartType
   text?: string
   tool?: string
   callID?: string
@@ -148,6 +173,30 @@ export type MessagePart = {
   url?: string
   filename?: string
   time?: { start: number; end?: number }
+  // --- OpenCode 2 structured part fields (only set by the v2 mapper) --------------------------
+  /** `switch`: which kind of switch — agent, model or location. */
+  kind?: "agent" | "model" | "location"
+  /** `switch`: the new value (agent id / model ref id / location directory). */
+  value?: string
+  /** `switch`: the previous value, when the wire carried it. */
+  previous?: string
+  /** `switch` (model): the full new model ref so the renderer can show provider/variant detail. */
+  model?: { id: string; providerID?: string; variant?: string }
+  /** `switch` (location): the new project subpath the switch moved to. */
+  subpath?: string
+  /** `system`: the short human-readable summary the wire paired with the model-facing text. */
+  description?: string
+  /** `skill-activation`: the activated skill's stable catalog id. */
+  skillId?: string
+  /** `skill-activation`: the skill's user-facing name. */
+  name?: string
+  /** `file-content`: the file's URI. */
+  uri?: string
+  /** `fallback`: the (unknown) wire message type this part stands in for. */
+  typeName?: string
+  /** `fallback`: the sanitized wire payload (secrets scrubbed) so unknown future message types
+   *  stay inspectable instead of vanishing from the transcript. */
+  raw?: Record<string, unknown>
 }
 
 export type MessageEnvelope = {
@@ -167,6 +216,15 @@ export type MessageEnvelope = {
      *  exact id the message will carry in history (and the inbox), so the optimistic bubble can be
      *  retired by id instead of by text once the server confirms admission. */
     durableID?: string
+    /** OpenCode 2 assistant-level metadata (only ever set by the v2 mapper; the v1/bridge
+     *  backends never populate these). Consumed by the transcript header and error rendering. */
+    agent?: string
+    model?: { id: string; providerID?: string; variant?: string }
+    finish?: string
+    error?: { type?: string; message?: string }
+    cost?: number
+    tokens?: { input?: number; output?: number; reasoning?: number }
+    retry?: { attempt: number; at: number; error?: { type?: string; message?: string } }
   }
   parts: MessagePart[]
 }

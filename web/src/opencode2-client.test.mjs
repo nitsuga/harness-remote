@@ -9,12 +9,14 @@ import {
   toAgentOption,
   toCommandOption,
   toDiffFile,
+  toFileContentPart,
   toFileEntry,
   toFormAnswer,
   isQuestionActive,
   toMessageEnvelope,
   toModelOption,
   toQuestionRequest,
+  sanitizeForFallback,
   toSession,
   toSkillActivationBody,
   toSkillCommand,
@@ -654,5 +656,371 @@ assert.ok(
   apiSource.includes('return Promise.reject(new Error("Inbox cancellation is only supported on OpenCode 2 servers"))'),
   'v1 cancelInboxItem must reject honestly'
 )
+
+// --- Feature #13 lane 1: rich structured message/tool mapping ----------------------------------
+// Synthetic fixtures only — the shapes mirror live OpenCode 2 captures, but every id/path was
+// invented here (nothing copied from a real transcript).
+
+// Switch messages previously fell into the generic else-branch and were dropped entirely (they hold
+// no `text`). Each now maps to a structured `switch` part carrying its own fields — `info` metadata
+// stays reserved for assistant messages so switch indications never get confused with them.
+const agentSwitch = toMessageEnvelope({
+  id: 'msg_ag1', time: { created: 1 }, type: 'agent-switched', agent: 'orchestrator', previous: 'build'
+}, 'ses_x')
+assert.equal(agentSwitch.info.role, 'system')
+assert.equal(agentSwitch.info.agent, undefined, 'switch metadata must stay off info (assistant-only field)')
+assert.deepEqual(agentSwitch.parts, [{
+  id: 'msg_ag1:switch',
+  messageID: 'msg_ag1',
+  type: 'switch',
+  kind: 'agent',
+  value: 'orchestrator',
+  previous: 'build',
+  text: 'Switched agent: build → orchestrator'
+}])
+// Without `previous` the summary drops the arrow and no `previous` key is emitted.
+const agentSwitchNoPrev = toMessageEnvelope({
+  id: 'msg_ag2', time: { created: 2 }, type: 'agent-switched', agent: 'orchestrator'
+}, 'ses_x')
+assert.deepEqual(agentSwitchNoPrev.parts[0], {
+  id: 'msg_ag2:switch',
+  messageID: 'msg_ag2',
+  type: 'switch',
+  kind: 'agent',
+  value: 'orchestrator',
+  text: 'Switched agent: orchestrator'
+})
+assert.equal('previous' in agentSwitchNoPrev.parts[0], false)
+
+// A model switch carries the full new ref (provider/variant) on the `model` field, the previous ref
+// id on `previous` — both sides are `Model.Ref` on the wire, so a plain id in the summary is
+// ambiguous when the same ref id is reused with a different variant: the arrow is dropped then.
+const modelSwitch = toMessageEnvelope({
+  id: 'msg_md1', time: { created: 3 }, type: 'model-switched',
+  model: { id: 'deepseek-v4-flash', providerID: 'opencode-go', variant: 'high' },
+  previous: { id: 'deepseek-v4-flash', providerID: 'opencode-go', variant: 'default' }
+}, 'ses_x')
+assert.deepEqual(modelSwitch.parts[0], {
+  id: 'msg_md1:switch',
+  messageID: 'msg_md1',
+  type: 'switch',
+  kind: 'model',
+  value: 'deepseek-v4-flash',
+  previous: 'deepseek-v4-flash',
+  text: 'Switched model: deepseek-v4-flash',
+  model: { id: 'deepseek-v4-flash', providerID: 'opencode-go', variant: 'high' }
+})
+assert.deepEqual(modelSwitch.info.model, undefined, 'switch messages must not set info.model')
+const modelSwitchNew = toMessageEnvelope({
+  id: 'msg_md2', time: { created: 4 }, type: 'model-switched',
+  model: { id: 'deepseek-v4-flash', providerID: 'opencode-go' }
+}, 'ses_x')
+assert.deepEqual(modelSwitchNew.parts[0], {
+  id: 'msg_md2:switch',
+  messageID: 'msg_md2',
+  type: 'switch',
+  kind: 'model',
+  value: 'deepseek-v4-flash',
+  text: 'Switched model: deepseek-v4-flash',
+  model: { id: 'deepseek-v4-flash', providerID: 'opencode-go', variant: undefined }
+})
+assert.equal('previous' in modelSwitchNew.parts[0], false)
+
+// Location switch: the new directory is the value, the old one rides on `previous`, and the new
+// project subpath keeps its own field. The wire's `previous` nests the same location shape.
+const locationSwitch = toMessageEnvelope({
+  id: 'msg_loc1', time: { created: 5 }, type: 'location-switched',
+  location: { directory: '/home/eric/work' }, projectID: 'project-a', subpath: 'work',
+  previous: { location: { directory: '/home/eric' } }
+}, 'ses_x')
+assert.deepEqual(locationSwitch.parts[0], {
+  id: 'msg_loc1:switch',
+  messageID: 'msg_loc1',
+  type: 'switch',
+  kind: 'location',
+  value: '/home/eric/work',
+  previous: '/home/eric',
+  text: 'Switched location: /home/eric → /home/eric/work',
+  subpath: 'work'
+})
+const locationSwitchMinimal = toMessageEnvelope({
+  id: 'msg_loc2', time: { created: 6 }, type: 'location-switched', location: { directory: '/home/eric' }
+}, 'ses_x')
+assert.deepEqual(locationSwitchMinimal.parts[0], {
+  id: 'msg_loc2:switch',
+  messageID: 'msg_loc2',
+  type: 'switch',
+  kind: 'location',
+  value: '/home/eric',
+  text: 'Switched location: /home/eric'
+})
+assert.equal('previous' in locationSwitchMinimal.parts[0], false)
+assert.equal('subpath' in locationSwitchMinimal.parts[0], false)
+
+// `system` messages carry a model-facing `text` plus an optional short human `description`; both
+// ride on the structured system part. (Live shape: the server emits a date-rollover note like this.)
+const systemMessage = toMessageEnvelope({
+  id: 'msg_sys', time: { created: 5 }, type: 'system',
+  text: "Today's date is now: Sat Aug 15 2026", description: 'Instructions updated: core/date'
+}, 'ses_x')
+assert.deepEqual(systemMessage.parts, [{
+  id: 'msg_sys:system',
+  messageID: 'msg_sys',
+  type: 'system',
+  text: "Today's date is now: Sat Aug 15 2026",
+  description: 'Instructions updated: core/date'
+}])
+const systemNoDescription = toMessageEnvelope({
+  id: 'msg_sys2', time: { created: 6 }, type: 'system', text: 'Context window cleared.'
+}, 'ses_x')
+assert.deepEqual(systemNoDescription.parts[0], {
+  id: 'msg_sys2:system', messageID: 'msg_sys2', type: 'system', text: 'Context window cleared.'
+})
+assert.equal('description' in systemNoDescription.parts[0], false)
+
+// Synthetic messages keep the plain text part when they carry no description, and upgrade to the
+// structured system part when a human summary is present.
+assert.deepEqual(toMessageEnvelope({
+  id: 'msg_syn1', time: { created: 7 }, type: 'synthetic', text: 'Move to /home/eric/work.', description: 'Prompt updated'
+}, 'ses_x').parts[0], {
+  id: 'msg_syn1:system', messageID: 'msg_syn1', type: 'system', text: 'Move to /home/eric/work.', description: 'Prompt updated'
+})
+assert.deepEqual(toMessageEnvelope({
+  id: 'msg_syn2', time: { created: 8 }, type: 'synthetic', text: 'Move to /home/eric/work.'
+}, 'ses_x').parts, [{ id: 'msg_syn2:text', type: 'text', text: 'Move to /home/eric/work.' }])
+
+// A `skill` message is a skill ACTIVATION (distinct from a `skill` tool call): it carries the
+// stable skill catalog id, the user-facing name and the model-facing instruction text.
+const skillActivation = toMessageEnvelope({
+  id: 'msg_sk', time: { created: 9 }, type: 'skill',
+  skill: 'skill_01JHXQ5R7B2ZP9Y4K3M8N6T2W', name: 'git-release', text: 'Use git-release to cut a release.'
+}, 'ses_x')
+assert.deepEqual(skillActivation.parts, [{
+  id: 'msg_sk:skill',
+  messageID: 'msg_sk',
+  type: 'skill-activation',
+  skillId: 'skill_01JHXQ5R7B2ZP9Y4K3M8N6T2W',
+  name: 'git-release',
+  text: 'Use git-release to cut a release.'
+}])
+
+// Compaction keeps its transcript row (summary/recent for running and completed) plus the terminal
+// status on `info.compactionStatus`; a failed compaction surfaces its structured error on `info.error`.
+const compactRunning = toMessageEnvelope({
+  id: 'msg_c1', time: { created: 10 }, type: 'compaction', status: 'running', reason: 'manual',
+  summary: 'Let me review what we know', recent: 'User: hi'
+}, 'ses_x')
+assert.equal(compactRunning.info.compactionStatus, 'running')
+assert.deepEqual(compactRunning.parts, [{ id: 'msg_c1:text', type: 'text', text: 'Let me review what we know\n\nUser: hi' }])
+assert.equal(compactRunning.info.error, undefined)
+const compactCompleted = toMessageEnvelope({
+  id: 'msg_c2', time: { created: 11, completed: 12 }, type: 'compaction', status: 'completed', reason: 'auto',
+  summary: 'We were discussing the release.', recent: 'Assistant: …'
+}, 'ses_x')
+assert.equal(compactCompleted.info.compactionStatus, 'completed')
+assert.equal(compactCompleted.parts[0].text, 'We were discussing the release.\n\nAssistant: …')
+const compactFailed = toMessageEnvelope({
+  id: 'msg_c3', time: { created: 13 }, type: 'compaction', status: 'failed', reason: 'manual',
+  error: { type: 'tool-failed', message: 'no searcher available' }
+}, 'ses_x')
+assert.equal(compactFailed.info.compactionStatus, 'failed')
+assert.deepEqual(compactFailed.info.error, { type: 'tool-failed', message: 'no searcher available' })
+assert.deepEqual(compactFailed.parts, [], 'a failed compaction carries no summary/recent row — only the error')
+
+// Unknown future message types become a `fallback` part holding the SANITIZED payload: the tool
+// bookkeeping keys and every credential-looking key are stripped at any depth, safe fields survive,
+// and the source object is never mutated.
+const unknownMessage = {
+  id: 'msg_future',
+  time: { created: 14 },
+  type: 'session-summary',
+  text: 'A mysterious future message',
+  note: 'safe field',
+  metadata: { apiKey: 'sk-super-secret', safe: true },
+  providerState: { nested: { credential: 'nope', token: 'nope' }, alsoSafe: 1 },
+  providerResultState: { work: 'x' }
+}
+const fallbackEnvelope = toMessageEnvelope(unknownMessage, 'ses_x')
+assert.equal(fallbackEnvelope.parts.length, 1)
+assert.deepEqual(fallbackEnvelope.parts[0], {
+  id: 'msg_future:fallback',
+  messageID: 'msg_future',
+  type: 'fallback',
+  typeName: 'session-summary',
+  text: 'A mysterious future message',
+  raw: {
+    id: 'msg_future',
+    time: { created: 14 },
+    type: 'session-summary',
+    text: 'A mysterious future message',
+    note: 'safe field',
+    metadata: { safe: true }
+  }
+})
+const assertScrubbed = (value) => {
+  if (Array.isArray(value)) { value.forEach(assertScrubbed); return }
+  if (value && typeof value === 'object') {
+    for (const [key, child] of Object.entries(value)) {
+      assert.equal(/providerState|providerResultState/.test(key), false, `key "${key}" must not surface`)
+      assert.equal(/key|token|secret|password|credential/i.test(key), false, `key "${key}" must not surface`)
+      assertScrubbed(child)
+    }
+  }
+}
+assertScrubbed(fallbackEnvelope.parts[0].raw)
+assert.notEqual(fallbackEnvelope.parts[0].raw, unknownMessage, 'the fallback payload must be a deep copy')
+assert.equal(unknownMessage.metadata.apiKey, 'sk-super-secret', 'sanitizing must not mutate the source payload')
+// A textless unknown message still keeps its type name and raw payload.
+const textlessFallback = toMessageEnvelope({
+  id: 'msg_future2', time: { created: 15 }, type: 'mystery-event', detail: { answer: 42 }
+}, 'ses_x')
+assert.equal(textlessFallback.parts[0].typeName, 'mystery-event')
+assert.equal('text' in textlessFallback.parts[0], false)
+assert.deepEqual(textlessFallback.parts[0].raw, {
+  id: 'msg_future2', time: { created: 15 }, type: 'mystery-event', detail: { answer: 42 }
+})
+
+// The sanitizer itself deep-copies and leaves the input untouched: sanitizeForFallback drops only
+// the forbidden keys, arrays recurse, and a plain safe payload round-trips intact.
+assert.deepEqual(sanitizeForFallback({ a: 1, b: { accessToken: 'x', keep: [1, { secretKey: 'y', ok: true }] } }), {
+  a: 1, b: { keep: [1, { ok: true }] }
+})
+const sanitizeInput = { apiKey: 'sk-live', providerState: { raw: 'base64' } }
+assert.deepEqual(sanitizeForFallback(sanitizeInput), {})
+assert.deepEqual(sanitizeInput, { apiKey: 'sk-live', providerState: { raw: 'base64' } }, 'sanitize must not mutate its input')
+
+// Assistant metadata propagation: the live `{"finish":"error",...}` shape used to vanish entirely;
+// now agent/model/finish/error/cost/tokens/retry ride on `info` while the snapshot stays out of the
+// transcript for now (no part is produced for it).
+const erroredAssistant = {
+  id: 'msg_z',
+  time: { created: 3, completed: 4 },
+  type: 'assistant',
+  agent: 'build',
+  model: { id: 'deepseek-v4-flash', providerID: 'opencode-go', variant: 'high' },
+  content: [],
+  snapshot: { start: 'snap_1', end: 'snap_2', files: [] },
+  finish: 'error',
+  error: { type: 'aborted', message: 'Step interrupted' },
+  cost: 0.0012965372,
+  tokens: { input: 11583, output: 1236, reasoning: 453, cache: { read: 178048, write: 0 } },
+  retry: { attempt: 2, at: 5, error: { type: 'aborted', message: 'Retried once' } }
+}
+const metaEnvelope = toMessageEnvelope(erroredAssistant, 'ses_x')
+assert.equal(metaEnvelope.info.agent, 'build')
+assert.deepEqual(metaEnvelope.info.model, { id: 'deepseek-v4-flash', providerID: 'opencode-go', variant: 'high' })
+assert.equal(metaEnvelope.info.finish, 'error')
+assert.deepEqual(metaEnvelope.info.error, { type: 'aborted', message: 'Step interrupted' })
+assert.equal(metaEnvelope.info.cost, 0.0012965372)
+assert.deepEqual(metaEnvelope.info.tokens, { input: 11583, output: 1236, reasoning: 453 }, 'token cache is not part of the app info shape')
+assert.deepEqual(metaEnvelope.info.retry, { attempt: 2, at: 5, error: { type: 'aborted', message: 'Retried once' } })
+assert.deepEqual(metaEnvelope.parts, [], 'the snapshot must not become a transcript part yet')
+
+// Tool `streaming` state carries its input as a STRING — mapping it must not mis-read it as a
+// record (the old reader cast the payload blindly) and the status must survive.
+const streamingTool = {
+  id: 'msg_stream',
+  time: { created: 1 },
+  type: 'assistant',
+  content: [{
+    type: 'tool',
+    id: 'call_stream_1',
+    name: 'apply',
+    executed: true,
+    state: { status: 'streaming', input: 'Generating a diff for web/src/api.ts…' },
+    time: { created: 1 }
+  }]
+}
+const streamingEnvelope = toMessageEnvelope(streamingTool, 'ses_x')
+assert.equal(streamingEnvelope.parts.length, 1)
+assert.equal(streamingEnvelope.parts[0].type, 'tool')
+assert.equal(streamingEnvelope.parts[0].state?.status, 'streaming')
+assert.deepEqual(streamingEnvelope.parts[0].state?.input, { command: 'Generating a diff for web/src/api.ts…' })
+
+// Tool `file` content: text entries still join into `output`, and `type:"file"` entries ride on the
+// tool state as `outputFiles` (uri/mime/name preserved).
+const fileTool = {
+  id: 'msg_filetool',
+  time: { created: 1, completed: 3 },
+  type: 'assistant',
+  agent: 'build',
+  model: { id: 'deepseek-v4-flash', providerID: 'opencode-go' },
+  content: [{
+    type: 'tool',
+    id: 'call_file_1',
+    name: 'read',
+    state: {
+      status: 'completed',
+      input: { path: 'notes.md' },
+      content: [
+        { type: 'text', text: '# Notes' },
+        { type: 'file', uri: 'file:///tmp/notes.md', mime: 'text/markdown', name: 'notes.md' },
+        { type: 'file', uri: 'file:///tmp/logo.png', mime: 'image/png' }
+      ],
+      metadata: { truncated: false }
+    },
+    time: { created: 1, ran: 2, completed: 3 }
+  }]
+}
+const fileEnvelope = toMessageEnvelope(fileTool, 'ses_x')
+assert.equal(fileEnvelope.parts.length, 1)
+assert.equal(fileEnvelope.parts[0].state?.status, 'completed')
+assert.ok(fileEnvelope.parts[0].state?.output?.includes('# Notes'))
+assert.deepEqual(fileEnvelope.parts[0].state?.outputFiles, [
+  { uri: 'file:///tmp/notes.md', mime: 'text/markdown', name: 'notes.md' },
+  { uri: 'file:///tmp/logo.png', mime: 'image/png', name: undefined }
+])
+
+// A failed tool keeps its error message on the tool state (as before), with the outputs intact.
+const errorTool = {
+  id: 'msg_errtool',
+  time: { created: 1, completed: 2 },
+  type: 'assistant',
+  content: [{
+    type: 'tool',
+    id: 'call_err_1',
+    name: 'bash',
+    state: {
+      status: 'error',
+      input: { command: 'rm -rf /var/empty' },
+      error: { type: 'tool-error', message: 'permission denied' },
+      content: [{ type: 'text', text: 'partial output' }]
+    },
+    time: { created: 1, ran: 2 }
+  }]
+}
+const errorEnvelope = toMessageEnvelope(errorTool, 'ses_x')
+assert.equal(errorEnvelope.parts[0].state?.status, 'error')
+assert.equal(errorEnvelope.parts[0].state?.error, 'permission denied')
+assert.ok(errorEnvelope.parts[0].state?.output?.includes('partial output'))
+
+// `toFileContentPart` turns one `Tool.Content` file entry into a standalone transcript part.
+assert.deepEqual(toFileContentPart({ uri: 'file:///tmp/a.md', mime: 'text/markdown', name: 'a.md' }, 'msg_x', 'call_1'), {
+  id: 'msg_x:file:file:///tmp/a.md',
+  messageID: 'msg_x',
+  callID: 'call_1',
+  type: 'file-content',
+  uri: 'file:///tmp/a.md',
+  mime: 'text/markdown',
+  name: 'a.md'
+})
+
+// Shell messages: `exited` → completed (+ exitCode), while `timeout`/`killed` keep their own
+// statuses so the UI can distinguish an interrupted shell from a finished one.
+const shellExited = toMessageEnvelope({
+  id: 'msg_sh_e', time: { created: 1, completed: 2 }, type: 'shell', shellID: 'sh_1',
+  command: 'echo hi', status: 'exited', exit: 0, output: { output: 'hi\n', cursor: 3, size: 3, truncated: false }
+}, 'ses_x')
+assert.equal(shellExited.parts[0].state?.status, 'completed')
+assert.equal(shellExited.parts[0].state?.exitCode, 0)
+assert.equal(shellExited.parts[0].state?.output, 'hi\n')
+assert.deepEqual(shellExited.parts[0].state?.input, { command: 'echo hi' })
+const shellNoExit = toMessageEnvelope({
+  id: 'msg_sh_n', time: { created: 3 }, type: 'shell', shellID: 'sh_2', command: 'echo hi', status: 'exited'
+}, 'ses_x')
+assert.equal('exitCode' in shellNoExit.parts[0].state, false, 'no exit code, no exitCode field')
+assert.equal(toMessageEnvelope({ id: 'msg_sh_t', time: { created: 4 }, type: 'shell', shellID: 'sh_3', command: 'sleep 100', status: 'timeout' }, 'ses_x').parts[0].state?.status, 'timeout')
+assert.equal(toMessageEnvelope({ id: 'msg_sh_k', time: { created: 5 }, type: 'shell', shellID: 'sh_4', command: 'sleep 100', status: 'killed' }, 'ses_x').parts[0].state?.status, 'killed')
+assert.equal(toMessageEnvelope({ id: 'msg_sh_r', time: { created: 6 }, type: 'shell', shellID: 'sh_5', command: 'echo hi', status: 'running' }, 'ses_x').parts[0].state?.status, 'running')
 
 console.log('OpenCode 2 client mapping tests passed')

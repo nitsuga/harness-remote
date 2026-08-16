@@ -93,93 +93,322 @@ export function applyInboxDelivery(messages: MessageEnvelope[], inbox: V2InboxIt
   })
 }
 
-export function toToolState(state: {
+/** A structured error as carried by v2 (`Session.StructuredError`): `{ type, message, status? }`.
+ *  Field names mirror the wire; only `type`/`message` are surfaced onto the app's tool states. */
+export type V2SessionError = {
+  type?: string
+  message?: string
+  status?: number
+}
+
+/** One `Tool.Content` entry: text output or a produced file. Both ride onto `ToolState` — text as
+ *  the joined `output`, files as `outputFiles` — so the rendered tool card gets the full picture. */
+export type V2ToolContent =
+  | { type: "text"; text?: string }
+  | { type: "file"; uri?: string; mime?: string; name?: string }
+
+/** One v2 `Session.Message.ToolState`: `streaming` carries a STRING input, every other state a
+ *  record. `completed`/`error` may carry `content`; `error` also carries a structured error. */
+export type V2ToolState = {
   status?: string
   input?: unknown
-  content?: Array<{ type?: string; text?: string }>
-  error?: { message?: string }
+  content?: V2ToolContent[]
+  error?: V2SessionError
   time?: { created?: number; ran?: number; completed?: number }
   metadata?: Record<string, unknown>
-}): ToolState {
+}
+
+export function toToolState(state: V2ToolState): ToolState {
   const status = state?.status ?? "pending"
-  const output = (state?.content ?? [])
-    .filter((part) => part.type === "text" && typeof part.text === "string")
+  const textOutput = (state?.content ?? [])
+    .filter((part): part is { type: "text"; text: string } => part.type === "text" && typeof part.text === "string")
     .map((part) => part.text)
     .join("\n")
+  const outputFiles = (state?.content ?? [])
+    .filter((part): part is { type: "file"; uri: string; mime?: string; name?: string } => part.type === "file" && typeof part.uri === "string")
+    .map((part) => ({ uri: part.uri, mime: part.mime ?? "", name: part.name }))
+  const rawInput = state?.input
   return {
     status,
-    input: (state?.input ?? {}) as Record<string, unknown> | undefined,
-    output: output || undefined,
+    // The streaming state's input is a plain string (a one-line description of the in-flight
+    // invocation), not a JSON record — wrap it as `{ command }` so it stays record-shaped for
+    // consumers that render `state.input` generically.
+    input: typeof rawInput === "string" ? { command: rawInput } : (rawInput ?? {}) as Record<string, unknown>,
+    output: textOutput || undefined,
     error: state?.error?.message,
     time: state?.time
       ? { start: state.time.created ?? 0, end: state.time.completed }
       : undefined,
-    metadata: state?.metadata
+    metadata: state?.metadata,
+    // Only surface `outputFiles` when a tool actually produced files, so consumers doing strict
+    // field-level comparisons against older parts see no shape change.
+    ...(outputFiles.length > 0 ? { outputFiles } : {})
   }
 }
 
-export type V2Message = {
+/** One `Tool.Content` entry of type `file`: `{ type: "file", uri, mime, name? }`. The tool state
+ *  carries these as `outputFiles`; this builder turns one into a standalone transcript part for
+ *  callers (the renderer lane) that want the file rendered as its own row. */
+export function toFileContentPart(file: { uri: string; mime: string; name?: string }, messageID: string, callID?: string): MessagePart {
+  return {
+    id: `${messageID}:file:${file.uri}`,
+    messageID,
+    callID,
+    type: "file-content",
+    uri: file.uri,
+    mime: file.mime,
+    name: file.name
+  }
+}
+
+/**
+ * Any key whose name matches these is treated as a credential by `sanitizeForFallback` and stripped
+ * from the fallback payload before it reaches the transcript (never persist, render or log secrets).
+ */
+const FALLBACK_SECRET_KEY = /key|token|secret|password|credential/i
+
+/**
+ * Deep-copy an unknown wire payload for a `fallback` part, stripping anything that could be a
+ * credential: the tool bookkeeping keys `providerState`/`providerResultState` (which routinely carry
+ * base64 tool input) and any key whose name matches /key|token|secret|password|credential/i at any
+ * depth. The source object is never mutated.
+ */
+export function sanitizeForFallback(raw: unknown): Record<string, unknown> {
+  const scrub = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(scrub)
+    if (value !== null && typeof value === "object") {
+      const out: Record<string, unknown> = {}
+      for (const [key, child] of Object.entries(value)) {
+        if (key === "providerState" || key === "providerResultState" || FALLBACK_SECRET_KEY.test(key)) continue
+        out[key] = scrub(child)
+      }
+      return out
+    }
+    return value
+  }
+  return scrub(raw) as Record<string, unknown>
+}
+
+/** A v2 `Model.Ref`: `{ id, providerID?, variant? }` — used by `model-switched` and `assistant`. */
+export type V2ModelRef = { id?: string; providerID?: string; variant?: string }
+
+/** A v2 `Location.Ref` as it appears on `location-switched` messages: `{ directory?, workspaceID? }`. */
+export type V2LocationRef = { directory?: string; workspaceID?: string }
+
+/** The `previous` member of a `location-switched` message: the same location shape plus the old
+ *  project id/subpath. */
+export type V2LocationPrevious = { location?: V2LocationRef; projectID?: string; subpath?: string }
+
+/** A v2 `TokenUsage.Info`: the wire also carries `cache: { read, write }`, which the app's info
+ *  shape does not model — the assistant mapping keeps `input`/`output`/`reasoning` only. */
+export type V2TokenUsage = { input?: number; output?: number; reasoning?: number }
+
+/** One v2 `Session.Message.Assistant.Content` member: text, reasoning or a tool invocation. */
+export type V2AssistantContent =
+  | { type: "text"; text?: string; state?: Record<string, unknown> }
+  | { type: "reasoning"; text?: string; state?: Record<string, unknown>; time?: { created?: number; completed?: number } }
+  | { type: "tool"; id?: string; name?: string; executed?: boolean; state?: V2ToolState; time?: { created?: number; ran?: number; completed?: number } }
+
+/** Fields every `Session.Message.Info` member shares: `id`, `time` and optional `metadata`. */
+export type V2MessageBase = {
   id: string
   type: string
   time: { created: number; completed?: number }
-  text?: string
-  description?: string
-  files?: unknown[]
-  agent?: string
-  model?: { id?: string; providerID?: string; variant?: string }
-  content?: Array<Record<string, unknown>>
-  command?: string
-  status?: string
-  output?: { output?: string }
-  skill?: string
-  name?: string
-  summary?: string
-  recent?: string
-  location?: unknown
+  metadata?: Record<string, unknown>
 }
 
-/** Flattens one v2 message (a discriminated union) into the app's `MessageEnvelope` shape. */
+export type V2AgentSwitched = V2MessageBase & { type: "agent-switched"; agent?: string; previous?: string }
+export type V2ModelSwitched = V2MessageBase & { type: "model-switched"; model?: V2ModelRef; previous?: V2ModelRef }
+export type V2LocationSwitched = V2MessageBase & { type: "location-switched"; location?: V2LocationRef; projectID?: string; subpath?: string; previous?: V2LocationPrevious }
+export type V2UserMessage = V2MessageBase & { type: "user"; text?: string; files?: unknown[]; agents?: unknown[]; skills?: unknown[] }
+export type V2Synthetic = V2MessageBase & { type: "synthetic"; text?: string; description?: string }
+export type V2SystemMessage = V2MessageBase & { type: "system"; text?: string; description?: string }
+export type V2SkillMessage = V2MessageBase & { type: "skill"; skill?: string; name?: string; text?: string }
+
+/** A v2 `Session.Message.Shell`: `{ shellID, command, status, exit?, output? }`. The three terminal
+ *  statuses are mapped onto the app's tool lifecycle — `exited` → completed, `timeout`/`killed`
+ *  keep their own statuses — and `exit` rides on the tool state's `exitCode`. */
+export type V2ShellMessage = V2MessageBase & {
+  type: "shell"
+  shellID?: string
+  command?: string
+  status?: "running" | "exited" | "timeout" | "killed"
+  exit?: number
+  output?: { output?: string; cursor?: number; size?: number; truncated?: boolean }
+}
+
+export type V2AssistantMessage = V2MessageBase & {
+  type: "assistant"
+  agent?: string
+  model?: V2ModelRef
+  content?: V2AssistantContent[]
+  snapshot?: unknown
+  finish?: string
+  cost?: number
+  tokens?: V2TokenUsage
+  error?: V2SessionError
+  retry?: { attempt?: number; at?: number; error?: V2SessionError }
+}
+
+/** A v2 `Session.Message.Compaction`: the wire further splits this into running/completed/failed by
+ *  `status`, but the reader treats them as one shape — running/completed carry `summary`/`recent`, a
+ *  failed compaction carries only `error`. */
+export type V2Compaction = V2MessageBase & {
+  type: "compaction"
+  status?: "running" | "completed" | "failed"
+  reason?: "auto" | "manual"
+  summary?: string
+  recent?: string
+  error?: V2SessionError
+}
+
+/**
+ * One `GET /api/session/{sessionID}/message` entry. The wire format is a discriminated union of ten
+ * members (`Session.Message.Info`), all sharing `id`/`time` and optionally `metadata`; this
+ * reader type mirrors that union exactly so `toMessageEnvelope` can dispatch on `type` and read each
+ * member's fields directly:
+ *
+ *  1. `agent-switched`    `{ agent, previous? }`                          → `switch` part (agent)
+ *  2. `model-switched`    `{ model, previous? }` (both `Model.Ref`)       → `switch` part (model)
+ *  3. `location-switched` `{ location, projectID?, subpath?, previous? }` → `switch` part (location)
+ *  4. `user`              `{ text, files, agents, skills }`               → text part
+ *  5. `synthetic`         `{ text, description? }`                        → text/system part
+ *  6. `system`            `{ text, description? }`                        → system part
+ *  7. `skill`             `{ skill, name, text }`                         → skill-activation part
+ *  8. `shell`             `{ shellID, command, status, exit?, output? }`  → tool part (shell)
+ *  9. `assistant`         `{ agent, model, content[], snapshot?, finish?, cost?, tokens?, error?, retry? }`
+ *                                                                            → parts + info metadata
+ * 10. `compaction`        `{ status, reason, summary?, recent?, error? }` → text part + info
+ *
+ * Anything the server grows beyond these ten lands on a `fallback` part with a sanitized payload —
+ * never silently dropped.
+ */
+export type V2Message =
+  | V2AgentSwitched
+  | V2ModelSwitched
+  | V2LocationSwitched
+  | V2UserMessage
+  | V2Synthetic
+  | V2SystemMessage
+  | V2SkillMessage
+  | V2ShellMessage
+  | V2AssistantMessage
+  | V2Compaction
+
+/** A plain-English summary line for a `switch` part (e.g. "Switched agent: build → orchestrator").
+ *  Kept on the part so text extraction and message-equality checks keep working; the renderer lane
+ *  localizes display separately. The arrow is dropped when the previous value equals the new one
+ *  (e.g. a model variant change reuses the same ref id). */
+function switchPartText(kind: string, value: string, previous?: string): string {
+  return previous && previous !== value ? `Switched ${kind}: ${previous} → ${value}` : `Switched ${kind}: ${value}`
+}
+
+/** Flattens one v2 message (a discriminated union) into the app's `MessageEnvelope` shape. Every
+ *  known member maps explicitly; anything unknown becomes a `fallback` part instead of vanishing. */
 export function toMessageEnvelope(message: V2Message, sessionID: string): MessageEnvelope {
   const role = message.type === "user" ? "user" : message.type === "assistant" ? "assistant" : "system"
-  const info = {
+  const info: MessageEnvelope["info"] = {
     id: message.id,
     role,
     sessionID,
     time: { created: message.time.created, completed: message.time.completed },
-    type: message.type,
-    compactionStatus: message.type === "compaction" && (message.status === "running" || message.status === "completed" || message.status === "failed")
-      ? message.status as "running" | "completed" | "failed"
-      : undefined
+    type: message.type
   }
 
   const parts: MessagePart[] = []
   if (message.type === "user") {
     parts.push({ id: `${message.id}:text`, type: "text", text: message.text ?? "" })
   } else if (message.type === "assistant") {
+    // Assistant-level metadata (agent/model/finish/error/cost/tokens/retry) rides on `info` so the
+    // transcript header and error banner can show it; `snapshot` is deliberately not rendered yet.
+    if (message.agent) info.agent = message.agent
+    if (message.model?.id) info.model = { id: message.model.id, providerID: message.model.providerID, variant: message.model.variant }
+    if (message.finish) info.finish = message.finish
+    if (message.error) info.error = { type: message.error.type, message: message.error.message }
+    if (message.cost !== undefined) info.cost = message.cost
+    if (message.tokens) info.tokens = { input: message.tokens.input, output: message.tokens.output, reasoning: message.tokens.reasoning }
+    if (message.retry) info.retry = { attempt: message.retry.attempt ?? 0, at: message.retry.at ?? 0, error: message.retry.error }
     for (const [index, part] of (message.content ?? []).entries()) {
-      const partID = typeof part.id === "string" ? part.id : `${message.id}:part:${index}`
       if (part.type === "text") {
-        parts.push({ id: partID, messageID: message.id, type: "text", text: typeof part.text === "string" ? part.text : "" })
+        parts.push({ id: `${message.id}:part:${index}`, messageID: message.id, type: "text", text: typeof part.text === "string" ? part.text : "" })
       } else if (part.type === "reasoning") {
-        parts.push({ id: partID, messageID: message.id, type: "reasoning", text: typeof part.text === "string" ? part.text : "" })
+        parts.push({ id: `${message.id}:part:${index}`, messageID: message.id, type: "reasoning", text: typeof part.text === "string" ? part.text : "" })
       } else if (part.type === "tool") {
-        const tool = part as {
-          id?: string
-          name?: string
-          state?: { status?: string; input?: unknown; content?: Array<{ type?: string; text?: string }>; error?: { message?: string }; metadata?: Record<string, unknown> }
-          time?: { created?: number; ran?: number; completed?: number }
-        }
+        // Only tool content carries its own wire id (`Assistant.Tool.id`); text/reasoning parts are
+        // referenced positionally, exactly as before the typed content union.
+        const partID = part.id ?? `${message.id}:part:${index}`
         parts.push({
           id: partID,
           messageID: message.id,
           type: "tool",
-          tool: tool.name ?? "tool",
-          callID: tool.id,
-          state: toToolState(tool.state ?? {})
+          tool: part.name ?? "tool",
+          callID: part.id,
+          state: toToolState(part.state ?? {})
         })
       }
     }
+  } else if (message.type === "agent-switched") {
+    // Switches carry their own fields on the part; `info` metadata stays reserved for assistant
+    // messages so switch indications never get confused with the assistant that follows them.
+    parts.push({
+      id: `${message.id}:switch`,
+      messageID: message.id,
+      type: "switch",
+      kind: "agent",
+      value: message.agent ?? "",
+      text: switchPartText("agent", message.agent ?? "", message.previous),
+      ...(message.previous ? { previous: message.previous } : {})
+    })
+  } else if (message.type === "model-switched") {
+    // The `previous` member is a full `Model.Ref` on the wire; the part keeps the previous ref id
+    // as its `previous` string and the new ref (with provider/variant) as `model` for rich display.
+    parts.push({
+      id: `${message.id}:switch`,
+      messageID: message.id,
+      type: "switch",
+      kind: "model",
+      value: message.model?.id ?? "",
+      text: switchPartText("model", message.model?.id ?? "", message.previous?.id),
+      ...(message.previous?.id ? { previous: message.previous.id } : {}),
+      ...(message.model?.id ? { model: { id: message.model.id, providerID: message.model.providerID, variant: message.model.variant } } : {})
+    })
+  } else if (message.type === "location-switched") {
+    parts.push({
+      id: `${message.id}:switch`,
+      messageID: message.id,
+      type: "switch",
+      kind: "location",
+      value: message.location?.directory ?? "",
+      text: switchPartText("location", message.location?.directory ?? "", message.previous?.location?.directory),
+      ...(message.previous?.location?.directory ? { previous: message.previous.location.directory } : {}),
+      ...(message.subpath ? { subpath: message.subpath } : {})
+    })
+  } else if (message.type === "synthetic") {
+    if (message.description) {
+      // Synthetic messages carry a model-facing prompt plus a short human summary; with a
+      // description they render like `system` messages (structured), otherwise as plain text.
+      parts.push({ id: `${message.id}:system`, messageID: message.id, type: "system", text: message.text ?? "", description: message.description })
+    } else {
+      parts.push({ id: `${message.id}:text`, type: "text", text: message.text ?? "" })
+    }
+  } else if (message.type === "system") {
+    parts.push({
+      id: `${message.id}:system`,
+      messageID: message.id,
+      type: "system",
+      text: message.text ?? "",
+      ...(message.description ? { description: message.description } : {})
+    })
+  } else if (message.type === "skill") {
+    parts.push({ id: `${message.id}:skill`, messageID: message.id, type: "skill-activation", skillId: message.skill, name: message.name, text: message.text ?? "" })
   } else if (message.type === "shell") {
+    // Shell status maps onto the app's tool lifecycle: `running` stays running, `exited` becomes
+    // completed, and the `timeout`/`killed` outcomes keep their own distinct statuses so the UI can
+    // tell a finished shell from an interrupted one. The exit code rides on `state.exitCode`.
+    const stateStatus = message.status === "running" ? "running"
+      : message.status === "timeout" ? "timeout"
+      : message.status === "killed" ? "killed"
+      : "completed"
     parts.push({
       id: `${message.id}:shell`,
       messageID: message.id,
@@ -187,16 +416,35 @@ export function toMessageEnvelope(message: V2Message, sessionID: string): Messag
       tool: "shell",
       callID: message.id,
       state: {
-        status: message.status === "running" ? "running" : "completed",
+        status: stateStatus,
         input: message.command ? { command: message.command } : undefined,
         output: message.output?.output,
-        time: { start: message.time.created, end: message.time.completed }
+        time: { start: message.time.created, end: message.time.completed },
+        ...(message.exit !== undefined ? { exitCode: message.exit } : {})
       }
     })
-  } else {
-    // Synthetic, system, skill, compaction and switch messages carry a summary line; render them as text.
-    const text = message.text ?? (message.type === "compaction" ? `${message.summary ?? ""}${message.recent ? `\n\n${message.recent}` : ""}` : "")
+  } else if (message.type === "compaction") {
+    info.compactionStatus = message.status === "running" || message.status === "completed" || message.status === "failed"
+      ? message.status
+      : undefined
+    const text = `${message.summary ?? ""}${message.recent ? `\n\n${message.recent}` : ""}`
     if (text) parts.push({ id: `${message.id}:text`, type: "text", text })
+    // A failed compaction carries no summary/recent — only a structured error. Surface it through
+    // `info.error` (same field an errored assistant uses) so the renderer can show why it failed.
+    if (message.status === "failed" && message.error) info.error = { type: message.error.type, message: message.error.message }
+  } else {
+    // Unknown future wire variant — `message` has narrowed to `never` here: keep it visible instead
+    // of silently dropping it. The payload is sanitized so tool bookkeeping and any
+    // credential-looking keys never reach the transcript.
+    const unknown = message as unknown as { id?: string; type?: string; text?: string }
+    parts.push({
+      id: `${unknown.id ?? "unknown"}:fallback`,
+      messageID: unknown.id,
+      type: "fallback",
+      typeName: unknown.type ?? "unknown",
+      ...(unknown.text ? { text: unknown.text } : {}),
+      raw: sanitizeForFallback(message)
+    })
   }
 
   return { info, parts }
