@@ -379,6 +379,37 @@ function switchPartText(kind: string, value: string, previous?: string): string 
   return previous && previous !== value ? `Switched ${kind}: ${previous} → ${value}` : `Switched ${kind}: ${value}`
 }
 
+/** Whether a text string is exactly the synthetic completion envelope a backgrounded shell job
+ *  leaves behind when it finishes: an opening `<shell ...>` tag (single line — the command
+ *  attribute can hold unescaped `"` and `>` like `2>&1`, so the opening tag is matched to
+ *  end-of-line) through a closing `</shell>` with nothing else around it. Only such complete
+ *  wrappers are the injected payload; any other occurrence of the tags is ordinary content and
+ *  must keep rendering as before. */
+export function isShellCompletionWrapper(text: string | undefined | null): boolean {
+  if (!text) return false
+  return /^\s*<shell\b[^\n]*>\s*\n?[\s\S]*<\/shell>\s*$/i.test(text)
+}
+
+/** Parse the raw `<shell ...>...</shell>` envelope a background shell job's completion carries
+ *  (`metadata: { source: "shell", jobID, state }`, injected by the opencode v2 shell tool). The
+ *  `command` attribute value may hold unescaped `"` and `>` (`echo "a>b" && npm x 2>&1`), so it is
+ *  read GREEDILY to the last quote; absent attributes are omitted. Returns null when the text is
+ *  not a complete wrapper. */
+export function parseShellCompletionWrapper(text: string | undefined | null): { state: string; command?: string; output: string } | null {
+  if (!text) return null
+  const whole = /^\s*<shell\b([^\n]*)>\s*\n?([\s\S]*?)<\/shell>\s*$/i.exec(text)
+  if (!whole) return null
+  const attrs = whole[1]
+  const stateMatch = /state="([^"]*)"/i.exec(attrs)
+  const commandMatch = /command="([\s\S]*)"\s*$/.exec(attrs)
+  const parsed: { state: string; command?: string; output: string } = {
+    state: stateMatch ? stateMatch[1] : "",
+    output: whole[2].trim()
+  }
+  if (commandMatch) parsed.command = commandMatch[1]
+  return parsed
+}
+
 /** Flattens one v2 message (a discriminated union) into the app's `MessageEnvelope` shape. Every
  *  known member maps explicitly; anything unknown becomes a `fallback` part instead of vanishing. */
 export function toMessageEnvelope(message: V2Message, sessionID: string): MessageEnvelope {
@@ -483,7 +514,36 @@ export function toMessageEnvelope(message: V2Message, sessionID: string): Messag
         }
       }
     }
-    if (message.description) {
+    if (message.metadata?.source === "shell") {
+      // A background shell job's completion persists as a synthetic message whose text is the raw
+      // `<shell ...>...</shell>` envelope (metadata `{ source: "shell", jobID, state }`). Map it to
+      // the same tool lifecycle a `shell` message produces so the UI renders a shell card — never
+      // the XML as chat prose. Only terminal words map; an unknown/absent state or an unparseable
+      // wrapper falls through to today's text/system mapping (a terminal state is never invented).
+      const parsed = parseShellCompletionWrapper(message.text)
+      if (parsed && (parsed.state === "completed" || parsed.state === "error")) {
+        parts.push({
+          id: `${message.id}:shell`,
+          messageID: message.id,
+          type: "tool",
+          tool: "shell",
+          callID: typeof message.metadata.jobID === "string" ? message.metadata.jobID : message.id,
+          state: {
+            status: parsed.state,
+            input: parsed.command !== undefined ? { command: parsed.command } : undefined,
+            output: parsed.output.length > 0 ? parsed.output : undefined,
+            time: { start: message.time.created, end: message.time.completed }
+          }
+        })
+      } else {
+        // fall through: keep today's mapping below (description → system, else text)
+        if (message.description) {
+          parts.push({ id: `${message.id}:system`, messageID: message.id, type: "system", text: message.text ?? "", description: message.description })
+        } else {
+          parts.push({ id: `${message.id}:text`, type: "text", text: message.text ?? "" })
+        }
+      }
+    } else if (message.description) {
       // Synthetic messages carry a model-facing prompt plus a short human summary; with a
       // description they render like `system` messages (structured), otherwise as plain text.
       parts.push({ id: `${message.id}:system`, messageID: message.id, type: "system", text: message.text ?? "", description: message.description })
