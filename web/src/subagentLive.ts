@@ -1,14 +1,13 @@
-import type { MessageEnvelope } from "./types"
+import type { MessageEnvelope, MessagePart } from "./types"
 // Explicit `.ts` extension: this module is exercised by the Node strip-types test runner, whose
 // ESM resolver does not search for extensionless files (the app's Vite bundler resolves both).
 import { isLiveSubagentStatus, subagentRunFromTool } from "./agentRuns.ts"
 
 /** Live output captured for one running child session (issue #47). The lines are the tail of the
- *  child transcript's text parts (bounded), and `updatedAt` stamps the last successful fetch so a
- *  consumer can judge freshness. Kept in component state keyed by child session id. */
+ *  child transcript's text parts (bounded). Kept in component state keyed by child session id,
+ *  with each entry held referentially stable across refreshes that change nothing. */
 export type ChildOutput = {
   lines: string[]
-  updatedAt: number
 }
 
 /** Merge the metadata of an ephemeral `session.tool.progress` event into the matching tool part of
@@ -65,20 +64,37 @@ export function extractChildOutputLines(messages: readonly MessageEnvelope[], ma
   return lines.length > maxLines ? lines.slice(lines.length - maxLines) : lines
 }
 
+/** The child session ids of every delegated-subagent run currently in flight in a single message's
+ *  parts, deduplicated and in transcript order. Only these children get a live-output fetch:
+ *  terminal runs keep their result card and idle parts have no child work to follow. Shared by the
+ *  transcript-wide scan below and by the memoized bubble renderers, which must agree on exactly
+ *  which articles can be affected by a live child-output update (issue #47). */
+export function liveSubagentChildIDsFromParts(parts: readonly MessagePart[]): string[] {
+  const ids: string[] = []
+  const seen = new Set<string>()
+  for (const part of parts) {
+    if (part.type !== "tool") continue
+    const run = subagentRunFromTool(part)
+    if (run && isLiveSubagentStatus(run.status) && !seen.has(run.childID)) {
+      seen.add(run.childID)
+      ids.push(run.childID)
+    }
+  }
+  return ids
+}
+
 /** The child session ids of every delegated-subagent run currently in flight in a transcript,
- *  deduplicated and in transcript order. Only these children get a live-output fetch: terminal runs
- *  keep their result card and idle parts have no child work to follow. */
+ *  deduplicated and in transcript order — the per-message scan above across every message. Only
+ *  these children get a live-output fetch: terminal runs keep their result card and idle parts
+ *  have no child work to follow. */
 export function liveSubagentChildIDs(messages: readonly MessageEnvelope[]): string[] {
   const ids: string[] = []
   const seen = new Set<string>()
   for (const message of messages) {
-    for (const part of message.parts) {
-      if (part.type !== "tool") continue
-      const run = subagentRunFromTool(part)
-      if (run && isLiveSubagentStatus(run.status) && !seen.has(run.childID)) {
-        seen.add(run.childID)
-        ids.push(run.childID)
-      }
+    for (const childID of liveSubagentChildIDsFromParts(message.parts)) {
+      if (seen.has(childID)) continue
+      seen.add(childID)
+      ids.push(childID)
     }
   }
   return ids

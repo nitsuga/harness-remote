@@ -48,6 +48,7 @@ import {
   applyStreamedToolProgress,
   extractChildOutputLines,
   liveSubagentChildIDs,
+  liveSubagentChildIDsFromParts,
   type ChildOutput
 } from "./subagentLive"
 import { stripMarkdownDirectives } from "./markdownDirectives"
@@ -471,6 +472,12 @@ const MODAL_TITLE_MAX_LENGTH = 80
  * mistaken for a broken one the instant it stops streaming.
  */
 const SESSION_STREAM_QUIET_MS = 12_000
+
+/** Consecutive failed child-transcript fetches after which the live-output capture gives up on a
+ *  child (issue #47): a deleted/pruned child session keeps failing forever while its tool part still
+ *  reads live, and by then the last captured lines are stale anyway. A 404 counts as terminal
+ *  immediately (the child session is gone for good). */
+const CHILD_FETCH_MAX_CONSECUTIVE_FAILURES = 3
 
 function truncateForTitle(text: string, maxLength: number = MODAL_TITLE_MAX_LENGTH): string {
   const singleLine = text.replace(/\s+/g, " ").trim()
@@ -1567,6 +1574,7 @@ function MessagePartView({
   timestamp,
   t,
   subagentContext,
+  childOutput,
   onOpenChildSession,
   openingChildID
 }: {
@@ -1580,6 +1588,10 @@ function MessagePartView({
    *  modal reuse stays untouched — subagent run parts escape action groups, so the modal never
    *  actually hosts one. */
   subagentContext?: SubagentContext
+  /** Live output captured for running children (issue #47), keyed by child session id — only a
+   *  live subagent card reads its own entry. Optional like subagentContext: the action-group modal
+   *  reuse passes neither. */
+  childOutput?: Readonly<Record<string, ChildOutput>>
   onOpenChildSession?: (childID: string) => void
   openingChildID?: string | null
 }) {
@@ -1617,7 +1629,7 @@ function MessagePartView({
       return (
         <SubagentRunCard
           run={mergeSubagentCompletion(subagentRun, completion)}
-          output={subagentContext?.childOutput[subagentRun.childID]}
+          output={childOutput?.[subagentRun.childID]}
           onOpenChildSession={onOpenChildSession ?? (() => undefined)}
           openingChildID={openingChildID ?? null}
           t={t}
@@ -1747,16 +1759,20 @@ function collectSubagentCompletions(messages: readonly MessageEnvelope[]): Map<s
   return completions
 }
 
+/** Referentially stable stand-in for bubbles that host no live subagent tool part: passing this
+ *  instead of the live `childOutput` record keeps the memoized bubble renderers from re-running on
+ *  child-output updates that cannot affect them (issue #47). */
+const EMPTY_CHILD_OUTPUT: Readonly<Record<string, ChildOutput>> = {}
+
 /** Transcript-wide subagent correlation, computed once per rendered-message change and handed down
  *  to the memoized bubble renderers: `completions` lets a working tool card go terminal the moment
  *  the synthetic completion lands (no refetch), and `toolChildIDs` decides whether a completion
- *  still needs its own compact card. `childOutput` carries the live output captured for running
- *  children (issue #47), keyed by child session id — only the affected card reads its own entry,
- *  and the entries are kept referentially stable so unrelated cards stay memoized. */
+ *  still needs its own compact card. The live output captured for running children (issue #47)
+ *  travels as a separate `childOutput` prop so the memoized renderers stay put when only that
+ *  record changes. */
 type SubagentContext = {
   completions: Map<string, SubagentRun>
   toolChildIDs: Set<string>
-  childOutput: Readonly<Record<string, ChildOutput>>
 }
 
 /** Walks a message's parts in order and collapses each run of consecutive thinking/tool-call/edit parts into a
@@ -2524,8 +2540,9 @@ function MessageContextMenu({
 }
 
 /** Renders one run's continuous timeline (see groupRenderedMessages) as a single message bubble, resolving
- *  each item's timestamp to the specific message that produced it. */
-function ConversationRunView({
+ *  each item's timestamp to the specific message that produced it. Memoized like MessageArticle: the bubble
+ *  never re-renders for a live child-output update unless it actually hosts a live subagent tool part. */
+const ConversationRunView = memo(function ConversationRunView({
   items,
   messagesByID,
   sessionID,
@@ -2536,6 +2553,7 @@ function ConversationRunView({
   revertDisabled,
   t,
   subagentContext,
+  childOutput,
   onOpenChildSession,
   openingChildID
 }: {
@@ -2549,6 +2567,7 @@ function ConversationRunView({
   revertDisabled: boolean
   t: Translator
   subagentContext: SubagentContext
+  childOutput: Readonly<Record<string, ChildOutput>>
   onOpenChildSession: (childID: string) => void
   openingChildID: string | null
 }) {
@@ -2603,6 +2622,7 @@ function ConversationRunView({
             timestamp={timestampFor(item.part)}
             t={t}
             subagentContext={subagentContext}
+            childOutput={childOutput}
             onOpenChildSession={onOpenChildSession}
             openingChildID={openingChildID}
           />
@@ -2619,7 +2639,7 @@ function ConversationRunView({
       ))}
     </MessageContextMenu>
   )
-}
+})
 
 /** One message's parts. Memoized on the message object identity so that streaming a token into one message
  *  (which necessarily re-renders MessagesPane) doesn't re-run timeline/diff formatting for every other message
@@ -2637,6 +2657,7 @@ const MessageArticle = memo(function MessageArticle({
   cancellingInboxIDs,
   sendingInboxIDs,
   subagentContext,
+  childOutput,
   onOpenChildSession,
   openingChildID
 }: {
@@ -2652,6 +2673,7 @@ const MessageArticle = memo(function MessageArticle({
   cancellingInboxIDs: ReadonlySet<string>
   sendingInboxIDs: ReadonlySet<string>
   subagentContext: SubagentContext
+  childOutput: Readonly<Record<string, ChildOutput>>
   onOpenChildSession: (childID: string) => void
   openingChildID: string | null
 }) {
@@ -2691,6 +2713,7 @@ const MessageArticle = memo(function MessageArticle({
             timestamp={formatTime(message.info.time.created)}
             t={t}
             subagentContext={subagentContext}
+            childOutput={childOutput}
             onOpenChildSession={onOpenChildSession}
             openingChildID={openingChildID}
           />
@@ -2777,6 +2800,7 @@ const MessagesPane = memo(function MessagesPane({
   cancellingInboxIDs,
   sendingInboxIDs,
   subagentContext,
+  childOutput,
   onOpenChildSession,
   openingChildID
 }: {
@@ -2811,6 +2835,7 @@ const MessagesPane = memo(function MessagesPane({
   cancellingInboxIDs: ReadonlySet<string>
   sendingInboxIDs: ReadonlySet<string>
   subagentContext: SubagentContext
+  childOutput: Readonly<Record<string, ChildOutput>>
   onOpenChildSession: (childID: string) => void
   openingChildID: string | null
 }) {
@@ -2847,9 +2872,18 @@ const MessagesPane = memo(function MessagesPane({
           </div>
         ) : (
           <>
-            {timelineGroups.map((group) =>
-              group.kind === "message" ? (
-                <MessageArticle key={group.message.info.id} message={group.message} config={config} directory={directory} actions={actions} onRevertMessage={onRevertMessage} revertDisabled={revertDisabled} t={t} onCancelQueuedMessage={onCancelQueuedMessage} onSendQueuedMessage={onSendQueuedMessage} cancellingInboxIDs={cancellingInboxIDs} sendingInboxIDs={sendingInboxIDs} subagentContext={subagentContext} onOpenChildSession={onOpenChildSession} openingChildID={openingChildID} />
+            {timelineGroups.map((group) => {
+              // Only bubbles hosting a live subagent tool part can be affected by the captured
+              // child output: they get the live record, everyone else the stable EMPTY_CHILD_OUTPUT
+              // stand-in, so a child-output update re-renders exactly the bubbles that own a live
+              // card and nothing else (issue #47). The scan is the same liveSubagentChildIDs logic
+              // the refresh path uses.
+              const liveChildIDs = group.kind === "message"
+                ? liveSubagentChildIDsFromParts(group.message.parts)
+                : liveSubagentChildIDs([...group.messagesByID.values()])
+              const liveOutput = liveChildIDs.length === 0 ? EMPTY_CHILD_OUTPUT : childOutput
+              return group.kind === "message" ? (
+                <MessageArticle key={group.message.info.id} message={group.message} config={config} directory={directory} actions={actions} onRevertMessage={onRevertMessage} revertDisabled={revertDisabled} t={t} onCancelQueuedMessage={onCancelQueuedMessage} onSendQueuedMessage={onSendQueuedMessage} cancellingInboxIDs={cancellingInboxIDs} sendingInboxIDs={sendingInboxIDs} subagentContext={subagentContext} childOutput={liveOutput} onOpenChildSession={onOpenChildSession} openingChildID={openingChildID} />
               ) : (
                 <ConversationRunView
                   key={group.key}
@@ -2863,11 +2897,12 @@ const MessagesPane = memo(function MessagesPane({
                   revertDisabled={revertDisabled}
                   t={t}
                   subagentContext={subagentContext}
+                  childOutput={liveOutput}
                   onOpenChildSession={onOpenChildSession}
                   openingChildID={openingChildID}
                 />
               )
-            )}
+            })}
             {directory !== undefined &&
               pendingQuestions.map((request) => (
                 <QuestionCard
@@ -3561,10 +3596,15 @@ function App() {
    *  session id and scoped to the selected session's transcript. Updated on the poll cadence and
    *  on SSE refreshes, bounded per child, and cleared once a child's run turns terminal. */
   const [childOutput, setChildOutput] = useState<Readonly<Record<string, ChildOutput>>>({})
-  /** When the live child-output fetch last ran, so the SSE path can refresh it eagerly without
-   *  turning a busy parent stream into a per-refresh child fetch storm (the poll still runs on its
-   *  own 3.5s cadence regardless). */
+  /** When the live child-output fetch last ran. The 2s throttle applies to BOTH the poll and the
+   *  SSE path (a poll tick within 2s of an SSE fetch is skipped), so a busy parent stream cannot
+   *  turn into a per-refresh child fetch storm while a subagent runs alongside it. */
   const lastChildOutputRefreshRef = useRef(0)
+  /** Consecutive failed child-transcript fetches per child session id (issue #47): a child that
+   *  has disappeared keeps failing forever while its tool part still reads live, so after
+   *  CHILD_FETCH_MAX_CONSECUTIVE_FAILURES the fetch loop gives up and drops the stale output.
+   *  Entries are cleared once the child leaves the live set. */
+  const childFetchFailuresRef = useRef(new Map<string, number>())
   const shouldAutoScrollRef = useRef(false)
   const selectedSession = useMemo(
     () => sessions.find((session) => session.id === selectedID) ?? null,
@@ -3714,15 +3754,14 @@ function App() {
   }, [config.backend, messages, optimisticUserMessages, queuedInboxMessages, selectedSession?.revertMessageID])
 
   // Transcript-wide subagent correlation (issues #10/#47): terminal completions carried on
-  // info.subagent, the set of child ids that have a run card, and the live output captured for
-  // running children. Recomputes only when the rendered transcript or the captured output changes,
-  // so the memoized bubble renderers below keep their referential stability across polls that
-  // change nothing.
+  // info.subagent and the set of child ids that have a run card. Recomputed only when the rendered
+  // transcript changes — the live child output travels as a separate `childOutput` prop, so a
+  // child-output update alone never moves this object and the memoized bubble renderers below keep
+  // their referential stability across polls that change nothing.
   const subagentContext = useMemo<SubagentContext>(() => ({
     completions: collectSubagentCompletions(renderedMessages),
-    toolChildIDs: collectSubagentToolChildIDs(renderedMessages),
-    childOutput
-  }), [renderedMessages, childOutput])
+    toolChildIDs: collectSubagentToolChildIDs(renderedMessages)
+  }), [renderedMessages])
 
   const timelineGroups = useMemo(() => groupRenderedMessages(renderedMessages), [renderedMessages])
 
@@ -4446,8 +4485,14 @@ function App() {
     // instead, which keeps the streamed text without ever dropping the messages that came with it.
     if (!messagesHaveSameContent(current, transcript)) {
       shouldAutoScrollRef.current = messagesExtendContent(current, transcript) && isNearMessagesBottom()
-      loadedMessagesRef.current = transcript
-      setMessages((prev) => replaceMessages ? transcript : mergeFetchedMessages(prev, transcript))
+      // Commit ONE snapshot to both state and the ref. The ref is what an SSE-debounced live
+      // refresh reads while this window is open, and it must see the same merged transcript state
+      // will render — the raw fetch lacks the streamed-in reasoning parts and the ephemeral child
+      // session ids that mergeFetchedMessages preserves, so a refresh firing in this window used
+      // to prune the live child's output and skip its fetch (issue #47 placeholder blink).
+      const merged = replaceMessages ? transcript : mergeFetchedMessages(current, transcript)
+      loadedMessagesRef.current = merged
+      setMessages(merged)
     }
     // A prompt the server has durably admitted (in history or still queued in the inbox) retires the
     // app's own optimistic bubble for the same text.
@@ -5112,14 +5157,20 @@ function App() {
   /** Refresh the live output captured for running delegated-subagent children (issue #47). The
    *  child session id is ephemeral while the child runs (it lives only on the progress event and
    *  the tool part's injected metadata), so the child's own transcript is fetched directly — same
-   *  project directory as the parent — and its tail text stored per child, bounded. Runs whose
-   *  status is no longer live drop their entry here too, which retires the stored output the moment
-   *  a child finishes (its result card takes over) or its run card disappears from the transcript.
-   *  The fetch is throttled for the eager SSE path — the 3.5s poll always fetches regardless — so a
-   *  busy parent stream cannot turn into a per-refresh child fetch storm while a subagent runs
-   *  alongside it. */
+   *  project directory as the parent — via a bounded tail request, and its newest text lines stored
+   *  per child. Runs whose status is no longer live drop their entry here too, which retires the
+   *  stored output the moment a child finishes (its result card takes over) or its run card
+   *  disappears from the transcript. The fetch is throttled to at most one per 2s for BOTH callers —
+   *  a poll tick landing within 2s of an SSE fetch is skipped, so the net cadence stays between 2s
+   *  and the poll's 3.5s — which keeps a busy parent stream from turning into a per-refresh child
+   *  fetch storm while a subagent runs alongside it. */
   const refreshLiveSubagentOutput = async () => {
     const liveIDs = liveSubagentChildIDs(loadedMessagesRef.current)
+    // A child that left the live set no longer needs its failure ledger; drop it so the map cannot
+    // grow with the transcript's history of delegated runs.
+    for (const childID of childFetchFailuresRef.current.keys()) {
+      if (!liveIDs.includes(childID)) childFetchFailuresRef.current.delete(childID)
+    }
     setChildOutput((current) => {
       const next: Record<string, ChildOutput> = {}
       for (const id of liveIDs) {
@@ -5134,27 +5185,41 @@ function App() {
     if (Date.now() - lastChildOutputRefreshRef.current < 2000) return
     lastChildOutputRefreshRef.current = Date.now()
     const directory = selectedSessionRef.current?.directory
-    const fetched = await Promise.all(liveIDs.map(async (childID): Promise<[string, string[]] | null> => {
+    const fetched = await Promise.all(liveIDs.map(async (childID): Promise<{ childID: string; lines: string[] } | { childID: string; giveUp: true } | null> => {
+      // A child that already burned its consecutive-failure budget is skipped entirely: the fetch
+      // loop must not keep hammering a session the server keeps rejecting.
+      if ((childFetchFailuresRef.current.get(childID) ?? 0) >= CHILD_FETCH_MAX_CONSECUTIVE_FAILURES) return null
       try {
-        const childMessages = await api.loadMessages(config, childID, directory)
-        return [childID, extractChildOutputLines(childMessages)]
-      } catch {
-        // The child is gone or unreachable for now (deleted, pruned, still settling); keep the
-        // last captured lines — the run's own status keeps the card honest, and a later poll
-        // retries the fetch.
-        return null
+        const childMessages = await api.loadMessagesTail(config, childID, directory)
+        childFetchFailuresRef.current.delete(childID)
+        return { childID, lines: extractChildOutputLines(childMessages) }
+      } catch (error) {
+        const failures = (childFetchFailuresRef.current.get(childID) ?? 0) + 1
+        // A 404 means the child session is gone for good (deleted/pruned) — treat it as terminal
+        // immediately. Any other failure gets CHILD_FETCH_MAX_CONSECUTIVE_FAILURES chances; past
+        // that the loop stops fetching and the stale output is dropped, so a disappeared child
+        // cannot keep the live window retrying forever (the run card's own status stays honest,
+        // and a child that leaves the live set clears the ledger above).
+        const terminal = (error as { status?: number } | undefined)?.status === 404
+        childFetchFailuresRef.current.set(childID, terminal || failures >= CHILD_FETCH_MAX_CONSECUTIVE_FAILURES ? CHILD_FETCH_MAX_CONSECUTIVE_FAILURES : failures)
+        return terminal || failures >= CHILD_FETCH_MAX_CONSECUTIVE_FAILURES ? { childID, giveUp: true } : null
       }
     }))
     setChildOutput((current) => {
-      let next = current
+      let next: Record<string, ChildOutput> = current
       for (const result of fetched) {
         if (!result) continue
-        const [childID, lines] = result
-        const existing = current[childID]
-        if (existing && existing.lines.length === lines.length && existing.lines.every((line, index) => line === lines[index])) {
+        if ("giveUp" in result) {
+          if (!current[result.childID]) continue
+          next = { ...next }
+          delete next[result.childID]
           continue
         }
-        next = { ...next, [childID]: { lines, updatedAt: Date.now() } }
+        const existing = current[result.childID]
+        if (existing && existing.lines.length === result.lines.length && existing.lines.every((line, index) => line === result.lines[index])) {
+          continue
+        }
+        next = { ...next, [result.childID]: { lines: result.lines } }
       }
       return next
     })
@@ -7301,6 +7366,7 @@ function App() {
             onSendQueuedMessage={steerQueuedMessage}
             sendingInboxIDs={steeringInboxIDs}
             subagentContext={subagentContext}
+            childOutput={childOutput}
             onOpenChildSession={handleOpenChildSession}
             openingChildID={openingChildID}
           />

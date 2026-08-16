@@ -327,6 +327,13 @@ const apiV1 = {
     return request<MessageEnvelope[]>(config, withDirectory(`/session/${sessionID}/message?limit=100${refresh}`, directory))
   },
 
+  loadMessagesTail(_config: ServerConfig, _sessionID: string, _directory?: string) {
+    // OpenCode 1 (and the other v1-shaped backends) expose no bounded tail fetch separate from
+    // loadMessages — reject honestly rather than pretending a tail endpoint exists here. Only the
+    // opencode2 client implements loadMessagesTail (issue #47 live child-output capture).
+    return Promise.reject(new Error("Transcript tail fetches are only supported on OpenCode 2 servers"))
+  },
+
   loadLatestMessage(config: ServerConfig, sessionID: string, directory?: string) {
     return request<MessageEnvelope[]>(config, withDirectory(`/session/${sessionID}/message?limit=1`, directory))
   },

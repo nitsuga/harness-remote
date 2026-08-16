@@ -773,7 +773,7 @@ assert.ok(api.includes('`/session/${sessionID}/action`'), 'session action discov
 assert.ok(api.includes('`/session/${sessionID}/action/${encodeURIComponent(actionID)}`'), 'action execution should use a structured endpoint rather than a chat prompt')
 assert.ok(app.includes('capabilities.actions ? api.listActions'), 'the selected session should discover actions only when the bridge supports them')
 assert.ok(app.includes('api.invokeAction(config, selectedSession.id, command, selectedSession.directory)'), 'OMP Undo/Redo should execute through the action API')
-assert.ok(app.includes('replaceMessages ? transcript : mergeFetchedMessages(prev, transcript)'), 'a successful Undo must be allowed to shrink the rendered conversation')
+assert.ok(app.includes('const merged = replaceMessages ? transcript : mergeFetchedMessages(current, transcript)'), 'a successful Undo must be allowed to shrink the rendered conversation')
 assert.ok(app.includes('setExtensionActions(result.actions)'), 'action execution should apply the returned session-specific enabled state immediately')
 assert.ok(app.includes("if (result.applied === false)"), 'only an authoritative no-op result should show no-op feedback')
 assert.ok(app.includes('result.applied !== false'), 'unknown results should still refresh the active ACP context without being called no-ops')
