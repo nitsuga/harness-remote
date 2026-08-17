@@ -4000,10 +4000,14 @@ function App() {
   }
 
   function applyConfig(nextConfig: ServerConfig, profileID = activeProfileID, sourceProfiles = profiles) {
-    replaceMutationContext(null, profileID, nextConfig)
     const serverChanged = configKey(nextConfig) !== configKey(config)
     const profileChanged = profileID !== activeProfileID
+    // configKey covers the connection fields only, so a settings-only persist (e.g. the auto-reap
+    // toggle) leaves both flags false. Bumping the mutation context there would orphan an in-flight
+    // mutation and silently drop its completion UI, so only a real connection change or profile
+    // switch gets a fresh context.
     if (serverChanged || profileChanged) {
+      replaceMutationContext(null, profileID, nextConfig)
       loadSelectedRequestRef.current += 1
       loadModelsRequestRef.current += 1
       autoSelectAttemptedRef.current = false
@@ -4034,7 +4038,11 @@ function App() {
     setDraftConfig(nextConfig)
     setConfig(nextConfig)
     setSettingsNotice({ type: "success", text: t('settings.saved') })
-    setConnectionState("connecting")
+    // Settings-only commits (no connection fields touched, e.g. the auto-reap toggle) keep the
+    // live connection — don't flip the status pill back to "connecting".
+    if (serverChanged || profileChanged) {
+      setConnectionState("connecting")
+    }
     setConnectionMessage(t('connection.connecting'))
     setRuntimeError(null)
     backgroundFailureCountRef.current = 0
