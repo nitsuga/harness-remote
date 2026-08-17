@@ -55,6 +55,8 @@ type TranslationKey =
   | 'settings.readyToTest'
   | 'settings.unsavedChanges'
   | 'settings.noUnsavedChanges'
+  | 'settings.autoReapChildren'
+  | 'settings.autoReapChildrenHint'
   | 'connection.connecting'
   | 'connection.loadingSessions'
   | 'connection.refreshing'
@@ -207,6 +209,7 @@ type TranslationKey =
   | 'detail.subagentLivePlaceholder'
   | 'detail.childSession'
   | 'detail.childSessionOf'
+  | 'detail.childSessionClosed'
   | 'todo.title'
   | 'todo.hide'
   | 'todo.show'
@@ -425,6 +428,8 @@ export const translations: Record<LanguageCode, Partial<Record<TranslationKey, s
     'settings.readyToTest': 'Ready to test these fields.',
     'settings.unsavedChanges': 'Changes will be saved automatically.',
     'settings.noUnsavedChanges': 'Settings are up to date.',
+    'settings.autoReapChildren': 'Auto-close completed child sessions',
+    'settings.autoReapChildrenHint': 'Delete sub-agent child sessions automatically once they finish.',
     'connection.connecting': 'Connecting to backend...',
     'connection.loadingSessions': 'Connecting and loading sessions...',
     'connection.refreshing': 'Refreshing sessions...',
@@ -583,6 +588,7 @@ export const translations: Record<LanguageCode, Partial<Record<TranslationKey, s
     'detail.subagentLivePlaceholder': 'No output yet.',
     'detail.childSession': 'Child session',
     'detail.childSessionOf': 'Child session of {parent}',
+    'detail.childSessionClosed': 'Session closed',
     'todo.title': 'Todo Items',
     'todo.hide': 'Hide',
     'todo.show': 'Show',
@@ -800,6 +806,8 @@ export const translations: Record<LanguageCode, Partial<Record<TranslationKey, s
     'settings.readyToTest': 'Campi pronti per il test.',
     'settings.unsavedChanges': 'Le modifiche saranno salvate automaticamente.',
     'settings.noUnsavedChanges': 'Impostazioni aggiornate.',
+    'settings.autoReapChildren': 'Chiudi automaticamente le sessioni figlie completate',
+    'settings.autoReapChildrenHint': 'Elimina automaticamente le sessioni figlie dei sub-agenti al termine.',
     'connection.connecting': 'Connessione al backend...',
     'connection.loadingSessions': 'Connessione e caricamento sessioni...',
     'connection.refreshing': 'Aggiornamento sessioni...',
@@ -958,6 +966,7 @@ export const translations: Record<LanguageCode, Partial<Record<TranslationKey, s
     'detail.subagentLivePlaceholder': 'Nessun output per ora.',
     'detail.childSession': 'Sessione figlia',
     'detail.childSessionOf': 'Sessione figlia di {parent}',
+    'detail.childSessionClosed': 'Sessione chiusa',
     'todo.title': 'Todo',
     'todo.hide': 'Nascondi',
     'todo.show': 'Mostra',
@@ -1168,6 +1177,8 @@ export const translations: Record<LanguageCode, Partial<Record<TranslationKey, s
     'settings.readyToTest': '欄位已可測試。',
     'settings.unsavedChanges': '變更會自動儲存。',
     'settings.noUnsavedChanges': '設定已更新。',
+    'settings.autoReapChildren': '自動關閉已完成的子工作階段',
+    'settings.autoReapChildrenHint': '子代理工作階段完成後自動刪除。',
     'connection.connecting': '正在連線到後端...',
     'connection.loadingSessions': '正在連線並載入工作階段...',
     'connection.refreshing': '正在重新整理工作階段...',
@@ -1326,6 +1337,7 @@ export const translations: Record<LanguageCode, Partial<Record<TranslationKey, s
     'detail.subagentLivePlaceholder': '尚無輸出。',
     'detail.childSession': '子工作階段',
     'detail.childSessionOf': '{parent} 的子工作階段',
+    'detail.childSessionClosed': '工作階段已關閉',
     'todo.title': '待辦事項',
     'todo.hide': '隱藏',
     'todo.show': '顯示',
@@ -1487,6 +1499,8 @@ export const translations: Record<LanguageCode, Partial<Record<TranslationKey, s
     'settings.readyToTest': '字段已可测试。',
     'settings.unsavedChanges': '更改将自动保存。',
     'settings.noUnsavedChanges': '设置已是最新。',
+    'settings.autoReapChildren': '自动关闭已完成的子会话',
+    'settings.autoReapChildrenHint': '子代理会话完成后自动删除。',
     'connection.connecting': '正在连接到后端...',
     'connection.loadingSessions': '正在连接并加载会话...',
     'connection.refreshing': '正在刷新会话...',
@@ -1643,6 +1657,7 @@ export const translations: Record<LanguageCode, Partial<Record<TranslationKey, s
     'detail.subagentLivePlaceholder': '暂无输出。',
     'detail.childSession': '子会话',
     'detail.childSessionOf': '{parent} 的子会话',
+    'detail.childSessionClosed': '会话已关闭',
     'todo.title': '待办事项',
     'todo.hide': '隐藏',
     'todo.show': '显示',

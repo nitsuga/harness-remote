@@ -7,6 +7,7 @@ import { api, isValidServerConfig } from "./api"
 import {
   createMessageRequestID,
   createSessionRequestID,
+  IndeterminateDeliveryError,
   isAdmissionConflict,
   isIndeterminateDeliveryError
 } from "./opencode2-client"
@@ -57,6 +58,7 @@ import {
 } from "./subagentLive"
 import { stripMarkdownDirectives } from "./markdownDirectives"
 import { createRefreshCoalescer } from "./refresh-coalescer"
+import { reapCandidates, rememberReaped } from "./sessionReaping"
 import { isQuestionActive, isShellCompletionWrapper, applyInboxDelivery, type V2InboxItem } from "./opencode2-mappers"
 import { DEFAULT_HARNESS_CAPABILITIES } from "./backendCapabilities"
 import { BACKEND_CLIENTS } from "./backendClient"
@@ -1467,6 +1469,7 @@ function SubagentRunCard({
   output,
   onOpenChildSession,
   openingChildID,
+  reapedChildIDs,
   t
 }: {
   run: SubagentRun
@@ -1475,12 +1478,16 @@ function SubagentRunCard({
   output?: ChildOutput
   onOpenChildSession: (childID: string) => void
   openingChildID: string | null
+  /** Child sessions already deleted by the auto-reap housekeeping (issue #63). Optional so the
+   *  action-group modal reuse (which passes neither subagentContext nor this) stays untouched. */
+  reapedChildIDs?: ReadonlySet<string>
   t: Translator
 }) {
   const [expanded, setExpanded] = useState(false)
   const [liveExpanded, setLiveExpanded] = useState(false)
   const live = isLiveSubagentStatus(run.status) && run.startedAt !== undefined
   const liveRun = isLiveSubagentStatus(run.status)
+  const reaped = reapedChildIDs?.has(run.childID) ?? false
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
     if (!live) return
@@ -1571,10 +1578,11 @@ function SubagentRunCard({
           type="button"
           className="btn-secondary compact subagent-run-open"
           onClick={() => onOpenChildSession(run.childID)}
-          disabled={openingChildID === run.childID}
-          title={t('detail.openChildSession')}
+          disabled={openingChildID === run.childID || reaped}
+          title={reaped ? t('detail.childSessionClosed') : t('detail.openChildSession')}
+          aria-label={reaped ? t('detail.childSessionClosed') : t('detail.openChildSession')}
         >
-          {openingChildID === run.childID ? t('detail.openingChildSession') : t('detail.openChildSession')}
+          {openingChildID === run.childID ? t('detail.openingChildSession') : reaped ? t('detail.childSessionClosed') : t('detail.openChildSession')}
         </button>
       </div>
     </div>
@@ -1654,6 +1662,7 @@ function MessagePartView({
           output={childOutput?.[subagentRun.childID]}
           onOpenChildSession={onOpenChildSession ?? (() => undefined)}
           openingChildID={openingChildID ?? null}
+          reapedChildIDs={subagentContext?.reapedChildIDs}
           t={t}
         />
       )
@@ -1811,6 +1820,9 @@ const EMPTY_CHILD_OUTPUT: Readonly<Record<string, ChildOutput>> = {}
 type SubagentContext = {
   completions: Map<string, SubagentRun>
   toolChildIDs: Set<string>
+  /** Child sessions already deleted by the auto-reap housekeeping (issue #63), so run cards can
+   *  disable their "Open child session" control once the child is gone. */
+  reapedChildIDs: ReadonlySet<string>
 }
 
 /** Walks a message's parts in order and collapses each run of consecutive thinking/tool-call/edit parts into a
@@ -2672,6 +2684,7 @@ const ConversationRunView = memo(function ConversationRunView({
           run={run}
           onOpenChildSession={onOpenChildSession}
           openingChildID={openingChildID}
+          reapedChildIDs={subagentContext.reapedChildIDs}
           t={t}
         />
       ))}
@@ -2762,6 +2775,7 @@ const MessageArticle = memo(function MessageArticle({
           run={orphanCompletion}
           onOpenChildSession={onOpenChildSession}
           openingChildID={openingChildID}
+          reapedChildIDs={subagentContext.reapedChildIDs}
           t={t}
         />
       )}
@@ -3645,6 +3659,20 @@ function App() {
    *  CHILD_FETCH_MAX_CONSECUTIVE_FAILURES the fetch loop gives up and drops the stale output.
    *  Entries are cleared once the child leaves the live set. */
   const childFetchFailuresRef = useRef(new Map<string, number>())
+  /** Child sessions already deleted by the auto-reap housekeeping (issue #63), as React state so
+   *  the run cards repaint their "Open child session" control once a child is gone. */
+  const [reapedChildIDs, setReapedChildIDs] = useState<ReadonlySet<string>>(() => new Set())
+  /** Synchronous ledger mirror for the housekeeping tick (the delete callbacks resolve after
+   *  renders; reading state there would see a stale set). Updated by markReaped and on render. */
+  const reapedRef = useRef<ReadonlySet<string>>(reapedChildIDs)
+  reapedRef.current = reapedChildIDs
+  /** Child ids whose reap delete is currently in flight; excluded from later ticks so one child can
+   *  never receive two concurrent deletes. */
+  const reapInFlightRef = useRef<Set<string>>(new Set())
+  /** Live config for the reap tick: the poll interval is recreated only when the connection fields
+   *  change, so a closure over `config` would freeze the enabled flag and the target server. */
+  const reapConfigRef = useRef<ServerConfig>(config)
+  reapConfigRef.current = config
   const shouldAutoScrollRef = useRef(false)
   const selectedSession = useMemo(
     () => sessions.find((session) => session.id === selectedID) ?? null,
@@ -3798,15 +3826,18 @@ function App() {
       .filter((message) => message.text || message.parts.some((part) => part.type !== "step-start" && part.type !== "step-finish"))
   }, [config.backend, messages, optimisticUserMessages, queuedInboxMessages, selectedSession?.revertMessageID])
 
-  // Transcript-wide subagent correlation (issues #10/#47): terminal completions carried on
-  // info.subagent and the set of child ids that have a run card. Recomputed only when the rendered
-  // transcript changes — the live child output travels as a separate `childOutput` prop, so a
-  // child-output update alone never moves this object and the memoized bubble renderers below keep
-  // their referential stability across polls that change nothing.
+  // Transcript-wide subagent correlation (issues #10/#47/#63): terminal completions carried on
+  // info.subagent, the set of child ids that have a run card, and the child ids already deleted by
+  // the auto-reap housekeeping. Recomputed only when the rendered transcript or the reaped ledger
+  // changes — the live child output travels as a separate `childOutput` prop, so a child-output
+  // update alone never moves this object and the memoized bubble renderers below keep their
+  // referential stability across polls that change nothing. A reap repaints the memoized bubbles
+  // on purpose: the open-child control must disable the moment its child is gone.
   const subagentContext = useMemo<SubagentContext>(() => ({
     completions: collectSubagentCompletions(renderedMessages),
-    toolChildIDs: collectSubagentToolChildIDs(renderedMessages)
-  }), [renderedMessages])
+    toolChildIDs: collectSubagentToolChildIDs(renderedMessages),
+    reapedChildIDs
+  }), [renderedMessages, reapedChildIDs])
 
   const timelineGroups = useMemo(() => groupRenderedMessages(renderedMessages), [renderedMessages])
 
@@ -3969,10 +4000,14 @@ function App() {
   }
 
   function applyConfig(nextConfig: ServerConfig, profileID = activeProfileID, sourceProfiles = profiles) {
-    replaceMutationContext(null, profileID, nextConfig)
     const serverChanged = configKey(nextConfig) !== configKey(config)
     const profileChanged = profileID !== activeProfileID
+    // configKey covers the connection fields only, so a settings-only persist (e.g. the auto-reap
+    // toggle) leaves both flags false. Bumping the mutation context there would orphan an in-flight
+    // mutation and silently drop its completion UI, so only a real connection change or profile
+    // switch gets a fresh context.
     if (serverChanged || profileChanged) {
+      replaceMutationContext(null, profileID, nextConfig)
       loadSelectedRequestRef.current += 1
       loadModelsRequestRef.current += 1
       autoSelectAttemptedRef.current = false
@@ -4003,7 +4038,11 @@ function App() {
     setDraftConfig(nextConfig)
     setConfig(nextConfig)
     setSettingsNotice({ type: "success", text: t('settings.saved') })
-    setConnectionState("connecting")
+    // Settings-only commits (no connection fields touched, e.g. the auto-reap toggle) keep the
+    // live connection — don't flip the status pill back to "connecting".
+    if (serverChanged || profileChanged) {
+      setConnectionState("connecting")
+    }
     setConnectionMessage(t('connection.connecting'))
     setRuntimeError(null)
     backgroundFailureCountRef.current = 0
@@ -5393,6 +5432,53 @@ function App() {
     })
   }
 
+  /** The latest completion map for the reap tick, mirrored through a ref so the housekeeping
+   *  callbacks never hold a stale transcript (see maybeReapChildren below). */
+  const completionsRef = useRef<ReadonlyMap<string, SubagentRun>>(new Map())
+  useEffect(() => {
+    completionsRef.current = subagentContext.completions
+  }, [subagentContext.completions])
+
+  /** Auto-delete completed subagent child sessions once their terminal completion lands in the
+   *  parent transcript (issue #63). Background housekeeping only: no coordinator, no leases, no
+   *  confirmation, silent errors — the manual delete-session flow, the mutation coordinator, and
+   *  the transcript's own lifetime are untouched. Runs on the same tick as the live child-output
+   *  refresh, so a completion that arrives between polls is reaped on the next flush within ~3.5s
+   *  (or immediately on an SSE event). */
+  const markReaped = (childID: string) => {
+    reapInFlightRef.current.delete(childID)
+    const next = rememberReaped(reapedRef.current, [childID])
+    reapedRef.current = next
+    setReapedChildIDs(next)
+  }
+  const maybeReapChildren = () => {
+    const cfg = reapConfigRef.current
+    // Completions exist only on opencode2 (the v2 synthetic subagent completion), so no extra
+    // backend gate is needed; the per-connection setting (default on) is the only switch.
+    const enabled = cfg.autoReapChildren !== false
+    if (!enabled) return
+    for (const childID of reapCandidates({
+      completions: completionsRef.current,
+      reaped: reapedRef.current,
+      inFlight: reapInFlightRef.current,
+      selectedSessionID: selectedSessionRef.current?.id ?? null,
+      enabled
+    })) {
+      reapInFlightRef.current.add(childID)
+      void api.deleteSession(cfg, childID)
+        .then(() => markReaped(childID))
+        .catch((error: unknown) => {
+          // A 404 (the child is already gone) and an indeterminate answer (the server may have
+          // durably deleted it before the connection broke) both mean there is nothing left to
+          // reap, so the ledger closes the case instead of retrying. Any other error releases the
+          // in-flight slot and leaves the child unmarked, so the next housekeeping tick retries.
+          const alreadyGone = error instanceof IndeterminateDeliveryError || (error as { status?: number }).status === 404
+          if (alreadyGone) markReaped(childID)
+          else reapInFlightRef.current.delete(childID)
+        })
+    }
+  }
+
   const handleSessionsJumpToTop = useCallback(() => {
     window.scrollTo({ top: 0, behavior: "smooth" })
   }, [])
@@ -6189,7 +6275,9 @@ function App() {
   }, [eventStreamState])
 
   useEffect(() => {
-    if (configKey(draftConfig) === configKey(config)) return
+    // configKey covers the connection fields only, so a lone autoReapChildren toggle must still
+    // flow through the same debounced commit (issue #63): compare it explicitly.
+    if (configKey(draftConfig) === configKey(config) && draftConfig.autoReapChildren === config.autoReapChildren) return
     // A half-typed host such as `http://` cannot be turned into a URL. Persisting it
     // would also poison the next launch, so incomplete drafts are simply not applied.
     if (draftConfig.host.trim() && !isValidServerConfig(draftConfig)) return
@@ -6241,6 +6329,7 @@ function App() {
         void refreshSelectedSessionTail(selectedSession.id, selectedSession.directory)
       }
       refreshLiveSubagentOutput().catch(() => undefined)
+      maybeReapChildren()
     }, 3500)
     return () => clearInterval(timer)
   }, [capabilities.agents, capabilities.models, config.backend, config.host, config.port, config.username, config.password, selectedSession?.id, selectedNewSessionDirectory])
@@ -6290,8 +6379,10 @@ function App() {
         }
         // Issue #47: events that touch the selected session are exactly when a running child's
         // output is likely to have moved (the child's own events arrive on this global stream),
-        // so refresh the live output on the same cadence — cheap, and throttled inside.
+        // so refresh the live output on the same cadence — cheap, and throttled inside. A child
+        // completion landing in the transcript is reaped on the same flush (issue #63).
         refreshLiveSubagentOutput().catch(() => undefined)
+        maybeReapChildren()
       }, 250)
     }
     const onEvent = (event: { data: unknown; name: string }) => {
@@ -6409,6 +6500,7 @@ function App() {
           // the selected session stayed blank until the flood stopped. Refresh only the live child
           // output — exactly what these events DO move — and leave the coalesced reload alone.
           refreshLiveSubagentOutput().catch(() => undefined)
+          maybeReapChildren()
         } else {
           scheduleRefresh()
         }
@@ -7283,6 +7375,19 @@ function App() {
               onChange={(event) => setDraftConfig({ ...draftConfig, password: event.target.value })}
               placeholder={t('settings.passwordPlaceholder')}
               autoComplete="current-password"
+            />
+          </label>
+
+          <label htmlFor="auto-reap-children" className="settings-server-field settings-checkbox-field">
+            <span className="settings-checkbox-label">
+              <span>{t('settings.autoReapChildren')}</span>
+              <span className="settings-checkbox-hint">{t('settings.autoReapChildrenHint')}</span>
+            </span>
+            <input
+              id="auto-reap-children"
+              type="checkbox"
+              checked={draftConfig.autoReapChildren !== false}
+              onChange={(event) => setDraftConfig({ ...draftConfig, autoReapChildren: event.target.checked })}
             />
           </label>
           </div>
