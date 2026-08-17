@@ -45,8 +45,9 @@ The remaining work is primarily richer visibility and control. Model execution a
 | 3 | [#47](https://github.com/nitsuga/harness-remote/issues/47) | Show live running-subagent summary with output window | Shipped | #10 |
 | 4 | [#11](https://github.com/nitsuga/harness-remote/issues/11) | Add an authenticated remote PTY terminal | Planned | - |
 | 4 | [#12](https://github.com/nitsuga/harness-remote/issues/12) | Expose task and worktree workflows in the client | Planned | #8, #9 |
+| 4 | [#63](https://github.com/nitsuga/harness-remote/issues/63) | Auto-reap completed subagent child sessions (per-connection setting, default on) | Planned | #60 |
 
-Progress: **8 of 16 shipped**.
+Progress: **8 of 17 shipped**.
 
 ### Reconciliation notes (Aug 16, 2026)
 
@@ -112,6 +113,7 @@ Add larger interactive workflows after supervision state is reliable.
 
 - Authenticated PTY terminal
 - Task and worktree creation, execution, review, finish, and safe cleanup
+- Auto-reap of completed subagent child sessions (per-connection setting, default on; #63)
 
 ## Implementation Principles
 
