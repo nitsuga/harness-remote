@@ -1147,6 +1147,38 @@ assert.match(
 )
 assert.ok(styles.includes('.subagent-run-live-status'), 'the live status row needs its flex treatment')
 
+// --- Auto-reap of completed child sessions (issue #63) -------------------------------------------
+// A terminal completion in the parent transcript is the child's done word, so the client deletes
+// the child session in the background (no coordinator, no lease, no confirmation) on the same
+// housekeeping cadence as the live child-output refresh. These guards pin the wiring at source
+// level: the three reap ticks, the per-connection setting switch, the disabled open-child control,
+// and the silent error swallow (404/indeterminate close the case; anything else retries later).
+const reapTicks = app.match(/maybeReapChildren\(\)/g) ?? []
+assert.ok(reapTicks.length >= 3, 'the reap tick must fire at every live-output housekeeping site (poll, SSE flush, foreign-session branch)')
+assert.match(
+  app,
+  /configKey\(draftConfig\) === configKey\(config\) && draftConfig\.autoReapChildren === config\.autoReapChildren/,
+  'an autoReapChildren toggle must flow through the debounced draft-config commit (configKey omits it)'
+)
+assert.match(app, /checked=\{draftConfig\.autoReapChildren !== false\}/, 'the settings checkbox must bind to the draft config with an on-by-default read')
+assert.match(app, /reapedChildIDs\?\.has\(run\.childID\)/, 'the card must consult the reaped ledger when deciding the open-child control state')
+assert.match(
+  app,
+  /disabled=\{openingChildID === run\.childID \|\| reaped\}/,
+  'the open-child control must disable once its child has been reaped'
+)
+assert.match(
+  app,
+  /api\.deleteSession\(cfg, childID\)[\s\S]*?\.then\(\(\) => markReaped\(childID\)\)[\s\S]*?\.catch\(\(error: unknown\) => \{/,
+  'the reap delete must swallow its outcome in a silent background catch'
+)
+assert.match(
+  app,
+  /error instanceof IndeterminateDeliveryError \|\| \(error as \{ status\?: number \}\)\.status === 404/,
+  'a 404 or indeterminate delete outcome must count as reaped so the tick stops retrying'
+)
+assert.ok(!reapTicks.some((tick) => tick.includes('async')), 'the reap tick must stay synchronous fire-and-forget')
+
 // --- PR #47 fixes: launch notice vs live output, and synthetic wrapper suppression -------------
 // A background launch's tool output is OpenCode's launch notice ("The subagent is working in the
 // background..."). While the run is live the card must show only the live window/placeholder, so

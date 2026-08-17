@@ -46,6 +46,34 @@ malformed[0].config.agentId = { invalid: true }
 storage.set(SERVER_PROFILES_STORAGE_KEY, JSON.stringify(malformed))
 assert.equal(loadServerProfiles()[0].config.agentId, undefined, 'malformed agent ids must not leak from persisted data')
 
+// Auto-reap of completed children (issue #63): a missing field defaults to on, explicit booleans
+// round-trip, and a malformed value falls back to the default instead of leaking.
+const missingReap = JSON.parse(storage.get(SERVER_PROFILES_STORAGE_KEY))
+delete missingReap[0].config.autoReapChildren
+storage.set(SERVER_PROFILES_STORAGE_KEY, JSON.stringify(missingReap))
+assert.equal(loadServerProfiles()[0].config.autoReapChildren, true, 'a missing autoReapChildren must parse as on by default')
+
+const malformedReap = JSON.parse(storage.get(SERVER_PROFILES_STORAGE_KEY))
+malformedReap[0].config.autoReapChildren = 'yes'
+storage.set(SERVER_PROFILES_STORAGE_KEY, JSON.stringify(malformedReap))
+assert.equal(loadServerProfiles()[0].config.autoReapChildren, true, 'a malformed autoReapChildren must parse as the default on')
+
+const disabledReapProfile = {
+  id: 'no-reap',
+  name: 'Keep children',
+  config: { backend: 'opencode', host: 'keep.local', port: 4096, username: 'opencode', password: '', autoReapChildren: false }
+}
+persistServerProfiles([disabledReapProfile], disabledReapProfile.id)
+assert.equal(loadActiveServerProfile(loadServerProfiles()).config.autoReapChildren, false, 'an explicit autoReapChildren: false must round-trip')
+
+const enabledReapProfile = {
+  id: 'reap',
+  name: 'Reap children',
+  config: { backend: 'opencode', host: 'keep.local', port: 4096, username: 'opencode', password: '', autoReapChildren: true }
+}
+persistServerProfiles([enabledReapProfile], enabledReapProfile.id)
+assert.equal(loadActiveServerProfile(loadServerProfiles()).config.autoReapChildren, true, 'an explicit autoReapChildren: true must round-trip')
+
 const storageKeys = readFileSync(new URL('./storageKeys.ts', import.meta.url), 'utf8')
 assert.match(storageKeys, /SERVER_PROFILES_STORAGE_KEY/, 'the crash-recovery reset must clear saved servers')
 assert.match(storageKeys, /ACTIVE_PROFILE_STORAGE_KEY/, 'the crash-recovery reset must clear the selected server')

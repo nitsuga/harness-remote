@@ -134,7 +134,7 @@ const SUBAGENT_KEYS = [
   'detail.openChildSession', 'detail.openingChildSession', 'detail.subagentTask',
   'detail.subagentResult', 'detail.showMore', 'detail.showLess', 'detail.subagentElapsed',
   'detail.subagentLiveOutput', 'detail.subagentLivePlaceholder',
-  'detail.childSession', 'detail.childSessionOf'
+  'detail.childSession', 'detail.childSessionOf', 'detail.childSessionClosed'
 ]
 for (const language of ['en', 'it', 'zh-TW', 'zh-CN']) {
   for (const key of SUBAGENT_KEYS) {
@@ -154,6 +154,26 @@ assert.equal(en('detail.subagentElapsed', { time: '1m 23s' }), 'Elapsed 1m 23s')
 assert.equal(en('detail.childSessionOf', { parent: 'Fix the build' }), 'Child session of Fix the build')
 assert.equal(en('detail.showMore'), 'Show more')
 assert.equal(en('detail.subagentTask'), 'Subagent task')
+assert.equal(en('detail.childSessionClosed'), 'Session closed')
+
+// The auto-reap toggle (issue #63) lives in the settings form next to the connection fields, so
+// its label and hint must exist in every language — same raw-table walk as SUBAGENT_KEYS above.
+const REAP_SETTINGS_KEYS = ['settings.autoReapChildren', 'settings.autoReapChildrenHint']
+for (const language of ['en', 'it', 'zh-TW', 'zh-CN']) {
+  for (const key of REAP_SETTINGS_KEYS) {
+    assert.ok(
+      translations[language][key] !== undefined,
+      `${key} must exist in the ${language} table (no English fallback)`
+    )
+  }
+}
+for (const translator of [en, it, zh, zhCN]) {
+  for (const key of REAP_SETTINGS_KEYS) {
+    assert.notEqual(translator(key), key, `${key} must be translated in every language`)
+  }
+}
+assert.equal(en('settings.autoReapChildren'), 'Auto-close completed child sessions')
+assert.equal(en('settings.autoReapChildrenHint'), 'Delete sub-agent child sessions automatically once they finish.')
 
 // Session-tree expand/collapse (feature: tree-structured session list): the tree toggle is a
 // button whose only accessible name is its aria-label, so both labels must exist in every

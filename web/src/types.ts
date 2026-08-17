@@ -8,6 +8,8 @@ export type ServerConfig = {
   password: string
   /** Present when this profile targets one agent exposed by a Harness machine daemon. */
   agentId?: string
+  /** Auto-delete completed subagent child sessions in the background (issue #63). Absent means on. */
+  autoReapChildren?: boolean
 }
 
 export type HarnessCapabilities = {

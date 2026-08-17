@@ -31,7 +31,8 @@ function defaultConfig(backend: BackendKind): ServerConfig {
     host: "",
     port: backend === "opencode" || backend === "opencode2" ? 4096 : 4097,
     username: backend === "opencode" || backend === "opencode2" ? "opencode" : backend,
-    password: ""
+    password: "",
+    autoReapChildren: true
   }
 }
 
@@ -45,7 +46,8 @@ function parseConfig(value: unknown, fallbackBackend: BackendKind): ServerConfig
   const backend = isBackend(candidate.backend) ? candidate.backend : fallbackBackend
   if (typeof candidate.host !== "string" || typeof candidate.port !== "number" || typeof candidate.username !== "string" || typeof candidate.password !== "string") return null
   const agentId = typeof candidate.agentId === "string" && candidate.agentId.trim() ? candidate.agentId.trim() : undefined
-  return { ...defaultConfig(backend), ...candidate, backend, agentId }
+  const autoReapChildren = typeof candidate.autoReapChildren === "boolean" ? candidate.autoReapChildren : true
+  return { ...defaultConfig(backend), ...candidate, backend, agentId, autoReapChildren }
 }
 
 function profileID(): string {
