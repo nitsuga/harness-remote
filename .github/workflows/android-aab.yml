@@ -127,3 +127,4 @@ jobs:
         with:
           name: harness-remote-aab-v${{ steps.version.outputs.app_version }}
           path: ${{ steps.aab.outputs.path }}
+          retention-days: 7
